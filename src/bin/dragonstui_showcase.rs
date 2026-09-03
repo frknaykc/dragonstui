@@ -4,10 +4,13 @@
 //! network, agents, API keys, external processes, or framework-private hooks.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     io::{self, Write, stdout},
     path::{Path, PathBuf},
-    sync::mpsc::{self, Receiver, Sender},
+    sync::{
+        Arc, Mutex,
+        mpsc::{self, Receiver, Sender},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -255,19 +258,49 @@ fn adapter_rows_from_root(root: &Path) -> Result<Vec<AdapterRow>, DiscoveryError
         .collect())
 }
 
-fn adapter_action_worker(
-    root: &Path,
-) -> (
-    Sender<AdapterManagementAction>,
-    Receiver<Result<String, String>>,
-) {
-    let (actions, action_receiver) = mpsc::channel();
-    let (results, result_receiver) = mpsc::channel();
-    let root = root.to_path_buf();
-    thread::spawn(move || {
-        let mut filesystem_management = None;
-        let daemon_lifecycle = |action: AdapterManagementAction| -> Result<String, String> {
-            let client = local_controller_management_client(&root)
+#[derive(Clone, Default)]
+struct AdapterActionConflictGuard {
+    in_flight: Arc<Mutex<BTreeSet<AdapterId>>>,
+}
+
+impl AdapterActionConflictGuard {
+    fn acquire(&self, id: &AdapterId) -> Result<AdapterActionPermit, String> {
+        let mut in_flight = self
+            .in_flight
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !in_flight.insert(id.clone()) {
+            return Err(format!(
+                "another adapter management operation for {id} is already in progress"
+            ));
+        }
+        Ok(AdapterActionPermit {
+            in_flight: Arc::clone(&self.in_flight),
+            id: id.clone(),
+        })
+    }
+}
+
+struct AdapterActionPermit {
+    in_flight: Arc<Mutex<BTreeSet<AdapterId>>>,
+    id: AdapterId,
+}
+
+impl Drop for AdapterActionPermit {
+    fn drop(&mut self) {
+        self.in_flight
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.id);
+    }
+}
+
+fn execute_adapter_action(root: &Path, action: AdapterManagementAction) -> Result<String, String> {
+    match action {
+        action @ (AdapterManagementAction::Start { .. }
+        | AdapterManagementAction::Stop { .. }
+        | AdapterManagementAction::Restart { .. }) => {
+            let client = local_controller_management_client(root)
                 .map_err(|error| error.to_string())?
                 .ok_or_else(|| "controller daemon is unavailable".to_owned())?;
             let outcome = match action {
@@ -278,21 +311,42 @@ fn adapter_action_worker(
             }
             .map_err(|error| error.to_string())?;
             Ok(format!("{outcome:?}"))
-        };
+        }
+        action => AdapterManagement::new(root.to_path_buf())
+            .execute(action)
+            .map(|outcome| format!("{outcome:?}"))
+            .map_err(|error| error.to_string()),
+    }
+}
+
+fn adapter_action_worker(
+    root: &Path,
+) -> (
+    Sender<AdapterManagementAction>,
+    Receiver<Result<String, String>>,
+) {
+    let (actions, action_receiver) = mpsc::channel::<AdapterManagementAction>();
+    let (results, result_receiver) = mpsc::channel::<Result<String, String>>();
+    let root = root.to_path_buf();
+    thread::spawn(move || {
+        let guard = AdapterActionConflictGuard::default();
         while let Ok(action) = action_receiver.recv() {
-            let result = match action {
-                action @ (AdapterManagementAction::Start { .. }
-                | AdapterManagementAction::Stop { .. }
-                | AdapterManagementAction::Restart { .. }) => daemon_lifecycle(action),
-                action => filesystem_management
-                    .get_or_insert_with(|| AdapterManagement::new(root.clone()))
-                    .execute(action)
-                    .map(|outcome| format!("{outcome:?}"))
-                    .map_err(|error| error.to_string()),
+            let permit = match guard.acquire(action.id()) {
+                Ok(permit) => permit,
+                Err(error) => {
+                    if results.send(Err(error)).is_err() {
+                        break;
+                    }
+                    continue;
+                }
             };
-            if results.send(result).is_err() {
-                break;
-            }
+            let root = root.clone();
+            let results = results.clone();
+            thread::spawn(move || {
+                let result = execute_adapter_action(&root, action);
+                drop(permit);
+                let _ = results.send(result);
+            });
         }
     });
     (actions, result_receiver)
@@ -3382,26 +3436,237 @@ mod tests {
         });
         let (actions, results) = adapter_action_worker(&root);
         let id = AdapterId::new("mock").unwrap();
-        for action in [
-            AdapterManagementAction::Start { id: id.clone() },
-            AdapterManagementAction::Stop { id: id.clone() },
-            AdapterManagementAction::Restart { id },
+        for (action, expected) in [
+            (
+                AdapterManagementAction::Start { id: id.clone() },
+                Ok("Started { id: AdapterId(\"mock\") }".to_owned()),
+            ),
+            (
+                AdapterManagementAction::Stop { id: id.clone() },
+                Ok("Stopped { id: AdapterId(\"mock\") }".to_owned()),
+            ),
+            (
+                AdapterManagementAction::Restart { id },
+                Ok("Restarted { id: AdapterId(\"mock\") }".to_owned()),
+            ),
         ] {
             actions.send(action).unwrap();
+            assert_eq!(
+                results.recv_timeout(Duration::from_secs(1)).unwrap(),
+                expected
+            );
         }
-        let results = (0..3)
-            .map(|_| results.recv_timeout(Duration::from_secs(1)).unwrap())
-            .collect::<Vec<_>>();
         drop(actions);
         assert_eq!(daemon.join().unwrap(), ["start", "stop", "restart"]);
-        assert_eq!(
-            results,
-            [
-                Ok("Started { id: AdapterId(\"mock\") }".to_owned()),
-                Ok("Stopped { id: AdapterId(\"mock\") }".to_owned()),
-                Ok("Restarted { id: AdapterId(\"mock\") }".to_owned()),
-            ]
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn adapter_worker_rejects_same_adapter_mutations_while_other_adapters_continue() {
+        use std::{
+            io::{BufRead, BufReader, Write},
+            net::TcpListener,
+            sync::{Arc, Mutex},
+        };
+
+        let root = std::env::temp_dir().join(format!(
+            "dragonstui-showcase-action-conflicts-{}-{}",
+            std::process::id(),
+            Instant::now().elapsed().as_nanos()
+        ));
+        std::fs::create_dir_all(root.join(".controller")).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::fs::write(
+            root.join(".controller/endpoint.json"),
+            format!(r#"{{"address":"{address}","token":"test-token"}}"#),
+        )
+        .unwrap();
+
+        let (a_started_sender, a_started) = mpsc::channel();
+        let (release_a, release_a_receiver) = mpsc::channel();
+        let operations = Arc::new(Mutex::new(Vec::new()));
+        let daemon = thread::spawn({
+            let operations = Arc::clone(&operations);
+            let a_started_sender = Arc::new(Mutex::new(Some(a_started_sender)));
+            let release_a_receiver = Arc::new(Mutex::new(Some(release_a_receiver)));
+            move || {
+                let mut handlers = Vec::new();
+                for _ in 0..3 {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let operations = Arc::clone(&operations);
+                    let a_started_sender = Arc::clone(&a_started_sender);
+                    let release_a_receiver = Arc::clone(&release_a_receiver);
+                    handlers.push(thread::spawn(move || {
+                        let mut request = String::new();
+                        BufReader::new(&stream).read_line(&mut request).unwrap();
+                        assert!(request.contains("\"token\":\"test-token\""));
+                        assert!(request.contains("\"command\":\"management\""));
+                        let is_start = request.contains("\"operation\":\"start\"");
+                        let is_stop = request.contains("\"operation\":\"stop\"");
+                        let id = if request.contains("\"id\":\"adapter-a\"") {
+                            "adapter-a"
+                        } else if request.contains("\"id\":\"adapter-b\"") {
+                            "adapter-b"
+                        } else {
+                            panic!("unexpected adapter in request: {request}");
+                        };
+                        operations
+                            .lock()
+                            .unwrap()
+                            .push(format!("{id}:{}", if is_start { "start" } else { "stop" }));
+                        if id == "adapter-a" && is_start {
+                            a_started_sender
+                                .lock()
+                                .unwrap()
+                                .take()
+                                .unwrap()
+                                .send(())
+                                .unwrap();
+                            release_a_receiver
+                                .lock()
+                                .unwrap()
+                                .take()
+                                .unwrap()
+                                .recv()
+                                .unwrap();
+                        }
+                        let outcome = if is_start {
+                            "Started"
+                        } else if is_stop {
+                            "Stopped"
+                        } else {
+                            panic!("unexpected lifecycle request: {request}");
+                        };
+                        stream
+                            .write_all(
+                                format!(
+                                    "{{\"status\":{{\"Management\":{{\"result\":\"lifecycle\",\"outcome\":{{\"{outcome}\":{{\"id\":\"{id}\"}}}}}}}},\"error\":null}}\n"
+                                )
+                                .as_bytes(),
+                            )
+                            .unwrap();
+                    }));
+                }
+                for handler in handlers {
+                    handler.join().unwrap();
+                }
+            }
+        });
+
+        let (actions, results) = adapter_action_worker(&root);
+        let adapter_a = AdapterId::new("adapter-a").unwrap();
+        let adapter_b = AdapterId::new("adapter-b").unwrap();
+        actions
+            .send(AdapterManagementAction::Start {
+                id: adapter_a.clone(),
+            })
+            .unwrap();
+        a_started.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        actions
+            .send(AdapterManagementAction::Update {
+                id: adapter_a.clone(),
+                registry_source: "unused-because-the-action-must-conflict".to_owned(),
+            })
+            .unwrap();
+        let conflict = results.recv_timeout(Duration::from_secs(1)).unwrap();
+        let conflict = conflict.expect_err("same-adapter update must be rejected while start runs");
+        assert!(conflict.contains("adapter-a"), "conflict: {conflict}");
+        assert!(
+            conflict.contains("already in progress"),
+            "conflict: {conflict}"
         );
+
+        actions
+            .send(AdapterManagementAction::Start {
+                id: adapter_b.clone(),
+            })
+            .unwrap();
+        assert_eq!(
+            results.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Ok("Started { id: AdapterId(\"adapter-b\") }".to_owned())
+        );
+
+        release_a.send(()).unwrap();
+        assert_eq!(
+            results.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Ok("Started { id: AdapterId(\"adapter-a\") }".to_owned())
+        );
+        actions
+            .send(AdapterManagementAction::Stop { id: adapter_a })
+            .unwrap();
+        assert_eq!(
+            results.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Ok("Stopped { id: AdapterId(\"adapter-a\") }".to_owned())
+        );
+        drop(actions);
+        daemon.join().unwrap();
+        assert_eq!(
+            *operations.lock().unwrap(),
+            ["adapter-a:start", "adapter-b:start", "adapter-a:stop"]
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn adapter_worker_releases_an_adapter_after_a_daemon_failure() {
+        use std::{
+            io::{BufRead, BufReader, Write},
+            net::TcpListener,
+        };
+
+        let root = std::env::temp_dir().join(format!(
+            "dragonstui-showcase-action-failure-{}-{}",
+            std::process::id(),
+            Instant::now().elapsed().as_nanos()
+        ));
+        std::fs::create_dir_all(root.join(".controller")).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::fs::write(
+            root.join(".controller/endpoint.json"),
+            format!(r#"{{"address":"{address}","token":"test-token"}}"#),
+        )
+        .unwrap();
+        let daemon = thread::spawn(move || {
+            let mut operations = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = String::new();
+                BufReader::new(&stream).read_line(&mut request).unwrap();
+                let response = if request.contains("\"operation\":\"start\"") {
+                    operations.push("start");
+                    "{\"status\":null,\"error\":\"forced daemon failure\"}\n".to_owned()
+                } else if request.contains("\"operation\":\"restart\"") {
+                    operations.push("restart");
+                    "{\"status\":{\"Management\":{\"result\":\"lifecycle\",\"outcome\":{\"Restarted\":{\"id\":\"adapter-a\"}}}},\"error\":null}\n".to_owned()
+                } else {
+                    panic!("unexpected typed lifecycle request: {request}");
+                };
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+            operations
+        });
+
+        let (actions, results) = adapter_action_worker(&root);
+        let id = AdapterId::new("adapter-a").unwrap();
+        actions
+            .send(AdapterManagementAction::Start { id: id.clone() })
+            .unwrap();
+        let failure = results.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(failure.is_err());
+        assert!(failure.unwrap_err().contains("forced daemon failure"));
+
+        actions
+            .send(AdapterManagementAction::Restart { id })
+            .unwrap();
+        assert_eq!(
+            results.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Ok("Restarted { id: AdapterId(\"adapter-a\") }".to_owned())
+        );
+        drop(actions);
+        assert_eq!(daemon.join().unwrap(), ["start", "restart"]);
         std::fs::remove_dir_all(root).unwrap();
     }
 
