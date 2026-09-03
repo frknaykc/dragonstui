@@ -1,0 +1,29 @@
+[package]
+name = "dragons_tui"
+version = "0.1.0"
+edition = "2024"
+description = "Explicit immediate-mode Rust terminal UI framework with an adapter host"
+license = "MIT"
+repository = "https://github.com/frknaykc/dragonstui"
+homepage = "https://github.com/frknaykc/dragonstui"
+keywords = ["rust", "tui", "terminal", "developer-tools"]
+categories = ["command-line-interface", "command-line-utilities"]
+default-run = "dragons_tui"
+
+[[bin]]
+name = "dragonstui-showcase"
+path = "src/bin/dragonstui_showcase.rs"
+required-features = ["adapter-showcase"]
+
+[workspace]
+members = [".", "crates/dragonstui-adapter-host"]
+resolver = "3"
+
+[features]
+adapter-showcase = ["dep:dragonstui-adapter-host"]
+
+[dependencies]
+crossterm = "0.29.0"
+unicode-width = "0.2.2"
+unicode-segmentation = "1.13.3"
+dragonstui-adapter-host = { path = "crates/dragonstui-adapter-host", optional = true }
