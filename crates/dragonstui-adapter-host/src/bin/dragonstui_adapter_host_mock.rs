@@ -1,7 +1,9 @@
 use std::{
     collections::HashSet,
     env,
+    fs::{self, OpenOptions},
     io::{self, BufRead, Write},
+    path::PathBuf,
     process, thread,
     time::Duration,
 };
@@ -25,6 +27,10 @@ fn main() {
         }
         "crash" => process::exit(23),
         "timeout" => thread::sleep(Duration::from_secs(30)),
+        "hold" => {
+            hold_before_handshake(&options);
+            protocol_mode(MockBehavior::Normal, &options.id);
+        }
         "duplicate-capabilities" => protocol_mode(MockBehavior::DuplicateCapabilities, &options.id),
         "empty-capabilities" => protocol_mode(MockBehavior::EmptyCapabilities, &options.id),
         "events" => protocol_mode(MockBehavior::Events, &options.id),
@@ -42,15 +48,53 @@ fn parse_options() -> MockOptions {
     let mut options = MockOptions {
         mode: "normal".to_owned(),
         id: "mock".to_owned(),
+        hold_ready: None,
+        hold_release: None,
+        launch_marker: None,
     };
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--mode" => options.mode = args.next().unwrap_or_else(|| "normal".to_owned()),
             "--id" => options.id = args.next().unwrap_or_else(|| "mock".to_owned()),
+            "--hold-ready" => options.hold_ready = args.next().map(PathBuf::from),
+            "--hold-release" => options.hold_release = args.next().map(PathBuf::from),
+            "--launch-marker" => options.launch_marker = args.next().map(PathBuf::from),
             _ => {}
         }
     }
     options
+}
+
+fn hold_before_handshake(options: &MockOptions) {
+    let Some(ready) = options.hold_ready.as_deref() else {
+        eprintln!("hold mode requires --hold-ready");
+        process::exit(64);
+    };
+    let Some(release) = options.hold_release.as_deref() else {
+        eprintln!("hold mode requires --hold-release");
+        process::exit(64);
+    };
+    let Some(launch_marker) = options.launch_marker.as_deref() else {
+        eprintln!("hold mode requires --launch-marker");
+        process::exit(64);
+    };
+    if let Some(parent) = ready.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    if let Some(parent) = launch_marker.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(launch_marker)
+        .unwrap()
+        .write_all(format!("{}\n", options.id).as_bytes())
+        .unwrap();
+    fs::write(ready, "ready\n").unwrap();
+    while !release.is_file() {
+        thread::sleep(Duration::from_millis(5));
+    }
 }
 
 fn process_mode() {
@@ -263,4 +307,7 @@ fn _assert_json_value_dependency(_: Value) {}
 struct MockOptions {
     mode: String,
     id: String,
+    hold_ready: Option<PathBuf>,
+    hold_release: Option<PathBuf>,
+    launch_marker: Option<PathBuf>,
 }

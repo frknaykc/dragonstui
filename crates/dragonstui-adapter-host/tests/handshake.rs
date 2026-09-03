@@ -1,4 +1,9 @@
-use std::{path::PathBuf, time::Duration};
+use std::{
+    fs,
+    path::PathBuf,
+    thread,
+    time::{Duration, Instant},
+};
 
 use dragonstui_adapter_host::{
     AdapterId, AdapterManifest, AdapterRuntime, AdapterRuntimeConfig, AdapterStartError,
@@ -72,4 +77,44 @@ fn handshake_rejects_incompatible_failed_crashed_and_timeout_adapters() {
             _ => unreachable!(),
         }
     }
+}
+
+#[test]
+fn handshake_waits_for_mock_hold_release_marker() {
+    let root = std::env::temp_dir().join(format!(
+        "dragonstui-adapter-host-mock-hold-{}-{}",
+        std::process::id(),
+        Instant::now().elapsed().as_nanos()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let ready = root.join("ready");
+    let release = root.join("release");
+    let launches = root.join("launches");
+    let hold_config = config("hold")
+        .arg("--hold-ready")
+        .arg(ready.display().to_string())
+        .arg("--hold-release")
+        .arg(release.display().to_string())
+        .arg("--launch-marker")
+        .arg(launches.display().to_string());
+    let runtime = thread::spawn(move || AdapterRuntime::start(manifest("mock"), hold_config));
+
+    let deadline = Instant::now() + Duration::from_millis(500);
+    while !ready.is_file() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
+    if !ready.is_file() {
+        let _ = runtime.join();
+        fs::remove_dir_all(root).unwrap();
+        panic!("hold mock did not publish readiness");
+    }
+    assert!(
+        !runtime.is_finished(),
+        "handshake completed before the release marker"
+    );
+    fs::write(&release, "release").unwrap();
+    let runtime = runtime.join().unwrap().unwrap();
+    assert_eq!(runtime.state(), AdapterState::Running);
+    assert_eq!(fs::read_to_string(&launches).unwrap(), "mock\n");
+    fs::remove_dir_all(root).unwrap();
 }

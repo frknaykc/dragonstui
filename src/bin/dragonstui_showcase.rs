@@ -567,6 +567,9 @@ struct Showcase {
     adapter_discovery_error: Option<String>,
     adapter_diagnostics: BTreeMap<String, ControllerIpcDiagnostics>,
     adapter_controller_error: Option<String>,
+    adapter_diagnostics_sender: Option<Sender<AdapterDiagnosticsSnapshot>>,
+    adapter_diagnostics_results: Option<Receiver<AdapterDiagnosticsSnapshot>>,
+    adapter_diagnostics_refresh_in_flight: bool,
     last_adapter_diagnostics_refresh: Instant,
     adapter_action_sender: Option<Sender<AdapterManagementAction>>,
     adapter_action_results: Option<Receiver<Result<String, String>>>,
@@ -578,6 +581,8 @@ struct Showcase {
     animation_enabled: bool,
     hits: HitRegions,
 }
+
+type AdapterDiagnosticsSnapshot = (BTreeMap<String, ControllerIpcDiagnostics>, Option<String>);
 
 impl Showcase {
     #[cfg(test)]
@@ -614,6 +619,12 @@ impl Showcase {
             .map_or((None, None), |(sender, receiver)| {
                 (Some(sender), Some(receiver))
             });
+        let (adapter_diagnostics_sender, adapter_diagnostics_results) = if adapter_root.is_some() {
+            let (sender, receiver) = mpsc::channel();
+            (Some(sender), Some(receiver))
+        } else {
+            (None, None)
+        };
         let mut showcase = Self {
             phase: Phase::Splash,
             started,
@@ -646,6 +657,9 @@ impl Showcase {
             adapter_discovery_error,
             adapter_diagnostics: BTreeMap::new(),
             adapter_controller_error: None,
+            adapter_diagnostics_sender,
+            adapter_diagnostics_results,
+            adapter_diagnostics_refresh_in_flight: false,
             last_adapter_diagnostics_refresh: started,
             adapter_action_sender,
             adapter_action_results,
@@ -662,28 +676,57 @@ impl Showcase {
     }
 
     fn refresh_adapter_diagnostics(&mut self) {
-        self.adapter_diagnostics.clear();
-        self.adapter_controller_error = None;
+        if self.adapter_diagnostics_refresh_in_flight {
+            return;
+        }
         let Some(root) = self.adapter_root.clone() else {
             return;
         };
-        for id in self.adapter_rows.iter().filter_map(|row| {
-            AdapterId::new(&row.id)
-                .ok()
-                .map(|adapter_id| (row.id.clone(), adapter_id))
-        }) {
-            match local_controller_diagnostics(&root, &id.1) {
-                Ok(Some(diagnostics)) => {
-                    self.adapter_diagnostics.insert(id.0, diagnostics);
-                }
-                Ok(None) => {}
-                Err(error) if self.adapter_controller_error.is_none() => {
-                    self.adapter_controller_error = Some(error.to_string());
-                }
-                Err(_) => {}
-            }
-        }
+        let Some(sender) = self.adapter_diagnostics_sender.as_ref().cloned() else {
+            return;
+        };
+        let adapter_ids = self
+            .adapter_rows
+            .iter()
+            .filter_map(|row| {
+                AdapterId::new(&row.id)
+                    .ok()
+                    .map(|adapter_id| (row.id.clone(), adapter_id))
+            })
+            .collect::<Vec<_>>();
+        self.adapter_diagnostics_refresh_in_flight = true;
         self.last_adapter_diagnostics_refresh = Instant::now();
+        thread::spawn(move || {
+            let mut diagnostics = BTreeMap::new();
+            let mut controller_error = None;
+            for (id, adapter_id) in adapter_ids {
+                match local_controller_diagnostics(&root, &adapter_id) {
+                    Ok(Some(detail)) => {
+                        diagnostics.insert(id, detail);
+                    }
+                    Ok(None) => {}
+                    Err(error) if controller_error.is_none() => {
+                        controller_error = Some(error.to_string());
+                    }
+                    Err(_) => {}
+                }
+            }
+            let _ = sender.send((diagnostics, controller_error));
+        });
+    }
+
+    fn drain_adapter_diagnostics_results(&mut self) -> bool {
+        let completed = self
+            .adapter_diagnostics_results
+            .as_ref()
+            .and_then(|results| std::iter::from_fn(|| results.try_recv().ok()).last());
+        let Some((diagnostics, controller_error)) = completed else {
+            return false;
+        };
+        self.adapter_diagnostics = diagnostics;
+        self.adapter_controller_error = controller_error;
+        self.adapter_diagnostics_refresh_in_flight = false;
+        true
     }
 
     fn selected_adapter_id(&mut self) -> Option<AdapterId> {
@@ -745,8 +788,9 @@ impl Showcase {
                 }
             }
             Phase::Showcase => {
-                let mut changed = self.drain_adapter_action_results()
-                    || (self.animation_enabled && self.spinner.update(now));
+                let mut changed = self.drain_adapter_diagnostics_results();
+                changed |= self.drain_adapter_action_results();
+                changed |= self.animation_enabled && self.spinner.update(now);
                 if self.section == Section::Adapters
                     && now.saturating_duration_since(self.last_adapter_diagnostics_refresh)
                         >= Duration::from_secs(1)
@@ -3671,6 +3715,97 @@ mod tests {
     }
 
     #[test]
+    fn adapter_conflict_result_does_not_block_the_tui_on_held_diagnostics() {
+        use std::{
+            io::{BufRead, BufReader, Write},
+            net::TcpListener,
+            sync::mpsc,
+        };
+
+        let root = std::env::temp_dir().join(format!(
+            "dragonstui-showcase-conflict-diagnostics-{}-{}",
+            std::process::id(),
+            Instant::now().elapsed().as_nanos()
+        ));
+        let adapter = root.join("adapter-a");
+        std::fs::create_dir_all(adapter.join("bin")).unwrap();
+        std::fs::write(
+            adapter.join("adapter.json"),
+            r#"{"id":"adapter-a","name":"Adapter A","version":"0.1.0","protocol_version":1,"executable":"bin/mock"}"#,
+        )
+        .unwrap();
+        std::fs::write(adapter.join("bin/mock"), "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            adapter.join("bin/mock"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join(".controller")).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::fs::write(
+            root.join(".controller/endpoint.json"),
+            format!(r#"{{"address":"{address}","token":"test-token"}}"#),
+        )
+        .unwrap();
+        let (start_ready, start_started) = mpsc::channel();
+        let (release_start, start_release) = mpsc::channel();
+        let daemon = thread::spawn(move || {
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = String::new();
+                BufReader::new(&stream).read_line(&mut request).unwrap();
+                if request.contains("\"operation\":\"diagnostics\"") {
+                    stream.write_all(b"{\"status\":{\"Management\":{\"result\":\"diagnostics\",\"diagnostics\":{\"adapter_id\":\"adapter-a\",\"version\":\"0.1.0\",\"protocol\":1,\"state\":\"stopped\",\"pid\":null,\"uptime_millis\":null,\"capabilities\":[],\"last_error\":null,\"stderr_tail\":\"\",\"stderr_dropped_line_count\":0,\"dropped_event_count\":0,\"pending_request_count\":0,\"response_queue_capacity\":8,\"response_queue_len\":0,\"event_queue_capacity\":8,\"event_queue_len\":0}}}},\"error\":null}\n").unwrap();
+                } else {
+                    assert!(request.contains("\"operation\":\"start\""));
+                    start_ready.send(()).unwrap();
+                    start_release.recv().unwrap();
+                    stream.write_all(b"{\"status\":{\"Management\":{\"result\":\"lifecycle\",\"outcome\":{\"Started\":{\"id\":\"adapter-a\"}}}},\"error\":null}\n").unwrap();
+                }
+            }
+        });
+        let mut showcase = Showcase::with_adapter_root(Instant::now(), Some(&root));
+        showcase.handle_key(key(KeyCode::Enter));
+        showcase.queue_adapter_action(AdapterManagementAction::Start {
+            id: AdapterId::new("adapter-a").unwrap(),
+        });
+        start_started.recv_timeout(Duration::from_secs(1)).unwrap();
+        showcase.queue_adapter_action(AdapterManagementAction::Start {
+            id: AdapterId::new("adapter-a").unwrap(),
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut conflict_visible = false;
+        let mut largest_advance = Duration::ZERO;
+        while Instant::now() < deadline {
+            let before = Instant::now();
+            showcase.advance(before);
+            largest_advance = largest_advance.max(before.elapsed());
+            if showcase
+                .adapter_action_status
+                .as_deref()
+                .is_some_and(|status| status.contains("already in progress"))
+            {
+                conflict_visible = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        release_start.send(()).unwrap();
+        drop(showcase);
+        daemon.join().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(conflict_visible, "conflict result was not rendered");
+        assert!(
+            largest_advance < Duration::from_millis(100),
+            "draining the conflict blocked the TUI for {largest_advance:?}"
+        );
+    }
+
+    #[test]
     fn adapter_detail_refresh_uses_typed_daemon_diagnostics() {
         use std::{
             io::{BufRead, BufReader, Write},
@@ -3745,8 +3880,19 @@ mod tests {
             operations
         });
         let mut showcase = Showcase::with_adapter_root(Instant::now(), Some(&root));
-        assert_eq!(showcase.adapter_diagnostics["mock"].state, "stopped");
         showcase.handle_key(key(KeyCode::Enter));
+        for _ in 0..100 {
+            showcase.advance(Instant::now());
+            if showcase
+                .adapter_diagnostics
+                .get("mock")
+                .is_some_and(|diagnostics| diagnostics.state == "stopped")
+            {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(showcase.adapter_diagnostics["mock"].state, "stopped");
         showcase.queue_adapter_action(AdapterManagementAction::Start {
             id: AdapterId::new("mock").unwrap(),
         });
