@@ -38,19 +38,25 @@ class PtyScreen:
         self.y = 0
         self.saved_cursor = (0, 0)
         self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        self.pending = bytearray()
 
     def feed(self, data: bytes) -> None:
+        if self.pending:
+            data = bytes(self.pending) + data
+            self.pending.clear()
         index = 0
         while index < len(data):
             byte = data[index]
             if byte == 0x1B:
                 if index + 1 >= len(data):
+                    self.pending.extend(data[index:])
                     return
                 if data[index + 1] == ord("["):
                     end = index + 2
                     while end < len(data) and not 0x40 <= data[end] <= 0x7E:
                         end += 1
                     if end >= len(data):
+                        self.pending.extend(data[index:])
                         return
                     self._csi(data[index + 2 : end].decode("ascii", "ignore"), chr(data[end]))
                     index = end + 1
@@ -63,6 +69,7 @@ class PtyScreen:
                             break
                         end += 1
                     else:
+                        self.pending.extend(data[index:])
                         return
                     if end < len(data) and data[end] == 0x07:
                         end += 1
@@ -127,7 +134,21 @@ def rendered_text(output: bytearray) -> str:
     return ANSI_SEQUENCE.sub("", output.decode("utf-8", errors="replace"))
 
 
+SCREEN_CACHE: dict[int, tuple[PtyScreen, int]] = {}
+
+
 def visible_text(output: bytearray) -> str:
+    key = id(output)
+    screen, parsed = SCREEN_CACHE.get(key, (PtyScreen(), 0))
+    if len(output) < parsed:
+        screen, parsed = PtyScreen(), 0
+    if len(output) > parsed:
+        screen.feed(bytes(output[parsed:]))
+        SCREEN_CACHE[key] = (screen, len(output))
+    return screen.text()
+
+
+def fully_reconstructed_visible_text(output: bytearray) -> str:
     screen = PtyScreen()
     screen.feed(bytes(output))
     return screen.text()
@@ -181,7 +202,10 @@ def wait_for_text(fd: int, output: bytearray, needle: str, timeout: float, messa
         if remaining <= 0:
             break
         read_available(fd, output, min(0.05, remaining))
-    raise RuntimeError(message)
+    visible = fully_reconstructed_visible_text(output)
+    if needle in visible:
+        return
+    raise RuntimeError(f"{message}; rendered screen tail: {visible[-1200:]!r}")
 
 
 def require(condition: bool, message: str) -> None:
@@ -457,8 +481,8 @@ def main() -> int:
             wait_for_text(master, output, "Adapter ID: adapter-b", 1.0, "keyboard table navigation did not select adapter-b")
             send(master, output, b"s")
             wait_for_text(master, output, "Failed:", 3.0, "controlled lifecycle failure was not presented by the TUI")
-            wait_for_text(master, output, "State: failed", 2.0, "failure diagnostics did not render")
-            wait_for_text(master, output, "adapter handshake timed out", 2.0, "failure diagnostics did not render the daemon error")
+            wait_for_text(master, output, "State: failed", 6.0, "failure diagnostics did not render")
+            wait_for_text(master, output, "adapter handshake timed out", 6.0, "failure diagnostics did not render the daemon error")
             send(master, output, b"\x1b[A")
             send(master, output, b"t")
             wait_for_text(master, output, "Completed: Stopped", 2.0, "TUI did not remain interactive after a management failure")
@@ -591,11 +615,16 @@ def main() -> int:
         )
         prove_pty_usable_after_exit(master, slave_name, output)
     finally:
-        if process.poll() is None:
-            process.kill()
-            process.wait(timeout=2)
-        os.close(master)
-        cleanup_m42_fixture(fixture, daemon, endpoint)
+        try:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+        finally:
+            os.close(master)
+            cleanup_m42_fixture(fixture, daemon, endpoint)
 
     print(
         "Showcase PTY passed: six-second splash/animation, pages, settings, focus, keyboard, mouse, palette, modal, "

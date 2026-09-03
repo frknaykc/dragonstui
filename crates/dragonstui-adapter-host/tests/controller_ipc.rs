@@ -362,6 +362,35 @@ fn typed_management_client_controls_the_same_daemon_state_as_legacy_ipc() {
 }
 
 #[test]
+fn typed_management_client_waits_for_a_lifecycle_timeout_response() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let id = AdapterId::new("mock").unwrap();
+    let response = serde_json::json!({
+        "status": ControllerIpcStatus::Management(ControllerManagementResponse::Lifecycle {
+            outcome: AdapterManagementOutcome::Started { id: id.clone() },
+        }),
+        "error": null,
+    });
+    let worker = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = String::new();
+        BufReader::new(&stream).read_line(&mut request).unwrap();
+        thread::sleep(Duration::from_millis(2100));
+        serde_json::to_writer(&mut stream, &response).unwrap();
+        stream.write_all(b"\n").unwrap();
+    });
+
+    assert_eq!(
+        ControllerManagementClient::new(address, "correct-token")
+            .start(&id)
+            .unwrap(),
+        AdapterManagementOutcome::Started { id }
+    );
+    worker.join().unwrap();
+}
+
+#[test]
 fn typed_management_client_distinguishes_auth_unknown_connection_and_protocol_errors() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();

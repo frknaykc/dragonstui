@@ -104,7 +104,7 @@ fn rpc_accepts_out_of_order_responses_records_unknown_responses_and_cleans_pendi
     runtime.pump(Duration::from_secs(2)).unwrap();
     assert_eq!(runtime.unknown_response_count(), 1);
 
-    let mut runtime = start_runtime("crash-after-handshake");
+    let mut runtime = start_runtime("crash-on-request");
     let id = runtime
         .send_request(
             Capability::new("test.echo").unwrap(),

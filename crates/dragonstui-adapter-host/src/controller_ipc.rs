@@ -387,7 +387,7 @@ impl ControllerClient {
         let mut stream = TcpStream::connect_timeout(&self.address, Duration::from_millis(100))
             .map_err(ControllerIpcError::Connect)?;
         stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
+            .set_read_timeout(Some(Duration::from_secs(5)))
             .map_err(ControllerIpcError::Read)?;
         stream
             .set_write_timeout(Some(Duration::from_secs(2)))
