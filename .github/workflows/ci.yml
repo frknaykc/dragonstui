@@ -22,7 +22,7 @@ jobs:
       - name: Workspace check
         run: cargo check --workspace
       - name: Workspace tests
-        run: cargo test --workspace
+        run: cargo test --workspace --features adapter-showcase
       - name: Workspace clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Showcase check
