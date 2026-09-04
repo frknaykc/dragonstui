@@ -223,6 +223,7 @@ enum ObservabilityMode {
     Heatmap,
     Status,
     Timeline,
+    Errors,
 }
 
 impl AdapterViewState {
@@ -1056,6 +1057,60 @@ fn timeline_projection(live_data: &LiveDataState) -> Vec<TimelineEntry> {
     entries
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ErrorGroup {
+    key: String,
+    message: String,
+    signature: Option<String>,
+    count: usize,
+    first_sequence: u64,
+    first_timestamp_millis: Option<u64>,
+    last_sequence: u64,
+    last_timestamp_millis: Option<u64>,
+    stack: Vec<String>,
+}
+
+/// A transient retained-history grouping. Signature is preferred, with the message as
+/// the deterministic fallback; no stack frame parsing or lifetime accumulator exists.
+fn error_groups(live_data: &LiveDataState) -> Vec<ErrorGroup> {
+    let mut groups = BTreeMap::<String, ErrorGroup>::new();
+    for entry in &live_data.history {
+        if let LiveDataMessage::Event(AdapterEvent {
+            observation:
+                Some(Observation::Error {
+                    message,
+                    signature,
+                    stack,
+                    timestamp_millis,
+                }),
+            ..
+        }) = &entry.message
+        {
+            let key = signature.clone().unwrap_or_else(|| message.clone());
+            groups
+                .entry(key.clone())
+                .and_modify(|group| {
+                    group.count = group.count.saturating_add(1);
+                    group.last_sequence = entry.sequence;
+                    group.last_timestamp_millis = *timestamp_millis;
+                    group.stack = stack.clone();
+                })
+                .or_insert_with(|| ErrorGroup {
+                    key,
+                    message: message.clone(),
+                    signature: signature.clone(),
+                    count: 1,
+                    first_sequence: entry.sequence,
+                    first_timestamp_millis: *timestamp_millis,
+                    last_sequence: entry.sequence,
+                    last_timestamp_millis: *timestamp_millis,
+                    stack: stack.clone(),
+                });
+        }
+    }
+    groups.into_values().collect()
+}
+
 impl Default for LiveDataState {
     fn default() -> Self {
         Self::with_history_capacity(LIVE_HISTORY_CAPACITY)
@@ -1255,6 +1310,8 @@ struct Showcase {
     observability_viewport: ViewportState,
     timeline_detail_viewport: ViewportState,
     timeline_selected_sequence: Option<u64>,
+    error_detail_viewport: ViewportState,
+    error_selected_key: Option<String>,
     palette: Option<CommandPalette>,
     modal_open: bool,
     focus_before_modal: Option<FocusId>,
@@ -1372,6 +1429,8 @@ impl Showcase {
             observability_viewport: ViewportState::new(),
             timeline_detail_viewport: ViewportState::new(),
             timeline_selected_sequence: None,
+            error_detail_viewport: ViewportState::new(),
+            error_selected_key: None,
             palette: None,
             modal_open: false,
             focus_before_modal: None,
@@ -1518,6 +1577,34 @@ impl Showcase {
         self.timeline_selected_sequence = Some(entries[next].sequence);
     }
 
+    fn reconcile_error_selection(&mut self) {
+        let groups = error_groups(&self.live_data);
+        if groups
+            .iter()
+            .any(|group| Some(&group.key) == self.error_selected_key.as_ref())
+        {
+            return;
+        }
+        self.error_selected_key = groups.first().map(|group| group.key.clone());
+    }
+
+    fn move_error_selection(&mut self, direction: i8) {
+        self.reconcile_error_selection();
+        let groups = error_groups(&self.live_data);
+        let Some(index) = groups
+            .iter()
+            .position(|group| Some(&group.key) == self.error_selected_key.as_ref())
+        else {
+            return;
+        };
+        let next = match direction.cmp(&0) {
+            std::cmp::Ordering::Less => index.saturating_sub(1),
+            std::cmp::Ordering::Greater => (index + 1).min(groups.len().saturating_sub(1)),
+            std::cmp::Ordering::Equal => index,
+        };
+        self.error_selected_key = Some(groups[next].key.clone());
+    }
+
     fn drain_live_data_results(&mut self) -> bool {
         let messages = self
             .live_data_results
@@ -1530,6 +1617,7 @@ impl Showcase {
             self.live_view.reconcile(&self.live_data, &self.live_filter);
             self.reconcile_log_view();
             self.reconcile_timeline_selection();
+            self.reconcile_error_selection();
             changed = true;
         }
         changed
@@ -1758,6 +1846,11 @@ impl Showcase {
                             AdapterBrowserMode::Observability(ObservabilityMode::Timeline);
                         self.reconcile_timeline_selection();
                     }
+                    KeyCode::Char('6') => {
+                        self.adapter_browser_mode =
+                            AdapterBrowserMode::Observability(ObservabilityMode::Errors);
+                        self.reconcile_error_selection();
+                    }
                     KeyCode::Up
                         if self.adapter_browser_mode
                             == AdapterBrowserMode::Observability(ObservabilityMode::Timeline) =>
@@ -1769,6 +1862,18 @@ impl Showcase {
                             == AdapterBrowserMode::Observability(ObservabilityMode::Timeline) =>
                     {
                         self.move_timeline_selection(1);
+                    }
+                    KeyCode::Up
+                        if self.adapter_browser_mode
+                            == AdapterBrowserMode::Observability(ObservabilityMode::Errors) =>
+                    {
+                        self.move_error_selection(-1);
+                    }
+                    KeyCode::Down
+                        if self.adapter_browser_mode
+                            == AdapterBrowserMode::Observability(ObservabilityMode::Errors) =>
+                    {
+                        self.move_error_selection(1);
                     }
                     _ => return Outcome::default(),
                 }
@@ -3720,7 +3825,126 @@ fn render_adapters(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -> Op
         AdapterBrowserMode::Observability(ObservabilityMode::Timeline) => {
             render_timeline(frame, area, showcase)
         }
+        AdapterBrowserMode::Observability(ObservabilityMode::Errors) => {
+            render_error_viewer(frame, area, showcase)
+        }
     }
+}
+
+fn retained_time_label(timestamp_millis: Option<u64>, sequence: u64) -> String {
+    timestamp_millis
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| format!("arrival #{sequence}"))
+}
+
+fn render_error_viewer(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -> Option<Position> {
+    let theme = showcase.theme;
+    let layout = InspectorLayout::new(45, 24, 28);
+    let panes = layout.split(area);
+    let master = panel(
+        frame,
+        panes.master,
+        "Observability · Errors",
+        showcase.focus.current() == Some(VIEWPORT_FOCUS),
+        theme,
+        BorderSet::double(),
+    );
+    let detail = panel(
+        frame,
+        panes.detail,
+        "Error detail / stack",
+        false,
+        theme,
+        BorderSet::double(),
+    );
+    showcase.reconcile_error_selection();
+    let groups = error_groups(&showcase.live_data);
+    let lines = groups
+        .iter()
+        .map(|group| {
+            format!(
+                "{} ×{} {}",
+                if Some(&group.key) == showcase.error_selected_key.as_ref() {
+                    '›'
+                } else {
+                    ' '
+                },
+                group.count,
+                group.key
+            )
+        })
+        .collect::<Vec<_>>();
+    let master_track = Rect::new(master.right().saturating_sub(1), master.y, 1, master.height);
+    let master_view = Rect::new(
+        master.x,
+        master.y,
+        master.width.saturating_sub(1),
+        master.height,
+    );
+    if lines.is_empty() {
+        Text::new("No Error observations in retained history.")
+            .style(Style::new().fg(theme.muted).bg(theme.background))
+            .render(frame, master_view);
+        showcase
+            .observability_viewport
+            .update_dimensions(0, master_view.height);
+    } else {
+        Viewport::new(&lines)
+            .style(Style::new().fg(theme.text).bg(theme.background))
+            .render(frame, master_view, &mut showcase.observability_viewport);
+    }
+    let _ = Scrollbar::render(
+        frame,
+        &showcase.observability_viewport,
+        master_track,
+        Style::new().fg(theme.muted).bg(theme.background).dim(),
+        Style::new().fg(theme.error).bg(theme.background).bold(),
+    );
+
+    let selected = groups
+        .iter()
+        .find(|group| Some(&group.key) == showcase.error_selected_key.as_ref());
+    if let Some(group) = selected {
+        let properties = vec![
+            PropertyRow::new("message", &group.message),
+            PropertyRow::new("signature", group.signature.as_deref().unwrap_or("-")),
+            PropertyRow::new("count", group.count.to_string()),
+            PropertyRow::new(
+                "first seen",
+                retained_time_label(group.first_timestamp_millis, group.first_sequence),
+            ),
+            PropertyRow::new(
+                "last seen",
+                retained_time_label(group.last_timestamp_millis, group.last_sequence),
+            ),
+        ];
+        let rows = dragons_tui::Layout::vertical(vec![Constraint::Length(5), Constraint::Fill(1)])
+            .split(detail);
+        if let Some(properties_area) = rows.first() {
+            PropertyView::new(&properties).render(
+                frame,
+                *properties_area,
+                &mut ViewportState::new(),
+                Style::new().fg(theme.warning).bg(theme.background),
+                Style::new().fg(theme.text).bg(theme.background),
+            );
+        }
+        if let Some(stack_area) = rows.get(1) {
+            let stack_lines = if group.stack.is_empty() {
+                vec!["No stack supplied.".to_owned()]
+            } else {
+                group.stack.clone()
+            };
+            Viewport::new(&stack_lines)
+                .style(Style::new().fg(theme.text).bg(theme.background))
+                .render(frame, *stack_area, &mut showcase.error_detail_viewport);
+        }
+    } else {
+        Text::new("Select an Error group to inspect it.")
+            .style(Style::new().fg(theme.muted).bg(theme.background))
+            .render(frame, detail);
+    }
+    None
 }
 
 fn render_timeline(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -> Option<Position> {
@@ -6910,6 +7134,111 @@ mod tests {
             .apply(LiveDataMessage::Event(event("second")));
         showcase.reconcile_timeline_selection();
         assert_eq!(showcase.timeline_selected_sequence, Some(1));
+    }
+
+    #[test]
+    fn error_groups_use_signature_then_message_and_preserve_retained_counts() {
+        let mut live = LiveDataState::with_history_capacity(8);
+        let error = |message: &str, signature: Option<&str>, timestamp_millis, stack: Vec<&str>| {
+            AdapterEvent {
+                adapter_id: AdapterId::new("adapter-a").unwrap(),
+                stream: "semantic".to_owned(),
+                kind: "fixture".to_owned(),
+                observation: Some(Observation::Error {
+                    message: message.to_owned(),
+                    signature: signature.map(str::to_owned),
+                    stack: stack.into_iter().map(str::to_owned).collect(),
+                    timestamp_millis,
+                }),
+                payload: "null".parse().unwrap(),
+            }
+        };
+        live.apply(LiveDataMessage::Event(error(
+            "first message",
+            Some("same.signature"),
+            Some(10),
+            vec!["frame one"],
+        )));
+        live.apply(LiveDataMessage::Event(AdapterEvent {
+            adapter_id: AdapterId::new("adapter-a").unwrap(),
+            stream: "semantic".to_owned(),
+            kind: "fixture".to_owned(),
+            observation: Some(Observation::Log {
+                text: "not an error".to_owned(),
+                severity: Some(ObservationSeverity::Error),
+                timestamp_millis: Some(11),
+            }),
+            payload: "null".parse().unwrap(),
+        }));
+        live.apply(LiveDataMessage::Event(error(
+            "updated message",
+            Some("same.signature"),
+            Some(20),
+            vec!["frame two", "İstanbul"],
+        )));
+        live.apply(LiveDataMessage::Event(error(
+            "fallback message",
+            None,
+            None,
+            Vec::new(),
+        )));
+
+        let groups = error_groups(&live);
+        assert_eq!(groups.len(), 2);
+        let signed = groups
+            .iter()
+            .find(|group| group.key == "same.signature")
+            .unwrap();
+        assert_eq!(signed.count, 2);
+        assert_eq!(signed.first_timestamp_millis, Some(10));
+        assert_eq!(signed.last_timestamp_millis, Some(20));
+        assert_eq!(signed.stack, ["frame two", "İstanbul"]);
+        assert!(groups.iter().any(|group| group.key == "fallback message"));
+    }
+
+    #[test]
+    fn error_group_selection_recovers_and_counts_shrink_after_eviction() {
+        let mut showcase = Showcase::new(Instant::now());
+        showcase.live_data = LiveDataState::with_history_capacity(2);
+        let error = |signature: &str| AdapterEvent {
+            adapter_id: AdapterId::new("adapter-a").unwrap(),
+            stream: "semantic".to_owned(),
+            kind: "fixture".to_owned(),
+            observation: Some(Observation::Error {
+                message: "message".to_owned(),
+                signature: Some(signature.to_owned()),
+                stack: Vec::new(),
+                timestamp_millis: None,
+            }),
+            payload: "null".parse().unwrap(),
+        };
+        showcase
+            .live_data
+            .apply(LiveDataMessage::Event(error("same")));
+        showcase
+            .live_data
+            .apply(LiveDataMessage::Event(error("same")));
+        assert_eq!(error_groups(&showcase.live_data)[0].count, 2);
+        showcase.reconcile_error_selection();
+        assert_eq!(showcase.error_selected_key.as_deref(), Some("same"));
+        showcase
+            .live_data
+            .apply(LiveDataMessage::Event(error("other")));
+        let groups = error_groups(&showcase.live_data);
+        assert_eq!(
+            groups
+                .iter()
+                .find(|group| group.key == "same")
+                .unwrap()
+                .count,
+            1
+        );
+        showcase.error_selected_key = Some("same".to_owned());
+        showcase
+            .live_data
+            .apply(LiveDataMessage::Event(error("other")));
+        showcase.reconcile_error_selection();
+        assert_eq!(showcase.error_selected_key.as_deref(), Some("other"));
     }
 
     #[test]
