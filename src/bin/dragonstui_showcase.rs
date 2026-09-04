@@ -31,13 +31,11 @@ use dragons_tui::{
     StructuredData, Style, Table, TableColumn, TableState, Text, TextArea, TextInput, Theme, Tree,
     TreeNode, TreeState, Viewport, ViewportState, display_width, is_quit_key, terminal_size,
 };
-#[cfg(test)]
-use dragonstui_adapter_host::OperationId;
 use dragonstui_adapter_host::{
     ActionId, AdapterAction, AdapterClassification, AdapterDisconnect, AdapterEvent, AdapterId,
     AdapterLiveData, AdapterManagement, AdapterManagementAction, AdapterOperation,
     ControllerIpcDiagnostics, DiscoveryError, LocalAdapterRoot, Observation, ObservationSeverity,
-    OperationState, local_controller_action_client, local_controller_diagnostics,
+    OperationId, OperationState, local_controller_action_client, local_controller_diagnostics,
     local_controller_live_data, local_controller_management_client,
     local_controller_operation_client,
 };
@@ -46,6 +44,8 @@ const TICK_INTERVAL: Duration = Duration::from_millis(50);
 const LIVE_DATA_CHANNEL_CAPACITY: usize = 8;
 const LIVE_HISTORY_CAPACITY: usize = 16;
 const LIVE_DATA_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const NOTIFICATION_CAPACITY: usize = 8;
+const NOTIFICATION_LIFETIME: Duration = Duration::from_secs(5);
 const SPLASH_DURATION: Duration = Duration::from_secs(6);
 const LIST_FOCUS: FocusId = FocusId::new(1);
 const TABLE_FOCUS: FocusId = FocusId::new(2);
@@ -1291,6 +1291,86 @@ impl LiveDataState {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NotificationSeverity {
+    Success,
+    Error,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Notification {
+    severity: NotificationSeverity,
+    title: String,
+    message: String,
+    operation_id: Option<OperationId>,
+    expires_at: Instant,
+}
+
+/// UI-owned, short-lived presentation of typed controller outcomes. This queue
+/// is not an operation authority and never derives semantics from text.
+#[derive(Clone, Debug)]
+struct NotificationState {
+    capacity: usize,
+    entries: VecDeque<Notification>,
+}
+
+impl NotificationState {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            capacity,
+            entries: VecDeque::with_capacity(capacity),
+        }
+    }
+
+    fn push_operation_terminal(&mut self, operation: &AdapterOperation, now: Instant) {
+        let (severity, title, message) = match &operation.state {
+            OperationState::Succeeded { .. } => (
+                NotificationSeverity::Success,
+                "Operation succeeded".to_owned(),
+                operation.action_label.clone(),
+            ),
+            OperationState::Failed { code, message } => (
+                NotificationSeverity::Error,
+                "Operation failed".to_owned(),
+                format!("{}: [{code}] {message}", operation.action_label),
+            ),
+            OperationState::Pending | OperationState::Running => return,
+        };
+        self.push(Notification {
+            severity,
+            title,
+            message,
+            operation_id: Some(operation.id.clone()),
+            expires_at: now + NOTIFICATION_LIFETIME,
+        });
+    }
+
+    fn push_connection_loss(&mut self, disconnect: &AdapterDisconnect, now: Instant) {
+        self.push(Notification {
+            severity: NotificationSeverity::Error,
+            title: "Adapter connection lost".to_owned(),
+            message: format!("{}: {}", disconnect.adapter_id, disconnect.reason),
+            operation_id: None,
+            expires_at: now + NOTIFICATION_LIFETIME,
+        });
+    }
+
+    fn push(&mut self, notification: Notification) {
+        if self.capacity == 0 {
+            return;
+        }
+        while self.entries.len() >= self.capacity {
+            self.entries.pop_front();
+        }
+        self.entries.push_back(notification);
+    }
+
+    fn expire(&mut self, now: Instant) {
+        self.entries
+            .retain(|notification| notification.expires_at > now);
+    }
+}
+
 struct LiveDataWorker {
     shutdown: Sender<()>,
     join: Option<thread::JoinHandle<()>>,
@@ -1409,6 +1489,7 @@ struct Showcase {
     adapter_actions_adapter: Option<AdapterId>,
     /// Bounded projection returned by the controller; it is never operation authority.
     adapter_operations: Vec<AdapterOperation>,
+    notifications: NotificationState,
     last_operation_refresh: Instant,
     adapter_action_confirmation: Option<AdapterActionConfirmation>,
     adapter_invocation_sender: Option<SyncSender<AdapterInvocation>>,
@@ -1543,6 +1624,7 @@ impl Showcase {
             adapter_actions: Vec::new(),
             adapter_actions_adapter: None,
             adapter_operations: Vec::new(),
+            notifications: NotificationState::with_capacity(NOTIFICATION_CAPACITY),
             last_operation_refresh: started,
             adapter_action_confirmation: None,
             adapter_invocation_sender,
@@ -1758,6 +1840,10 @@ impl Showcase {
             .unwrap_or_default();
         let mut changed = false;
         for message in messages {
+            if let LiveDataMessage::Disconnected(disconnect) = &message {
+                self.notifications
+                    .push_connection_loss(disconnect, Instant::now());
+            }
             self.live_data.apply(message);
             self.live_view.reconcile(&self.live_data, &self.live_filter);
             self.reconcile_log_view();
@@ -1923,7 +2009,29 @@ impl Showcase {
         if excess > 0 {
             operations.drain(0..excess);
         }
+        let terminal_transitions = operations
+            .iter()
+            .filter(|operation| {
+                let became_terminal = matches!(
+                    operation.state,
+                    OperationState::Succeeded { .. } | OperationState::Failed { .. }
+                );
+                let was_terminal = self.adapter_operations.iter().any(|current| {
+                    current.id == operation.id
+                        && matches!(
+                            current.state,
+                            OperationState::Succeeded { .. } | OperationState::Failed { .. }
+                        )
+                });
+                became_terminal && !was_terminal
+            })
+            .cloned()
+            .collect::<Vec<_>>();
         self.adapter_operations = operations;
+        let now = Instant::now();
+        for operation in &terminal_transitions {
+            self.notifications.push_operation_terminal(operation, now);
+        }
     }
 
     fn queue_adapter_action(&mut self, action: AdapterManagementAction) {
@@ -1979,6 +2087,9 @@ impl Showcase {
             }
             Phase::Showcase => {
                 let mut changed = self.drain_live_data_results();
+                let notification_count = self.notifications.entries.len();
+                self.notifications.expire(now);
+                changed |= self.notifications.entries.len() != notification_count;
                 changed |= self.drain_adapter_diagnostics_results();
                 changed |= self.drain_adapter_action_results();
                 changed |= self.drain_adapter_invocation_results();
@@ -5564,9 +5675,58 @@ fn render_settings(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -> Op
     None
 }
 
+fn render_notifications(frame: &mut Frame, size: Size, showcase: &Showcase) {
+    if showcase.notifications.entries.is_empty() || size.width < 24 || size.height < 10 {
+        return;
+    }
+    let theme = showcase.theme;
+    let width = size.width.saturating_sub(2).min(52);
+    let height = u16::try_from(showcase.notifications.entries.len().saturating_mul(2) + 2)
+        .unwrap_or(u16::MAX)
+        .min(size.height.saturating_sub(6));
+    if width == 0 || height == 0 {
+        return;
+    }
+    let area = Rect::new(
+        size.width.saturating_sub(width).saturating_sub(1),
+        4,
+        width,
+        height,
+    );
+    let inner = Panel::new(localized(showcase.language, "Notifications", "Bildirimler"))
+        .border_set(BorderSet::rounded())
+        .border_style(Style::new().fg(theme.secondary).bg(theme.background).bold())
+        .title_style(Style::new().fg(theme.success).bg(theme.background).bold())
+        .render(frame, area);
+    let lines = showcase
+        .notifications
+        .entries
+        .iter()
+        .rev()
+        .flat_map(|notification| {
+            let color = match notification.severity {
+                NotificationSeverity::Success => theme.success,
+                NotificationSeverity::Error => theme.error,
+            };
+            [
+                Line::new([Span::styled(
+                    &notification.title,
+                    Style::new().fg(color).bg(theme.background).bold(),
+                )]),
+                Line::new([Span::styled(
+                    &notification.message,
+                    Style::new().fg(theme.text).bg(theme.background),
+                )]),
+            ]
+        })
+        .collect::<Vec<_>>();
+    RichText::new(lines).render(frame, inner);
+}
+
 fn render_overlays(frame: &mut Frame, size: Size, showcase: &mut Showcase) {
     let theme = showcase.theme;
     let parent = Rect::new(0, 0, size.width, size.height);
+    render_notifications(frame, size, showcase);
     if let Some(confirmation) = showcase.adapter_action_confirmation.as_ref() {
         let rect = Modal::new(
             localized(
@@ -5979,6 +6139,146 @@ mod tests {
         let rendered = showcase_view(Size::new(120, 36), &mut showcase);
         assert!(frame_contains(&rendered.frame, "failed"));
         assert!(frame_contains(&rendered.frame, "fixture_rejected"));
+    }
+
+    #[test]
+    fn notifications_map_typed_terminal_operation_state_expire_and_evict_deterministically() {
+        let started = Instant::now();
+        let operation = |id: &str, state| AdapterOperation {
+            id: OperationId::new(id).unwrap(),
+            adapter_id: AdapterId::new("fixture").unwrap(),
+            action_id: ActionId::new("fixture.action.alpha").unwrap(),
+            action_label: "Producer label".to_owned(),
+            state,
+        };
+        let mut notifications = NotificationState::with_capacity(2);
+        notifications.push_operation_terminal(
+            &operation(
+                "operation-success",
+                OperationState::Succeeded {
+                    payload: serde_json::json!("error count is zero"),
+                },
+            ),
+            started,
+        );
+        notifications.push_operation_terminal(
+            &operation(
+                "operation-failure",
+                OperationState::Failed {
+                    code: "fixture_rejected".to_owned(),
+                    message: "completed without result".to_owned(),
+                },
+            ),
+            started,
+        );
+
+        assert_eq!(notifications.entries.len(), 2);
+        assert_eq!(
+            notifications.entries[0].severity,
+            NotificationSeverity::Success
+        );
+        assert_eq!(
+            notifications.entries[1].severity,
+            NotificationSeverity::Error
+        );
+        assert_eq!(
+            notifications.entries[1]
+                .operation_id
+                .as_ref()
+                .unwrap()
+                .as_str(),
+            "operation-failure"
+        );
+
+        notifications.push_operation_terminal(
+            &operation(
+                "operation-newest",
+                OperationState::Succeeded {
+                    payload: serde_json::Value::Null,
+                },
+            ),
+            started,
+        );
+        assert_eq!(notifications.entries.len(), 2);
+        assert_eq!(
+            notifications.entries[0]
+                .operation_id
+                .as_ref()
+                .unwrap()
+                .as_str(),
+            "operation-failure"
+        );
+
+        notifications.expire(started + NOTIFICATION_LIFETIME);
+        assert!(notifications.entries.is_empty());
+    }
+
+    #[test]
+    fn terminal_operation_transition_notifies_once_without_disturbing_confirmation_focus() {
+        let mut showcase = Showcase::new(Instant::now());
+        let pending = AdapterOperation {
+            id: OperationId::new("operation-transition").unwrap(),
+            adapter_id: AdapterId::new("fixture").unwrap(),
+            action_id: ActionId::new("fixture.action.alpha").unwrap(),
+            action_label: "Producer label".to_owned(),
+            state: OperationState::Running,
+        };
+        showcase.replace_adapter_operations(vec![pending.clone()]);
+        let succeeded = AdapterOperation {
+            state: OperationState::Succeeded {
+                payload: serde_json::Value::Null,
+            },
+            ..pending
+        };
+        showcase.replace_adapter_operations(vec![succeeded.clone()]);
+        showcase.replace_adapter_operations(vec![succeeded]);
+        assert_eq!(showcase.notifications.entries.len(), 1);
+        assert_eq!(
+            showcase.notifications.entries[0].severity,
+            NotificationSeverity::Success
+        );
+
+        showcase.adapter_actions_adapter = Some(AdapterId::new("fixture").unwrap());
+        showcase.adapter_actions = vec![AdapterAction {
+            id: ActionId::new("fixture.inspect").unwrap(),
+            label: "Confirmed action".to_owned(),
+            description: None,
+            confirmation_required: true,
+            operation: Capability::new("fixture.execute").unwrap(),
+        }];
+        showcase.invoke_selected_adapter_action();
+        assert!(showcase.modal_open);
+        assert!(showcase.adapter_action_confirmation.is_some());
+        assert_eq!(showcase.notifications.entries.len(), 1);
+        showcase.phase = Phase::Showcase;
+        let rendered = showcase_view(Size::new(220, 40), &mut showcase);
+        assert!(frame_contains(&rendered.frame, "Notifications"));
+        assert!(frame_contains(&rendered.frame, "Operation succeeded"));
+        assert!(frame_contains(&rendered.frame, "Confirm Adapter Action"));
+    }
+
+    #[test]
+    fn typed_adapter_disconnect_surfaces_a_bounded_error_notification() {
+        let mut showcase = Showcase::new(Instant::now());
+        let (sender, receiver) = mpsc::channel();
+        showcase.live_data_results = Some(receiver);
+        sender
+            .send(LiveDataMessage::Disconnected(AdapterDisconnect {
+                adapter_id: AdapterId::new("fixture").unwrap(),
+                reason: "producer closed the connection".to_owned(),
+            }))
+            .unwrap();
+
+        assert!(showcase.drain_live_data_results());
+        assert_eq!(showcase.notifications.entries.len(), 1);
+        assert_eq!(
+            showcase.notifications.entries[0].severity,
+            NotificationSeverity::Error
+        );
+        assert_eq!(
+            showcase.notifications.entries[0].title,
+            "Adapter connection lost"
+        );
     }
 
     #[test]
