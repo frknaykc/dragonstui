@@ -221,6 +221,7 @@ enum ObservabilityMode {
     Logs,
     Metrics,
     Heatmap,
+    Status,
 }
 
 impl AdapterViewState {
@@ -939,6 +940,44 @@ impl HeatmapGrid {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct StatusMatrix {
+    rows: Vec<String>,
+    columns: Vec<String>,
+    cells: BTreeMap<(String, String), String>,
+}
+
+fn status_matrix(live_data: &LiveDataState) -> StatusMatrix {
+    let mut rows = BTreeSet::new();
+    let mut columns = BTreeSet::new();
+    let mut cells = BTreeMap::new();
+    for entry in &live_data.history {
+        if let LiveDataMessage::Event(AdapterEvent {
+            observation:
+                Some(Observation::Status {
+                    entity,
+                    check,
+                    status,
+                    ..
+                }),
+            ..
+        }) = &entry.message
+        {
+            rows.insert(entity.clone());
+            columns.insert(check.clone());
+            cells.insert(
+                (entity.clone(), check.clone()),
+                format!("{status:?}").to_lowercase(),
+            );
+        }
+    }
+    StatusMatrix {
+        rows: rows.into_iter().collect(),
+        columns: columns.into_iter().collect(),
+        cells,
+    }
+}
+
 impl Default for LiveDataState {
     fn default() -> Self {
         Self::with_history_capacity(LIVE_HISTORY_CAPACITY)
@@ -1557,6 +1596,10 @@ impl Showcase {
                     KeyCode::Char('3') => {
                         self.adapter_browser_mode =
                             AdapterBrowserMode::Observability(ObservabilityMode::Heatmap);
+                    }
+                    KeyCode::Char('4') => {
+                        self.adapter_browser_mode =
+                            AdapterBrowserMode::Observability(ObservabilityMode::Status);
                     }
                     _ => return Outcome::default(),
                 }
@@ -3501,7 +3544,47 @@ fn render_adapters(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -> Op
         AdapterBrowserMode::Observability(ObservabilityMode::Heatmap) => {
             render_heatmap(frame, area, showcase)
         }
+        AdapterBrowserMode::Observability(ObservabilityMode::Status) => {
+            render_status_matrix(frame, area, showcase)
+        }
     }
+}
+
+fn render_status_matrix(
+    frame: &mut Frame,
+    area: Rect,
+    showcase: &mut Showcase,
+) -> Option<Position> {
+    let theme = showcase.theme;
+    let inner = panel(
+        frame,
+        area,
+        "Observability · Status",
+        false,
+        theme,
+        BorderSet::double(),
+    );
+    let matrix = status_matrix(&showcase.live_data);
+    let mut lines = Vec::new();
+    lines.push(format!("entity | {}", matrix.columns.join(" | ")));
+    for row in &matrix.rows {
+        lines.push(format!(
+            "{row} | {}",
+            matrix
+                .columns
+                .iter()
+                .map(|column| matrix
+                    .cells
+                    .get(&(row.clone(), column.clone()))
+                    .map_or("-", String::as_str))
+                .collect::<Vec<_>>()
+                .join(" | ")
+        ));
+    }
+    Viewport::new(&lines)
+        .style(Style::new().fg(theme.text).bg(theme.background))
+        .render(frame, inner, &mut showcase.observability_viewport);
+    None
 }
 
 fn render_heatmap(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -> Option<Position> {
@@ -6266,6 +6349,42 @@ mod tests {
         assert_eq!(grid.normalized(0), Some(0.0));
         assert_eq!(grid.normalized(1), Some(1.0));
         assert_eq!(HeatmapGrid::new(1, 1, vec![7.0]).normalized(0), Some(0.5));
+    }
+
+    #[test]
+    fn status_matrix_routes_only_status_and_orders_entity_and_check() {
+        use dragonstui_adapter_host::ObservationStatus;
+        let mut live = LiveDataState::with_history_capacity(4);
+        live.apply(LiveDataMessage::Event(AdapterEvent {
+            adapter_id: AdapterId::new("a").unwrap(),
+            stream: "s".to_owned(),
+            kind: "k".to_owned(),
+            payload: "null".parse().unwrap(),
+            observation: Some(Observation::Status {
+                entity: "zeta".to_owned(),
+                check: "disk".to_owned(),
+                status: ObservationStatus::Warning,
+                timestamp_millis: None,
+            }),
+        }));
+        live.apply(LiveDataMessage::Event(AdapterEvent {
+            adapter_id: AdapterId::new("a").unwrap(),
+            stream: "s".to_owned(),
+            kind: "k".to_owned(),
+            payload: "null".parse().unwrap(),
+            observation: Some(Observation::Log {
+                text: "not status".to_owned(),
+                severity: None,
+                timestamp_millis: None,
+            }),
+        }));
+        let matrix = status_matrix(&live);
+        assert_eq!(matrix.rows, ["zeta"]);
+        assert_eq!(matrix.columns, ["disk"]);
+        assert_eq!(
+            matrix.cells[&("zeta".to_owned(), "disk".to_owned())],
+            "warning"
+        );
     }
 
     #[test]
