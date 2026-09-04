@@ -10,10 +10,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    ActionId, AdapterAction, AdapterEvent, AdapterId, AdapterRuntime, AdapterRuntimeConfig,
-    AdapterStartError, AdapterState, Capability, CapabilityRegistry, DiscoveredAdapter,
-    DiscoveryError, LocalAdapterRoot, ProcessStatus, RpcError, RpcOutcome,
+    ActionId, AdapterAction, AdapterEvent, AdapterId, AdapterOperation, AdapterRuntime,
+    AdapterRuntimeConfig, AdapterStartError, AdapterState, Capability, CapabilityRegistry,
+    DiscoveredAdapter, DiscoveryError, LocalAdapterRoot, OperationId, OperationState,
+    ProcessStatus, RequestId, RpcError, RpcOutcome,
 };
+
+pub const OPERATION_HISTORY_CAPACITY: usize = 16;
 
 /// Coordinates discovered adapters without imposing an event loop on a DragonsTUI application.
 #[derive(Debug)]
@@ -26,6 +29,9 @@ pub struct AdapterManager {
     disconnects: VecDeque<AdapterDisconnect>,
     event_capacity: usize,
     dropped_events: usize,
+    operations: BTreeMap<OperationId, OperationEntry>,
+    operation_order: VecDeque<OperationId>,
+    next_operation: u64,
     stop_timeout: Duration,
 }
 
@@ -42,6 +48,9 @@ impl AdapterManager {
             disconnects: VecDeque::with_capacity(event_capacity),
             event_capacity,
             dropped_events: 0,
+            operations: BTreeMap::new(),
+            operation_order: VecDeque::with_capacity(OPERATION_HISTORY_CAPACITY),
+            next_operation: 1,
             stop_timeout,
         }
     }
@@ -91,6 +100,11 @@ impl AdapterManager {
             .manifest()
             .ok_or_else(|| ManagerError::UnknownAdapter(id.clone()))?
             .clone();
+        self.fail_active_operations(
+            id,
+            "adapter_restarted",
+            format!("adapter {id} restarted before the operation completed"),
+        );
         self.capabilities.remove_provider(id);
         self.runtimes.remove(id);
         match AdapterRuntime::start(manifest, config) {
@@ -117,6 +131,11 @@ impl AdapterManager {
         let Some(mut runtime) = self.runtimes.remove(id) else {
             return Err(ManagerError::UnknownAdapter(id.clone()));
         };
+        self.fail_active_operations(
+            id,
+            "adapter_stopped",
+            format!("adapter {id} stopped before the operation completed"),
+        );
         self.states
             .insert(id.clone(), ManagedState::new(AdapterState::Stopping));
         self.capabilities.remove_provider(id);
@@ -167,6 +186,7 @@ impl AdapterManager {
 
     /// Reads whatever is currently available without waiting for a request completion.
     pub fn poll(&mut self, per_adapter_timeout: Duration) {
+        self.dispatch_pending_operations();
         let ids: Vec<_> = self.runtimes.keys().cloned().collect();
         for id in ids {
             let was_running = self.state(&id) == Some(AdapterState::Running);
@@ -198,12 +218,18 @@ impl AdapterManager {
                 );
                 if was_running {
                     self.push_disconnect(AdapterDisconnect {
-                        adapter_id: id,
+                        adapter_id: id.clone(),
                         reason: error,
                     });
                 }
+                self.fail_active_operations(
+                    &id,
+                    "adapter_crashed",
+                    "adapter process crashed before the operation completed".to_owned(),
+                );
             }
         }
+        self.reconcile_operations();
     }
 
     pub fn request(
@@ -254,6 +280,62 @@ impl AdapterManager {
         runtime
             .send_action_request(&action, payload, timeout)
             .map_err(ManagerError::Rpc)
+    }
+
+    /// Creates a controller-owned pending action operation. Dispatch and every
+    /// later lifecycle transition occur only from this manager's poll loop.
+    pub fn start_action_operation(
+        &mut self,
+        id: &AdapterId,
+        action_id: &ActionId,
+        payload: Value,
+    ) -> Result<AdapterOperation, ManagerError> {
+        let action = self
+            .runtimes
+            .get(id)
+            .ok_or_else(|| ManagerError::NotRunning(id.clone()))?
+            .actions()
+            .iter()
+            .find(|action| action.id == *action_id)
+            .cloned()
+            .ok_or_else(|| ManagerError::UnknownAction {
+                adapter_id: id.clone(),
+                action_id: action_id.clone(),
+            })?;
+        self.evict_completed_operations();
+        if self.operations.len() == OPERATION_HISTORY_CAPACITY {
+            return Err(ManagerError::OperationCapacity);
+        }
+        let operation_id = OperationId::new(format!("operation-{}", self.next_operation))
+            .map_err(|error| ManagerError::OperationId(error.to_string()))?;
+        self.next_operation = self.next_operation.saturating_add(1);
+        let operation = AdapterOperation {
+            id: operation_id.clone(),
+            adapter_id: id.clone(),
+            action_id: action.id.clone(),
+            action_label: action.label.clone(),
+            state: OperationState::Pending,
+        };
+        self.operation_order.push_back(operation_id.clone());
+        self.operations.insert(
+            operation_id,
+            OperationEntry {
+                operation: operation.clone(),
+                action,
+                payload: Some(payload),
+                request_id: None,
+            },
+        );
+        Ok(operation)
+    }
+
+    /// Returns the bounded controller-owned operation window in creation order.
+    pub fn operations(&self) -> Vec<AdapterOperation> {
+        self.operation_order
+            .iter()
+            .filter_map(|id| self.operations.get(id))
+            .map(|entry| entry.operation.clone())
+            .collect()
     }
 
     /// Retrieves a completed response/error outcome without blocking the UI thread.
@@ -361,6 +443,121 @@ impl AdapterManager {
         self.dropped_events
     }
 
+    fn dispatch_pending_operations(&mut self) {
+        let pending = self
+            .operations
+            .iter()
+            .filter_map(|(id, entry)| {
+                matches!(entry.operation.state, OperationState::Pending).then_some(id.clone())
+            })
+            .collect::<Vec<_>>();
+        for operation_id in pending {
+            let Some(entry) = self.operations.get(&operation_id) else {
+                continue;
+            };
+            let adapter_id = entry.operation.adapter_id.clone();
+            let action = entry.action.clone();
+            let payload = entry.payload.clone().unwrap_or(Value::Null);
+            let result = self
+                .runtimes
+                .get_mut(&adapter_id)
+                .ok_or(RpcError::Crashed)
+                .and_then(|runtime| {
+                    runtime.send_action_request(&action, payload, Duration::from_secs(2))
+                });
+            let Some(entry) = self.operations.get_mut(&operation_id) else {
+                continue;
+            };
+            match result {
+                Ok(request_id) => {
+                    entry.request_id = Some(request_id);
+                    entry.payload = None;
+                    entry.operation.state = OperationState::Running;
+                }
+                Err(error) => {
+                    let (code, message) = operation_rpc_failure(error);
+                    entry.payload = None;
+                    entry.operation.state = OperationState::Failed { code, message };
+                }
+            }
+        }
+    }
+
+    fn reconcile_operations(&mut self) {
+        let running = self
+            .operations
+            .iter()
+            .filter_map(
+                |(id, entry)| match (&entry.operation.state, &entry.request_id) {
+                    (OperationState::Running, Some(request_id)) => Some((
+                        id.clone(),
+                        entry.operation.adapter_id.clone(),
+                        request_id.clone(),
+                    )),
+                    _ => None,
+                },
+            )
+            .collect::<Vec<_>>();
+        for (operation_id, adapter_id, request_id) in running {
+            let terminal = self.runtimes.get_mut(&adapter_id).map_or_else(
+                || {
+                    Some(OperationState::Failed {
+                        code: "adapter_unavailable".to_owned(),
+                        message: format!("adapter {adapter_id} is not running"),
+                    })
+                },
+                |runtime| {
+                    runtime
+                        .take_outcome(&request_id)
+                        .map(|outcome| match outcome {
+                            RpcOutcome::Response(payload) => OperationState::Succeeded { payload },
+                            RpcOutcome::AdapterError { code, message } => {
+                                OperationState::Failed { code, message }
+                            }
+                        })
+                        .or_else(|| {
+                            runtime.take_request_failure(&request_id).map(|error| {
+                                let (code, message) = operation_rpc_failure(error);
+                                OperationState::Failed { code, message }
+                            })
+                        })
+                },
+            );
+            if let (Some(state), Some(entry)) = (terminal, self.operations.get_mut(&operation_id)) {
+                entry.request_id = None;
+                entry.operation.state = state;
+            }
+        }
+    }
+
+    fn fail_active_operations(&mut self, adapter_id: &AdapterId, code: &str, message: String) {
+        for entry in self.operations.values_mut().filter(|entry| {
+            entry.operation.adapter_id == *adapter_id && !entry.operation.state.is_terminal()
+        }) {
+            entry.payload = None;
+            entry.request_id = None;
+            entry.operation.state = OperationState::Failed {
+                code: code.to_owned(),
+                message: message.clone(),
+            };
+        }
+    }
+
+    fn evict_completed_operations(&mut self) {
+        while self.operations.len() >= OPERATION_HISTORY_CAPACITY {
+            let Some(index) = self.operation_order.iter().position(|id| {
+                self.operations
+                    .get(id)
+                    .is_some_and(|entry| entry.operation.state.is_terminal())
+            }) else {
+                break;
+            };
+            if let Some(id) = self.operation_order.remove(index) {
+                self.operations.remove(&id);
+            }
+        }
+    }
+
     fn push_event(&mut self, event: AdapterEvent) {
         if self.event_capacity == 0 {
             self.dropped_events += 1;
@@ -382,6 +579,25 @@ impl AdapterManager {
         }
         self.disconnects.push_back(disconnect);
     }
+}
+
+#[derive(Clone, Debug)]
+struct OperationEntry {
+    operation: AdapterOperation,
+    action: AdapterAction,
+    payload: Option<Value>,
+    request_id: Option<RequestId>,
+}
+
+fn operation_rpc_failure(error: RpcError) -> (String, String) {
+    let code = match error {
+        RpcError::Timeout => "timeout",
+        RpcError::Crashed => "adapter_crashed",
+        RpcError::Backpressure => "backpressure",
+        RpcError::Failed(_) => "transport_failed",
+    }
+    .to_owned();
+    (code, error.to_string())
 }
 
 /// Generic adapter data drained by a controller without capability-specific decoding.
@@ -446,6 +662,8 @@ pub enum ManagerError {
         adapter_id: AdapterId,
         action_id: ActionId,
     },
+    OperationCapacity,
+    OperationId(String),
     Start(AdapterStartError),
     Stop(crate::ProcessError),
     Rpc(RpcError),
@@ -462,6 +680,8 @@ impl fmt::Display for ManagerError {
                 formatter,
                 "unknown action {action_id} for adapter {adapter_id}"
             ),
+            Self::OperationCapacity => write!(formatter, "operation retention capacity is full"),
+            Self::OperationId(error) => error.fmt(formatter),
             Self::Start(error) => error.fmt(formatter),
             Self::Stop(error) => error.fmt(formatter),
             Self::Rpc(error) => error.fmt(formatter),

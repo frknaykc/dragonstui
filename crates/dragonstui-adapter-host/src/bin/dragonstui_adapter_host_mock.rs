@@ -194,6 +194,13 @@ fn protocol_mode(behavior: MockBehavior, adapter_id: &str) {
                 confirmation_required: true,
                 operation: Capability::new("test.echo").unwrap(),
             },
+            AdapterAction {
+                id: ActionId::new("fixture.action.delta").unwrap(),
+                label: "Delta".to_owned(),
+                description: Some("Adapter-declared delayed completion".to_owned()),
+                confirmation_required: false,
+                operation: Capability::new("test.echo").unwrap(),
+            },
         ]
     } else {
         Vec::new()
@@ -361,6 +368,14 @@ fn protocol_mode(behavior: MockBehavior, adapter_id: &str) {
                             id: request.id,
                             payload: json!({"outcome": "confirmed"}),
                         })),
+                        Some("fixture.action.delta") => {
+                            thread::sleep(Duration::from_millis(150));
+                            emit(&ProtocolMessage::Response(Response {
+                                protocol: PROTOCOL_VERSION,
+                                id: request.id,
+                                payload: json!({"outcome": "delayed"}),
+                            }));
+                        }
                         _ => emit(&ProtocolMessage::Error(ErrorMessage {
                             protocol: PROTOCOL_VERSION,
                             id: Some(request.id),

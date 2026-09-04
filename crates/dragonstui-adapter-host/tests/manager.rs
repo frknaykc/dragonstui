@@ -6,8 +6,8 @@ use std::{
 };
 
 use dragonstui_adapter_host::{
-    ActionId, AdapterId, AdapterManager, AdapterRuntimeConfig, AdapterState, Capability,
-    LocalAdapterRoot, ManagerError, PROTOCOL_VERSION, RpcOutcome,
+    ActionId, AdapterId, AdapterManager, AdapterOperation, AdapterRuntimeConfig, AdapterState,
+    Capability, LocalAdapterRoot, ManagerError, OperationState, PROTOCOL_VERSION, RpcOutcome,
 };
 use serde_json::json;
 
@@ -258,6 +258,7 @@ fn manager_discovers_and_invokes_declared_actions_without_identifier_semantics()
     let alpha = ActionId::new("fixture.action.alpha").unwrap();
     let alarming = ActionId::new("fixture.destroy.everything").unwrap();
     let confirmed = ActionId::new("fixture.inspect").unwrap();
+    let delayed = ActionId::new("fixture.action.delta").unwrap();
     let unknown = ActionId::new("fixture.action.missing").unwrap();
     let mut manager = AdapterManager::new(Duration::from_millis(200), 8);
     manager.discover(LocalAdapterRoot::new(&root.path)).unwrap();
@@ -272,7 +273,7 @@ fn manager_discovers_and_invokes_declared_actions_without_identifier_semantics()
             .into_iter()
             .map(|action| action.id)
             .collect::<Vec<_>>(),
-        vec![alpha.clone(), alarming.clone(), confirmed]
+        vec![alpha.clone(), alarming.clone(), confirmed, delayed]
     );
 
     let accepted = manager
@@ -301,4 +302,144 @@ fn manager_discovers_and_invokes_declared_actions_without_identifier_semantics()
         manager.invoke_action(&id, &unknown, json!({}), Duration::from_secs(2)),
         Err(ManagerError::UnknownAction { .. })
     ));
+}
+
+#[test]
+fn manager_tracks_action_operations_with_authoritative_typed_lifecycle() {
+    let root = TempRoot::new("actions");
+    root.adapter("mock");
+    let id = AdapterId::new("mock").unwrap();
+    let alpha = ActionId::new("fixture.action.alpha").unwrap();
+    let rejected = ActionId::new("fixture.destroy.everything").unwrap();
+    let mut manager = AdapterManager::new(Duration::from_millis(200), 8);
+    manager.discover(LocalAdapterRoot::new(&root.path)).unwrap();
+    manager
+        .start_with_config(&id, config("mock", "actions"))
+        .unwrap();
+
+    let accepted = manager
+        .start_action_operation(&id, &alpha, json!({}))
+        .unwrap();
+    let failed = manager
+        .start_action_operation(&id, &rejected, json!({}))
+        .unwrap();
+    assert!(matches!(accepted.state, OperationState::Pending));
+    assert!(matches!(failed.state, OperationState::Pending));
+
+    for _ in 0..8 {
+        manager.poll(Duration::from_millis(20));
+    }
+    let operations = manager.operations();
+    assert!(matches!(
+        operations.iter().find(|operation| operation.id == accepted.id),
+        Some(AdapterOperation {
+            state: OperationState::Succeeded { payload },
+            ..
+        }) if payload == &json!({"outcome": "accepted"})
+    ));
+    assert!(matches!(
+        operations.iter().find(|operation| operation.id == failed.id),
+        Some(AdapterOperation {
+            state: OperationState::Failed { code, message },
+            ..
+        }) if code == "fixture_rejected" && message == "adapter-declared rejection"
+    ));
+}
+
+#[test]
+fn manager_exposes_running_before_a_delayed_action_reaches_its_typed_terminal_state() {
+    let root = TempRoot::new("delayed-action");
+    root.adapter("mock");
+    let id = AdapterId::new("mock").unwrap();
+    let delayed = ActionId::new("fixture.action.delta").unwrap();
+    let mut manager = AdapterManager::new(Duration::from_millis(200), 8);
+    manager.discover(LocalAdapterRoot::new(&root.path)).unwrap();
+    manager
+        .start_with_config(&id, config("mock", "actions"))
+        .unwrap();
+
+    let operation = manager
+        .start_action_operation(&id, &delayed, json!({}))
+        .unwrap();
+    assert!(matches!(operation.state, OperationState::Pending));
+
+    manager.poll(Duration::ZERO);
+    assert!(matches!(
+        manager
+            .operations()
+            .iter()
+            .find(|current| current.id == operation.id),
+        Some(AdapterOperation {
+            state: OperationState::Running,
+            ..
+        })
+    ));
+
+    for _ in 0..20 {
+        manager.poll(Duration::from_millis(25));
+        if matches!(
+            manager
+                .operations()
+                .iter()
+                .find(|current| current.id == operation.id),
+            Some(AdapterOperation {
+                state: OperationState::Succeeded { .. },
+                ..
+            })
+        ) {
+            break;
+        }
+    }
+    assert!(matches!(
+        manager
+            .operations()
+            .iter()
+            .find(|current| current.id == operation.id),
+        Some(AdapterOperation {
+            state: OperationState::Succeeded { payload },
+            ..
+        }) if payload == &json!({"outcome": "delayed"})
+    ));
+}
+
+#[test]
+fn manager_evicts_the_oldest_completed_operation_without_evicting_the_newest() {
+    let root = TempRoot::new("operation-retention");
+    root.adapter("mock");
+    let id = AdapterId::new("mock").unwrap();
+    let action = ActionId::new("fixture.action.alpha").unwrap();
+    let mut manager = AdapterManager::new(Duration::from_millis(200), 8);
+    manager.discover(LocalAdapterRoot::new(&root.path)).unwrap();
+    manager
+        .start_with_config(&id, config("mock", "actions"))
+        .unwrap();
+
+    let mut created = Vec::new();
+    for _ in 0..17 {
+        let operation = manager
+            .start_action_operation(&id, &action, json!({}))
+            .unwrap();
+        created.push(operation.id.clone());
+        for _ in 0..8 {
+            manager.poll(Duration::from_millis(20));
+            if manager
+                .operations()
+                .iter()
+                .any(|current| current.id == operation.id && current.state.is_terminal())
+            {
+                break;
+            }
+        }
+        assert!(
+            manager
+                .operations()
+                .iter()
+                .any(|current| current.id == operation.id && current.state.is_terminal())
+        );
+    }
+
+    let retained = manager.operations();
+    assert_eq!(retained.len(), 16);
+    assert!(!retained.iter().any(|operation| operation.id == created[0]));
+    assert!(retained.iter().any(|operation| operation.id == created[16]));
 }

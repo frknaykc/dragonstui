@@ -12,8 +12,8 @@ use dragonstui_adapter_host::{
     ActionId, AdapterController, AdapterId, AdapterManagementOutcome, ControllerActionClient,
     ControllerActionOutcome, ControllerClient, ControllerIpcCommand, ControllerIpcServer,
     ControllerIpcStatus, ControllerManagementClient, ControllerManagementClientError,
-    ControllerManagementRequest, ControllerManagementResponse, ObservationKind, PROTOCOL_VERSION,
-    local_controller_diagnostics,
+    ControllerManagementRequest, ControllerManagementResponse, ControllerOperationClient,
+    ObservationKind, OperationState, PROTOCOL_VERSION, local_controller_diagnostics,
 };
 
 static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -484,6 +484,7 @@ fn authenticated_action_client_discovers_invokes_and_reports_typed_outcomes() {
     let alpha = ActionId::new("fixture.action.alpha").unwrap();
     let alarming = ActionId::new("fixture.destroy.everything").unwrap();
     let confirmed = ActionId::new("fixture.inspect").unwrap();
+    let delayed = ActionId::new("fixture.action.delta").unwrap();
     let missing = ActionId::new("fixture.action.missing").unwrap();
     let legacy = ControllerClient::new(address, "correct-token");
     let client = ControllerActionClient::new(address, "correct-token");
@@ -496,7 +497,7 @@ fn authenticated_action_client_discovers_invokes_and_reports_typed_outcomes() {
             .into_iter()
             .map(|action| action.id)
             .collect::<Vec<_>>(),
-        vec![alpha.clone(), alarming.clone(), confirmed]
+        vec![alpha.clone(), alarming.clone(), confirmed, delayed]
     );
     assert!(matches!(
         client.invoke(&id, &alpha, serde_json::json!({})).unwrap().outcome,
@@ -551,8 +552,45 @@ fn authenticated_action_client_preserves_producer_confirmation_policy() {
             ("fixture.action.alpha".to_owned(), false),
             ("fixture.destroy.everything".to_owned(), false),
             ("fixture.inspect".to_owned(), true),
+            ("fixture.action.delta".to_owned(), false),
         ]
     );
+
+    legacy.shutdown().unwrap();
+    worker.join().unwrap().unwrap();
+}
+
+#[test]
+fn authenticated_operation_client_reads_controller_owned_action_lifecycle() {
+    let root = TempRoot::actions();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let controller = AdapterController::new(&root.path, Duration::from_millis(200), 8);
+    let server = ControllerIpcServer::new(listener, controller, "correct-token");
+    let worker = thread::spawn(move || server.serve_forever());
+    let id = AdapterId::new("mock").unwrap();
+    let action_id = ActionId::new("fixture.action.alpha").unwrap();
+    let legacy = ControllerClient::new(address, "correct-token");
+    let client = ControllerOperationClient::new(address, "correct-token");
+
+    legacy.start(&id).unwrap();
+    let operation = client
+        .start(&id, &action_id, serde_json::json!({}))
+        .unwrap();
+    assert!(matches!(operation.state, OperationState::Pending));
+    let mut latest = operation;
+    for _ in 0..8 {
+        latest = client
+            .operations()
+            .unwrap()
+            .into_iter()
+            .find(|candidate| candidate.id == latest.id)
+            .unwrap();
+        if latest.state.is_terminal() {
+            break;
+        }
+    }
+    assert!(matches!(latest.state, OperationState::Succeeded { .. }));
 
     legacy.shutdown().unwrap();
     worker.join().unwrap().unwrap();

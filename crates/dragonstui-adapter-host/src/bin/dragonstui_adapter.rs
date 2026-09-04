@@ -347,6 +347,8 @@ fn live_state(root: &Path, id: &AdapterId) -> Option<String> {
         | ControllerIpcStatus::Management(_)
         | ControllerIpcStatus::Actions(_)
         | ControllerIpcStatus::Action(_)
+        | ControllerIpcStatus::Operation(_)
+        | ControllerIpcStatus::Operations(_)
         | ControllerIpcStatus::LiveData(_)
         | ControllerIpcStatus::Completed => None,
     }

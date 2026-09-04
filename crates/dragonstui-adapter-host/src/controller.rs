@@ -7,7 +7,7 @@ use std::{
 
 use crate::{
     ActionId, AdapterAction, AdapterDiagnostics, AdapterId, AdapterLiveData, AdapterManager,
-    AdapterState, DiscoveryError, LocalAdapterRoot, ManagerError, RpcOutcome,
+    AdapterOperation, AdapterState, DiscoveryError, LocalAdapterRoot, ManagerError, RpcOutcome,
 };
 use serde_json::Value;
 
@@ -110,6 +110,24 @@ impl AdapterController {
 
     pub fn poll(&mut self, per_adapter_timeout: Duration) {
         self.manager.poll(per_adapter_timeout);
+    }
+
+    /// Starts one controller-owned asynchronous action operation.
+    pub fn start_action_operation(
+        &mut self,
+        id: &AdapterId,
+        action_id: &ActionId,
+        payload: Value,
+    ) -> Result<AdapterOperation, ControllerError> {
+        self.ensure_discovered(id)?;
+        self.manager
+            .start_action_operation(id, action_id, payload)
+            .map_err(ControllerError::Manager)
+    }
+
+    /// Returns the controller's bounded action operation window.
+    pub fn operations(&self) -> Vec<AdapterOperation> {
+        self.manager.operations()
     }
 
     /// Drains generic live data produced by already-running adapters.

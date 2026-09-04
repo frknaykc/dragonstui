@@ -347,6 +347,11 @@ impl AdapterRuntime {
         self.outcomes.remove(id)
     }
 
+    /// Retrieves a terminal transport failure without waiting for more output.
+    pub fn take_request_failure(&mut self, id: &RequestId) -> Option<RpcError> {
+        self.request_failures.remove(id)
+    }
+
     pub fn pop_event(&mut self) -> Option<AdapterEvent> {
         self.events.pop_front()
     }
@@ -442,6 +447,7 @@ impl AdapterRuntime {
             .collect();
         for id in expired {
             self.pending.remove(&id);
+            self.request_failures.insert(id, RpcError::Timeout);
         }
     }
 }

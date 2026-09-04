@@ -13,6 +13,7 @@ mod installer;
 mod management;
 mod manager;
 mod manifest;
+mod operations;
 mod process;
 mod protocol;
 mod registry;
@@ -24,9 +25,10 @@ pub use controller_ipc::{
     ControllerActionClient, ControllerActionOutcome, ControllerActionResponse, ControllerClient,
     ControllerIpcCommand, ControllerIpcDiagnostics, ControllerIpcError, ControllerIpcServer,
     ControllerIpcStatus, ControllerManagementClient, ControllerManagementClientError,
-    ControllerManagementRequest, ControllerManagementResponse, LocalControllerError,
-    local_controller_action_client, local_controller_diagnostics, local_controller_live_data,
-    local_controller_management_client,
+    ControllerManagementRequest, ControllerManagementResponse, ControllerOperationClient,
+    LocalControllerError, local_controller_action_client, local_controller_diagnostics,
+    local_controller_live_data, local_controller_management_client,
+    local_controller_operation_client,
 };
 pub use discovery::{
     AdapterClassification, DiscoveredAdapter, DiscoveryError, LocalAdapterRoot, MANIFEST_FILE_NAME,
@@ -42,6 +44,7 @@ pub use manager::{
     AdapterDiagnostics, AdapterDisconnect, AdapterLiveData, AdapterManager, ManagerError,
 };
 pub use manifest::{AdapterManifest, ExecutablePath, ManifestError};
+pub use operations::{AdapterOperation, OperationId, OperationState};
 pub use process::{AdapterProcess, AdapterProcessConfig, ProcessError, ProcessStatus};
 pub use protocol::{
     ActionId, AdapterAction, AdapterId, AdapterInfo, Capability, ErrorMessage, Event, Hello,

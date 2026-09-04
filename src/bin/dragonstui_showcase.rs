@@ -31,12 +31,15 @@ use dragons_tui::{
     StructuredData, Style, Table, TableColumn, TableState, Text, TextArea, TextInput, Theme, Tree,
     TreeNode, TreeState, Viewport, ViewportState, display_width, is_quit_key, terminal_size,
 };
+#[cfg(test)]
+use dragonstui_adapter_host::OperationId;
 use dragonstui_adapter_host::{
     ActionId, AdapterAction, AdapterClassification, AdapterDisconnect, AdapterEvent, AdapterId,
-    AdapterLiveData, AdapterManagement, AdapterManagementAction, ControllerActionOutcome,
+    AdapterLiveData, AdapterManagement, AdapterManagementAction, AdapterOperation,
     ControllerIpcDiagnostics, DiscoveryError, LocalAdapterRoot, Observation, ObservationSeverity,
-    local_controller_action_client, local_controller_diagnostics, local_controller_live_data,
-    local_controller_management_client,
+    OperationState, local_controller_action_client, local_controller_diagnostics,
+    local_controller_live_data, local_controller_management_client,
+    local_controller_operation_client,
 };
 
 const TICK_INTERVAL: Duration = Duration::from_millis(50);
@@ -465,6 +468,8 @@ fn adapter_action_worker_with_live_poll_pause(
 }
 
 const ACTION_REQUEST_CHANNEL_CAPACITY: usize = 1;
+const OPERATION_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const OPERATION_PROJECTION_CAPACITY: usize = 16;
 
 #[derive(Clone, Debug)]
 enum AdapterInvocation {
@@ -476,6 +481,7 @@ enum AdapterInvocation {
         action_id: ActionId,
         payload: serde_json::Value,
     },
+    Operations,
 }
 
 #[derive(Clone, Debug)]
@@ -484,10 +490,11 @@ enum AdapterInvocationResult {
         adapter_id: AdapterId,
         actions: Result<Vec<AdapterAction>, String>,
     },
-    Invoked {
-        adapter_id: AdapterId,
-        action_id: ActionId,
-        outcome: Result<ControllerActionOutcome, String>,
+    Started {
+        operation: Result<AdapterOperation, String>,
+    },
+    Operations {
+        operations: Result<Vec<AdapterOperation>, String>,
     },
 }
 
@@ -525,33 +532,43 @@ fn adapter_invocation_worker(
     let root = root.to_path_buf();
     let join = thread::spawn(move || {
         while let Ok(request) = receiver.recv() {
-            let client = local_controller_action_client(&root)
-                .map_err(|error| error.to_string())
-                .and_then(|client| {
-                    client.ok_or_else(|| "controller daemon is unavailable".to_owned())
-                });
             let result = match request {
                 AdapterInvocation::Discover { adapter_id } => AdapterInvocationResult::Discovered {
-                    actions: client.and_then(|client| {
-                        client
-                            .actions(&adapter_id)
-                            .map_err(|error| error.to_string())
-                    }),
+                    actions: local_controller_action_client(&root)
+                        .map_err(|error| error.to_string())
+                        .and_then(|client| {
+                            client.ok_or_else(|| "controller daemon is unavailable".to_owned())
+                        })
+                        .and_then(|client| {
+                            client
+                                .actions(&adapter_id)
+                                .map_err(|error| error.to_string())
+                        }),
                     adapter_id,
                 },
                 AdapterInvocation::Invoke {
                     adapter_id,
                     action_id,
                     payload,
-                } => AdapterInvocationResult::Invoked {
-                    outcome: client.and_then(|client| {
-                        client
-                            .invoke(&adapter_id, &action_id, payload)
-                            .map(|response| response.outcome)
-                            .map_err(|error| error.to_string())
-                    }),
-                    adapter_id,
-                    action_id,
+                } => AdapterInvocationResult::Started {
+                    operation: local_controller_operation_client(&root)
+                        .map_err(|error| error.to_string())
+                        .and_then(|client| {
+                            client.ok_or_else(|| "controller daemon is unavailable".to_owned())
+                        })
+                        .and_then(|client| {
+                            client
+                                .start(&adapter_id, &action_id, payload)
+                                .map_err(|error| error.to_string())
+                        }),
+                },
+                AdapterInvocation::Operations => AdapterInvocationResult::Operations {
+                    operations: local_controller_operation_client(&root)
+                        .map_err(|error| error.to_string())
+                        .and_then(|client| {
+                            client.ok_or_else(|| "controller daemon is unavailable".to_owned())
+                        })
+                        .and_then(|client| client.operations().map_err(|error| error.to_string())),
                 },
             };
             if results.send(result).is_err() {
@@ -1390,6 +1407,9 @@ struct Showcase {
     adapter_browser_mode: AdapterBrowserMode,
     adapter_actions: Vec<AdapterAction>,
     adapter_actions_adapter: Option<AdapterId>,
+    /// Bounded projection returned by the controller; it is never operation authority.
+    adapter_operations: Vec<AdapterOperation>,
+    last_operation_refresh: Instant,
     adapter_action_confirmation: Option<AdapterActionConfirmation>,
     adapter_invocation_sender: Option<SyncSender<AdapterInvocation>>,
     adapter_invocation_results: Option<Receiver<AdapterInvocationResult>>,
@@ -1522,6 +1542,8 @@ impl Showcase {
             adapter_browser_mode: AdapterBrowserMode::default(),
             adapter_actions: Vec::new(),
             adapter_actions_adapter: None,
+            adapter_operations: Vec::new(),
+            last_operation_refresh: started,
             adapter_action_confirmation: None,
             adapter_invocation_sender,
             adapter_invocation_results,
@@ -1869,23 +1891,39 @@ impl Showcase {
                     }
                 }
             }
-            AdapterInvocationResult::Invoked {
-                adapter_id,
-                action_id,
-                outcome,
-            } => {
-                self.adapter_action_status = Some(match outcome {
-                    Ok(ControllerActionOutcome::Succeeded { payload }) => {
-                        format!("Action {action_id} on {adapter_id} completed: {payload}")
-                    }
-                    Ok(ControllerActionOutcome::Failed { code, message }) => {
-                        format!("Action {action_id} on {adapter_id} failed [{code}]: {message}")
-                    }
-                    Err(error) => format!("Action {action_id} on {adapter_id} failed: {error}"),
-                });
-            }
+            AdapterInvocationResult::Started { operation } => match operation {
+                Ok(operation) => {
+                    self.adapter_action_status = Some(format!(
+                        "Operation {} accepted for {}",
+                        operation.id, operation.action_label
+                    ));
+                    let mut operations = std::mem::take(&mut self.adapter_operations);
+                    operations.retain(|current| current.id != operation.id);
+                    operations.push(operation);
+                    self.replace_adapter_operations(operations);
+                }
+                Err(error) => {
+                    self.adapter_action_status = Some(format!("Operation request failed: {error}"));
+                }
+            },
+            AdapterInvocationResult::Operations { operations } => match operations {
+                Ok(operations) => self.replace_adapter_operations(operations),
+                Err(error) => {
+                    self.adapter_action_status = Some(format!("Operation refresh failed: {error}"));
+                }
+            },
         }
         true
+    }
+
+    fn replace_adapter_operations(&mut self, mut operations: Vec<AdapterOperation>) {
+        let excess = operations
+            .len()
+            .saturating_sub(OPERATION_PROJECTION_CAPACITY);
+        if excess > 0 {
+            operations.drain(0..excess);
+        }
+        self.adapter_operations = operations;
     }
 
     fn queue_adapter_action(&mut self, action: AdapterManagementAction) {
@@ -1944,6 +1982,15 @@ impl Showcase {
                 changed |= self.drain_adapter_diagnostics_results();
                 changed |= self.drain_adapter_action_results();
                 changed |= self.drain_adapter_invocation_results();
+                if self.adapter_root.is_some()
+                    && now.saturating_duration_since(self.last_operation_refresh)
+                        >= OPERATION_POLL_INTERVAL
+                {
+                    self.last_operation_refresh = now;
+                    if let Some(sender) = &self.adapter_invocation_sender {
+                        let _ = sender.try_send(AdapterInvocation::Operations);
+                    }
+                }
                 changed |= self.animation_enabled && self.spinner.update(now);
                 if self.section == Section::Adapters
                     && now.saturating_duration_since(self.last_adapter_diagnostics_refresh)
@@ -5007,7 +5054,7 @@ fn render_adapter_actions(
         theme,
         BorderSet::rounded(),
     );
-    let detail_lines = showcase.selected_adapter_action().map_or_else(
+    let mut detail_lines = showcase.selected_adapter_action().map_or_else(
         || {
             vec![Line::from(localized(
                 showcase.language,
@@ -5052,6 +5099,45 @@ fn render_adapter_actions(
             ]
         },
     );
+    detail_lines.push(Line::from(""));
+    detail_lines.push(Line::new([Span::styled(
+        localized(showcase.language, "Recent Operations", "Son İşlemler"),
+        Style::new().fg(theme.warning).bold(),
+    )]));
+    if showcase.adapter_operations.is_empty() {
+        detail_lines.push(Line::from(localized(
+            showcase.language,
+            "No operations yet.",
+            "Henüz işlem yok.",
+        )));
+    } else {
+        for operation in &showcase.adapter_operations {
+            let state = match &operation.state {
+                OperationState::Pending => "pending",
+                OperationState::Running => "running",
+                OperationState::Succeeded { .. } => "succeeded",
+                OperationState::Failed { .. } => "failed",
+            };
+            detail_lines.push(Line::new([
+                Span::styled(operation.id.to_string(), Style::new().fg(theme.secondary)),
+                Span::styled(" · ", Style::new().fg(theme.muted)),
+                Span::styled(&operation.action_label, Style::new().fg(theme.text)),
+                Span::styled(" · ", Style::new().fg(theme.muted)),
+                Span::styled(state, Style::new().fg(theme.text)),
+            ]));
+            match &operation.state {
+                OperationState::Succeeded { payload } => detail_lines.push(Line::new([
+                    Span::styled("  output: ", Style::new().fg(theme.muted)),
+                    Span::styled(payload.to_string(), Style::new().fg(theme.text)),
+                ])),
+                OperationState::Failed { code, message } => detail_lines.push(Line::new([
+                    Span::styled("  failure: ", Style::new().fg(theme.muted)),
+                    Span::styled(format!("[{code}] {message}"), Style::new().fg(theme.error)),
+                ])),
+                OperationState::Pending | OperationState::Running => {}
+            }
+        }
+    }
     RichText::new(detail_lines).render(frame, detail);
     None
 }
@@ -5849,6 +5935,104 @@ mod tests {
             if action_id.as_str() == "fixture.inspect")
         );
         assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn action_surface_renders_controller_owned_operation_state() {
+        let mut showcase = Showcase::new(Instant::now());
+        showcase.phase = Phase::Showcase;
+        showcase.section = Section::Adapters;
+        showcase.adapter_browser_mode = AdapterBrowserMode::Actions;
+        showcase.adapter_operations = vec![AdapterOperation {
+            id: OperationId::new("operation-1").unwrap(),
+            adapter_id: AdapterId::new("fixture").unwrap(),
+            action_id: ActionId::new("fixture.action.alpha").unwrap(),
+            action_label: "Alpha".to_owned(),
+            state: OperationState::Succeeded {
+                payload: serde_json::json!({"result": "ok"}),
+            },
+        }];
+
+        let rendered = showcase_view(Size::new(120, 36), &mut showcase);
+        assert!(frame_contains(&rendered.frame, "Recent Operations"));
+        assert!(frame_contains(&rendered.frame, "operation-1"));
+        assert!(frame_contains(&rendered.frame, "succeeded"));
+    }
+
+    #[test]
+    fn action_surface_renders_typed_operation_failure_without_message_inference() {
+        let mut showcase = Showcase::new(Instant::now());
+        showcase.phase = Phase::Showcase;
+        showcase.section = Section::Adapters;
+        showcase.adapter_browser_mode = AdapterBrowserMode::Actions;
+        showcase.adapter_operations = vec![AdapterOperation {
+            id: OperationId::new("operation-3").unwrap(),
+            adapter_id: AdapterId::new("fixture").unwrap(),
+            action_id: ActionId::new("fixture.destroy.everything").unwrap(),
+            action_label: "Opaque action".to_owned(),
+            state: OperationState::Failed {
+                code: "fixture_rejected".to_owned(),
+                message: "The producer declined this request".to_owned(),
+            },
+        }];
+
+        let rendered = showcase_view(Size::new(120, 36), &mut showcase);
+        assert!(frame_contains(&rendered.frame, "failed"));
+        assert!(frame_contains(&rendered.frame, "fixture_rejected"));
+    }
+
+    #[test]
+    fn controller_operation_refresh_replaces_the_bounded_ui_projection() {
+        let mut showcase = Showcase::new(Instant::now());
+        showcase.phase = Phase::Showcase;
+        let (sender, receiver) = mpsc::sync_channel(1);
+        showcase.adapter_invocation_results = Some(receiver);
+        sender
+            .send(AdapterInvocationResult::Operations {
+                operations: Ok(vec![AdapterOperation {
+                    id: OperationId::new("operation-2").unwrap(),
+                    adapter_id: AdapterId::new("fixture").unwrap(),
+                    action_id: ActionId::new("fixture.action.alpha").unwrap(),
+                    action_label: "Alpha".to_owned(),
+                    state: OperationState::Running,
+                }]),
+            })
+            .unwrap();
+
+        assert!(showcase.drain_adapter_invocation_results());
+        assert_eq!(showcase.adapter_operations.len(), 1);
+        assert_eq!(showcase.adapter_operations[0].id.as_str(), "operation-2");
+        assert!(matches!(
+            showcase.adapter_operations[0].state,
+            OperationState::Running
+        ));
+    }
+
+    #[test]
+    fn controller_operation_refresh_clamps_an_oversized_projection_to_the_newest_entries() {
+        let mut showcase = Showcase::new(Instant::now());
+        let (sender, receiver) = mpsc::sync_channel(1);
+        showcase.adapter_invocation_results = Some(receiver);
+        let operations = (0..17)
+            .map(|index| AdapterOperation {
+                id: OperationId::new(format!("operation-{index}")).unwrap(),
+                adapter_id: AdapterId::new("fixture").unwrap(),
+                action_id: ActionId::new("fixture.action.alpha").unwrap(),
+                action_label: "Alpha".to_owned(),
+                state: OperationState::Succeeded {
+                    payload: serde_json::Value::Null,
+                },
+            })
+            .collect();
+        sender
+            .send(AdapterInvocationResult::Operations {
+                operations: Ok(operations),
+            })
+            .unwrap();
+
+        assert!(showcase.drain_adapter_invocation_results());
+        assert_eq!(showcase.adapter_operations.len(), 16);
+        assert_eq!(showcase.adapter_operations[0].id.as_str(), "operation-1");
     }
 
     #[test]
