@@ -26,10 +26,10 @@ use dragons_tui::{
     Alignment, Animation, BorderSet, Canvas, Cell, Color, CommandId, CommandPalette, Constraint,
     Event, FocusId, FocusState, Frame, Gauge, InspectorLayout, InspectorSplitState, KeyCode,
     KeyEvent, KeyMap, KeyModifiers, Line, List, ListState, Modal, MouseEvent, MouseKind,
-    PaletteCommand, Panel, Position, ProgressBar, Rect, RichText, Runtime, Scrollbar,
-    ScrollbarState, ShutdownSignal, Size, Span, Sparkline, Spinner, Style, Table, TableColumn,
-    TableState, Text, TextArea, TextInput, Theme, Tree, TreeNode, TreeState, Viewport,
-    ViewportState, display_width, is_quit_key, terminal_size,
+    PaletteCommand, Panel, Position, ProgressBar, PropertyRow, PropertyView, Rect, RichText,
+    Runtime, Scrollbar, ScrollbarState, ShutdownSignal, Size, Span, Sparkline, Spinner, Style,
+    Table, TableColumn, TableState, Text, TextArea, TextInput, Theme, Tree, TreeNode, TreeState,
+    Viewport, ViewportState, display_width, is_quit_key, terminal_size,
 };
 use dragonstui_adapter_host::{
     AdapterClassification, AdapterDisconnect, AdapterEvent, AdapterId, AdapterLiveData,
@@ -639,6 +639,8 @@ struct HitRegions {
     color_inputs: [Rect; 3],
     color_apply: Rect,
     adapter_inspector: Rect,
+    adapter_property_viewport: Rect,
+    adapter_property_scrollbar_track: Rect,
     scrollbar_track: Rect,
 }
 
@@ -952,6 +954,8 @@ struct Showcase {
     adapter_action_status: Option<String>,
     adapter_remove_confirmation: bool,
     adapter_inspector_split: InspectorSplitState,
+    adapter_property_viewport: ViewportState,
+    adapter_property_scrollbar: ScrollbarState,
     palette: Option<CommandPalette>,
     modal_open: bool,
     focus_before_modal: Option<FocusId>,
@@ -1062,6 +1066,8 @@ impl Showcase {
             adapter_action_status: None,
             adapter_remove_confirmation: false,
             adapter_inspector_split: InspectorSplitState::new(),
+            adapter_property_viewport: ViewportState::new(),
+            adapter_property_scrollbar: ScrollbarState::new(),
             palette: None,
             modal_open: false,
             focus_before_modal: None,
@@ -1483,6 +1489,20 @@ impl Showcase {
                 KeyCode::Enter => showcase_tree().toggle(&mut self.tree),
                 _ => false,
             },
+            Some(VIEWPORT_FOCUS)
+                if self.section == Section::Adapters
+                    && self.adapter_browser_mode == AdapterBrowserMode::Adapters =>
+            {
+                match key.code {
+                    KeyCode::Up => self.adapter_property_viewport.scroll_up(),
+                    KeyCode::Down => self.adapter_property_viewport.scroll_down(),
+                    KeyCode::PageUp => self.adapter_property_viewport.page_up(),
+                    KeyCode::PageDown => self.adapter_property_viewport.page_down(),
+                    KeyCode::Home => self.adapter_property_viewport.home(),
+                    KeyCode::End => self.adapter_property_viewport.end(),
+                    _ => false,
+                }
+            }
             Some(VIEWPORT_FOCUS) => match key.code {
                 KeyCode::Up => self.viewport.scroll_up(),
                 KeyCode::Down => self.viewport.scroll_down(),
@@ -1622,16 +1642,71 @@ impl Showcase {
                     redraw: true,
                 };
             }
+
+            if mouse.kind == MouseKind::LeftDown {
+                if let Some(geometry) = Scrollbar::geometry(
+                    &self.adapter_property_viewport,
+                    self.hits.adapter_property_scrollbar_track,
+                ) && geometry.thumb.contains(point)
+                {
+                    return Outcome {
+                        quit: false,
+                        redraw: self.adapter_property_scrollbar.start_drag(geometry, point),
+                    };
+                }
+                if self.adapter_property_scrollbar.track_click(
+                    &mut self.adapter_property_viewport,
+                    self.hits.adapter_property_scrollbar_track,
+                    point,
+                ) {
+                    return Outcome {
+                        quit: false,
+                        redraw: true,
+                    };
+                }
+            }
+            let property_scrollbar_redraw = match mouse.kind {
+                MouseKind::Drag(dragons_tui::MouseButton::Left) => {
+                    self.adapter_property_scrollbar.drag_to(
+                        &mut self.adapter_property_viewport,
+                        self.hits.adapter_property_scrollbar_track,
+                        point,
+                    )
+                }
+                MouseKind::LeftUp => self.adapter_property_scrollbar.stop_drag(),
+                _ => false,
+            };
+            if property_scrollbar_redraw {
+                return Outcome {
+                    quit: false,
+                    redraw: true,
+                };
+            }
+            let property_scroll_redraw = match mouse.kind {
+                MouseKind::ScrollUp if self.hits.adapter_property_viewport.contains(point) => {
+                    self.adapter_property_viewport.scroll_up()
+                }
+                MouseKind::ScrollDown if self.hits.adapter_property_viewport.contains(point) => {
+                    self.adapter_property_viewport.scroll_down()
+                }
+                _ => false,
+            };
+            if property_scroll_redraw {
+                return Outcome {
+                    quit: false,
+                    redraw: true,
+                };
+            }
         }
 
         if mouse.kind == MouseKind::LeftDown {
-            if let Some(geometry) = Scrollbar::geometry(&self.viewport, self.hits.scrollbar_track) {
-                if geometry.thumb.contains(point) {
-                    return Outcome {
-                        quit: false,
-                        redraw: self.scrollbar.start_drag(geometry, point),
-                    };
-                }
+            if let Some(geometry) = Scrollbar::geometry(&self.viewport, self.hits.scrollbar_track)
+                && geometry.thumb.contains(point)
+            {
+                return Outcome {
+                    quit: false,
+                    redraw: self.scrollbar.start_drag(geometry, point),
+                };
             }
             if self
                 .scrollbar
@@ -3246,9 +3321,27 @@ fn render_adapter_list(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -
         .selected_index(showcase.adapter_rows.len())
         .and_then(|index| showcase.adapter_rows.get(index));
     let diagnostics = selected.and_then(|row| showcase.adapter_diagnostics.get(&row.id));
+    let property_area = Rect::new(
+        detail.x,
+        detail.y,
+        detail.width.saturating_sub(1),
+        detail.height,
+    );
+    let property_track = if detail.width > property_area.width {
+        Rect::new(
+            detail.x.saturating_add(property_area.width),
+            detail.y,
+            1,
+            detail.height,
+        )
+    } else {
+        Rect::default()
+    };
+    showcase.hits.adapter_property_viewport = property_area;
+    showcase.hits.adapter_property_scrollbar_track = property_track;
     render_adapter_inspector(
         frame,
-        detail,
+        property_area,
         selected,
         AdapterInspectorContext {
             diagnostics,
@@ -3259,6 +3352,14 @@ fn render_adapter_list(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -
         },
         showcase.language,
         showcase.theme,
+        &mut showcase.adapter_property_viewport,
+    );
+    let _ = Scrollbar::render(
+        frame,
+        &showcase.adapter_property_viewport,
+        property_track,
+        Style::new().fg(theme.muted).bg(theme.background).dim(),
+        Style::new().fg(theme.success).bg(theme.background).bold(),
     );
     None
 }
@@ -3420,6 +3521,7 @@ fn render_adapter_inspector(
     context: AdapterInspectorContext<'_>,
     language: Language,
     theme: Theme,
+    property_viewport: &mut ViewportState,
 ) {
     let diagnostics = context.diagnostics;
     let controller_error = context.controller_error;
@@ -3427,6 +3529,7 @@ fn render_adapter_inspector(
     let live_filter = context.live_filter;
     let live_view = context.live_view;
     let Some(row) = selected else {
+        property_viewport.update_dimensions(0, area.height);
         Text::new(localized(
             language,
             "No adapter selected",
@@ -3532,7 +3635,7 @@ fn render_adapter_inspector(
         .as_ref()
         .map(|disconnect| format!("{}: {}", disconnect.adapter_id, disconnect.reason))
         .unwrap_or_else(|| unavailable.clone());
-    let lines = vec![
+    let rows = vec![
         (
             localized(language, "Adapter ID", "Adaptör Kimliği"),
             row.id.clone(),
@@ -3617,13 +3720,17 @@ fn render_adapter_inspector(
             stderr_tail,
         ),
     ];
-    RichText::new(lines.into_iter().map(|(label, value)| {
-        Line::new([
-            Span::styled(format!("{label}: "), Style::new().fg(theme.warning).bold()),
-            Span::styled(value, Style::new().fg(theme.text)),
-        ])
-    }))
-    .render(frame, area);
+    let rows = rows
+        .into_iter()
+        .map(|(label, value)| PropertyRow::new(format!("{label}:"), value))
+        .collect::<Vec<_>>();
+    PropertyView::new(&rows).render(
+        frame,
+        area,
+        property_viewport,
+        Style::new().fg(theme.warning).bg(theme.background).bold(),
+        Style::new().fg(theme.text).bg(theme.background),
+    );
 }
 
 fn format_uptime_millis(millis: u64) -> String {
@@ -4248,6 +4355,107 @@ mod tests {
                 .redraw
         );
         assert!(!showcase.adapter_inspector_split.is_dragging());
+    }
+
+    #[test]
+    fn adapter_inspector_preserves_all_detail_rows_through_a_scrolled_property_view() {
+        let mut showcase = Showcase::new(Instant::now());
+        showcase.phase = Phase::Showcase;
+        showcase.select_section(Section::Adapters);
+        showcase.adapter_rows = vec![AdapterRow {
+            id: "mock".to_owned(),
+            name: "Inspector Mock".to_owned(),
+            version: "0.1.0".to_owned(),
+            state: AdapterViewState::Stopped,
+            protocol: "1".to_owned(),
+            executable: "adapter-bin".to_owned(),
+            last_error: None,
+        }];
+        showcase.table.set_selected(0);
+
+        let initial = showcase_view(Size::new(100, 20), &mut showcase);
+        assert!(frame_contains(&initial.frame, "Adapter ID"));
+        assert!(showcase.adapter_property_viewport.max_scroll() > 0);
+        let track = showcase.hits.adapter_property_scrollbar_track;
+        assert!(Scrollbar::geometry(&showcase.adapter_property_viewport, track).is_some());
+        assert!(
+            showcase
+                .handle_mouse(MouseEvent {
+                    x: track.x,
+                    y: track.bottom().saturating_sub(1),
+                    kind: MouseKind::LeftDown,
+                    modifiers: KeyModifiers::default(),
+                })
+                .redraw
+        );
+        assert!(showcase.adapter_property_viewport.is_at_bottom());
+
+        assert!(showcase.handle_key(key(KeyCode::Home)).redraw);
+        assert!(!showcase.adapter_property_viewport.is_at_bottom());
+        assert!(showcase.handle_key(key(KeyCode::End)).redraw);
+        let scrolled = showcase_view(Size::new(100, 20), &mut showcase);
+        assert!(frame_contains(&scrolled.frame, "Last error"));
+        assert!(showcase.adapter_property_viewport.is_at_bottom());
+    }
+
+    #[test]
+    fn adapter_property_view_rerenders_rows_for_the_newly_selected_adapter() {
+        let mut showcase = Showcase::new(Instant::now());
+        showcase.phase = Phase::Showcase;
+        showcase.select_section(Section::Adapters);
+        showcase.adapter_rows = vec![
+            AdapterRow {
+                id: "alpha".to_owned(),
+                name: "ALPHA".to_owned(),
+                version: "1.0.0".to_owned(),
+                state: AdapterViewState::Stopped,
+                protocol: "1".to_owned(),
+                executable: "alpha-bin".to_owned(),
+                last_error: None,
+            },
+            AdapterRow {
+                id: "beta".to_owned(),
+                name: "BETA".to_owned(),
+                version: "2.0.0".to_owned(),
+                state: AdapterViewState::Stopped,
+                protocol: "1".to_owned(),
+                executable: "beta-bin".to_owned(),
+                last_error: None,
+            },
+        ];
+        showcase.table.set_selected(0);
+        let first = showcase_view(Size::new(100, 20), &mut showcase);
+        let property_contains = |frame: &Frame, rect: Rect, needle: &str| {
+            (rect.y..rect.bottom()).any(|y| {
+                (rect.x..rect.right())
+                    .filter_map(|x| frame.buffer().get(x, y).map(|cell| cell.character))
+                    .collect::<String>()
+                    .contains(needle)
+            })
+        };
+        assert!(property_contains(
+            &first.frame,
+            showcase.hits.adapter_property_viewport,
+            "ALPHA"
+        ));
+        assert!(!property_contains(
+            &first.frame,
+            showcase.hits.adapter_property_viewport,
+            "BETA"
+        ));
+
+        showcase.table.set_selected(1);
+        let second = showcase_view(Size::new(100, 20), &mut showcase);
+        assert!(property_contains(
+            &second.frame,
+            showcase.hits.adapter_property_viewport,
+            "BETA"
+        ));
+        assert!(!property_contains(
+            &second.frame,
+            showcase.hits.adapter_property_viewport,
+            "ALPHA"
+        ));
     }
 
     #[test]
@@ -4960,8 +5168,9 @@ mod tests {
         assert!(showcase.handle_key(key(KeyCode::Enter)).redraw);
         assert_eq!(showcase.live_filter.query, "DRAGON");
         let view = showcase_view(Size::new(160, 55), &mut showcase);
-        assert!(frame_contains(&view.frame, "Visible live history: 1"));
-        assert!(frame_contains(&view.frame, "Live query: DRAGON"));
+        assert!(frame_contains(&view.frame, "Visible live history:"));
+        assert!(frame_contains(&view.frame, "Live query:"));
+        assert!(frame_contains(&view.frame, "DRAGON"));
     }
 
     #[test]
@@ -5219,7 +5428,8 @@ mod tests {
                 matches!(message, LiveDataMessage::Event(AdapterEvent { payload, .. }) if payload.to_string().contains('1'))
             }));
         let paused = showcase_view(Size::new(160, 55), &mut showcase);
-        assert!(frame_contains(&paused.frame, "Live view: PAUSED"));
+        assert!(frame_contains(&paused.frame, "Live view:"));
+        assert!(frame_contains(&paused.frame, "PAUSED"));
 
         showcase.handle_key(key(KeyCode::Char('f')));
         assert!(showcase
@@ -5229,7 +5439,8 @@ mod tests {
                 matches!(message, LiveDataMessage::Event(AdapterEvent { payload, .. }) if payload.to_string().contains('2'))
             }));
         let follow = showcase_view(Size::new(160, 55), &mut showcase);
-        assert!(frame_contains(&follow.frame, "Live view: FOLLOW"));
+        assert!(frame_contains(&follow.frame, "Live view:"));
+        assert!(frame_contains(&follow.frame, "FOLLOW"));
     }
 
     #[test]
