@@ -35,6 +35,7 @@ fn main() {
         "empty-capabilities" => protocol_mode(MockBehavior::EmptyCapabilities, &options.id),
         "shared-capabilities" => protocol_mode(MockBehavior::SharedCapabilities, &options.id),
         "events" => protocol_mode(MockBehavior::Events, &options.id),
+        "live-events" => protocol_mode(MockBehavior::LiveEvents, &options.id),
         "stress-events" => protocol_mode(MockBehavior::StressEvents, &options.id),
         "out-of-order" => protocol_mode(MockBehavior::OutOfOrder, &options.id),
         "unknown-response" => protocol_mode(MockBehavior::UnknownResponse, &options.id),
@@ -151,6 +152,7 @@ fn protocol_mode(behavior: MockBehavior, adapter_id: &str) {
         ),
         MockBehavior::Normal
         | MockBehavior::Events
+        | MockBehavior::LiveEvents
         | MockBehavior::StressEvents
         | MockBehavior::OutOfOrder
         | MockBehavior::UnknownResponse
@@ -181,6 +183,14 @@ fn protocol_mode(behavior: MockBehavior, adapter_id: &str) {
             protocol: PROTOCOL_VERSION,
             id: dragonstui_adapter_host::RequestId::new("unknown:1").unwrap(),
             payload: json!({"unknown": true}),
+        }));
+    }
+    if behavior == MockBehavior::LiveEvents {
+        emit(&ProtocolMessage::Event(Event {
+            protocol: PROTOCOL_VERSION,
+            stream: "live".to_owned(),
+            kind: "snapshot".to_owned(),
+            payload: json!({"sequence": 1}),
         }));
     }
     if behavior == MockBehavior::StressEvents {
@@ -301,6 +311,7 @@ enum MockBehavior {
     EmptyCapabilities,
     SharedCapabilities,
     Events,
+    LiveEvents,
     StressEvents,
     OutOfOrder,
     UnknownResponse,

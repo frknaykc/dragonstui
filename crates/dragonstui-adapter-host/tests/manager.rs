@@ -189,3 +189,63 @@ fn unregister_stops_a_running_adapter_and_clears_its_capability_and_state() {
         Err(ManagerError::UnknownAdapter(_))
     ));
 }
+
+#[test]
+fn manager_drains_generic_live_events_with_their_adapter_and_event_identity() {
+    let root = TempRoot::new("live-events");
+    root.adapter("mock-a");
+    root.adapter("mock-b");
+    let a = AdapterId::new("mock-a").unwrap();
+    let b = AdapterId::new("mock-b").unwrap();
+    let mut manager = AdapterManager::new(Duration::from_millis(200), 16);
+    manager.discover(LocalAdapterRoot::new(&root.path)).unwrap();
+    manager
+        .start_with_config(&a, config("mock-a", "stress-events"))
+        .unwrap();
+    manager
+        .start_with_config(&b, config("mock-b", "stress-events"))
+        .unwrap();
+
+    for _ in 0..12 {
+        manager.poll(Duration::from_millis(20));
+    }
+
+    let live_data = manager.take_live_data();
+    assert!(live_data.disconnects.is_empty());
+    assert!(live_data.events.iter().any(|event| {
+        event.adapter_id == a
+            && event.stream == "stress"
+            && event.kind == "tick"
+            && event.payload["index"].is_number()
+    }));
+    assert!(live_data.events.iter().any(|event| {
+        event.adapter_id == b
+            && event.stream == "stress"
+            && event.kind == "tick"
+            && event.payload["index"].is_number()
+    }));
+}
+
+#[test]
+fn deterministic_mock_live_event_reaches_the_generic_manager_boundary() {
+    let root = TempRoot::new("deterministic-live-event");
+    root.adapter("mock-a");
+    let id = AdapterId::new("mock-a").unwrap();
+    let mut manager = AdapterManager::new(Duration::from_millis(200), 8);
+    manager.discover(LocalAdapterRoot::new(&root.path)).unwrap();
+    manager
+        .start_with_config(&id, config("mock-a", "live-events"))
+        .unwrap();
+
+    for _ in 0..12 {
+        manager.poll(Duration::from_millis(20));
+    }
+
+    let live_data = manager.take_live_data();
+    assert_eq!(live_data.events.len(), 1);
+    let event = &live_data.events[0];
+    assert_eq!(event.adapter_id, id);
+    assert_eq!(event.stream, "live");
+    assert_eq!(event.kind, "snapshot");
+    assert_eq!(event.payload, serde_json::json!({"sequence": 1}));
+}

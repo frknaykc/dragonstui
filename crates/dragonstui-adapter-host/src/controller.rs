@@ -6,8 +6,8 @@ use std::{
 };
 
 use crate::{
-    AdapterDiagnostics, AdapterId, AdapterManager, AdapterState, DiscoveryError, LocalAdapterRoot,
-    ManagerError,
+    AdapterDiagnostics, AdapterId, AdapterLiveData, AdapterManager, AdapterState, DiscoveryError,
+    LocalAdapterRoot, ManagerError,
 };
 
 /// Stateful lifecycle owner intended for a long-lived host controller process.
@@ -86,6 +86,11 @@ impl AdapterController {
 
     pub fn poll(&mut self, per_adapter_timeout: Duration) {
         self.manager.poll(per_adapter_timeout);
+    }
+
+    /// Drains generic live data produced by already-running adapters.
+    pub fn take_live_data(&mut self) -> AdapterLiveData {
+        self.manager.take_live_data()
     }
 
     pub fn root(&self) -> &Path {

@@ -4,12 +4,15 @@ use std::{
     io::{self, BufRead, BufReader, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     path::Path,
+    thread,
     time::Duration,
 };
 
 use serde::{Deserialize, Serialize};
 
-use crate::{AdapterController, AdapterDiagnostics, AdapterId, AdapterManagementOutcome};
+use crate::{
+    AdapterController, AdapterDiagnostics, AdapterId, AdapterLiveData, AdapterManagementOutcome,
+};
 
 /// Loopback-only controller command. A daemon persists the controller and
 /// serves one newline-delimited JSON request per client connection.
@@ -37,7 +40,7 @@ pub enum ControllerIpcCommand {
     Management {
         request: ControllerManagementRequest,
     },
-
+    LiveData,
     Shutdown,
 }
 
@@ -63,13 +66,13 @@ pub enum ControllerManagementResponse {
     },
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub enum ControllerIpcStatus {
     Missing,
     State(String),
     Diagnostics(Box<ControllerIpcDiagnostics>),
     Management(ControllerManagementResponse),
-
+    LiveData(AdapterLiveData),
     Completed,
 }
 
@@ -228,10 +231,24 @@ impl ControllerIpcServer {
 
     /// Runs until a locally authenticated client requests shutdown.
     pub fn serve_forever(mut self) -> Result<(), ControllerIpcError> {
+        self.listener
+            .set_nonblocking(true)
+            .map_err(ControllerIpcError::Accept)?;
         loop {
-            let (stream, _) = self.listener.accept().map_err(ControllerIpcError::Accept)?;
-            if self.serve_one(stream)? {
-                return Ok(());
+            self.controller.poll(Duration::ZERO);
+            match self.listener.accept() {
+                Ok((stream, _)) => {
+                    stream
+                        .set_nonblocking(false)
+                        .map_err(ControllerIpcError::Accept)?;
+                    if self.serve_one(stream)? {
+                        return Ok(());
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => return Err(ControllerIpcError::Accept(error)),
             }
         }
     }
@@ -247,8 +264,18 @@ impl ControllerIpcServer {
             },
             Err(error) => (WireResponse::failure(error.to_string()), false),
         };
-        serde_json::to_writer(&mut stream, &response).map_err(ControllerIpcError::Encode)?;
-        stream.write_all(b"\n").map_err(ControllerIpcError::Write)?;
+        if let Err(error) = serde_json::to_writer(&mut stream, &response) {
+            if error.io_error_kind().is_some_and(is_peer_disconnect) {
+                return Ok(shutdown);
+            }
+            return Err(ControllerIpcError::Encode(error));
+        }
+        if let Err(error) = stream.write_all(b"\n") {
+            if is_peer_disconnect(error.kind()) {
+                return Ok(shutdown);
+            }
+            return Err(ControllerIpcError::Write(error));
+        }
         Ok(shutdown)
     }
 
@@ -292,6 +319,10 @@ impl ControllerIpcServer {
                         false,
                     )
                 }),
+            ControllerIpcCommand::LiveData => Ok((
+                ControllerIpcStatus::LiveData(self.controller.take_live_data()),
+                false,
+            )),
             ControllerIpcCommand::Diagnostics { .. }
             | ControllerIpcCommand::Start { .. }
             | ControllerIpcCommand::Stop { .. }
@@ -329,6 +360,16 @@ impl ControllerIpcServer {
             ))),
         }
     }
+}
+
+fn is_peer_disconnect(kind: io::ErrorKind) -> bool {
+    matches!(
+        kind,
+        io::ErrorKind::BrokenPipe
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::NotConnected
+    )
 }
 
 #[derive(Clone, Debug)]
@@ -380,12 +421,33 @@ impl ControllerClient {
         self.call(ControllerIpcCommand::Shutdown)
     }
 
+    pub fn live_data(&self) -> Result<AdapterLiveData, ControllerIpcError> {
+        match self.call(ControllerIpcCommand::LiveData)? {
+            ControllerIpcStatus::LiveData(data) => Ok(data),
+            status => Err(ControllerIpcError::UnexpectedStatus(format!("{status:?}"))),
+        }
+    }
+
     fn call(
         &self,
         command: ControllerIpcCommand,
     ) -> Result<ControllerIpcStatus, ControllerIpcError> {
-        let mut stream = TcpStream::connect_timeout(&self.address, Duration::from_millis(100))
-            .map_err(ControllerIpcError::Connect)?;
+        let mut attempts_remaining = CONTROLLER_CONNECT_RETRIES;
+        let mut stream = loop {
+            match TcpStream::connect_timeout(&self.address, Duration::from_millis(100)) {
+                Ok(stream) => break stream,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                    ) && attempts_remaining > 0 =>
+                {
+                    attempts_remaining -= 1;
+                    thread::sleep(CONTROLLER_CONNECT_RETRY_DELAY);
+                }
+                Err(error) => return Err(ControllerIpcError::Connect(error)),
+            }
+        };
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .map_err(ControllerIpcError::Read)?;
@@ -461,6 +523,12 @@ impl ControllerManagementClient {
         }
     }
 
+    pub fn live_data(&self) -> Result<AdapterLiveData, ControllerManagementClientError> {
+        self.client
+            .live_data()
+            .map_err(ControllerManagementClientError::from_ipc)
+    }
+
     fn lifecycle(
         &self,
         request: ControllerManagementRequest,
@@ -507,6 +575,8 @@ impl ControllerManagementClient {
 
 const CONTROLLER_DIRECTORY: &str = ".controller";
 const CONTROLLER_ENDPOINT: &str = "endpoint.json";
+const CONTROLLER_CONNECT_RETRIES: u16 = 250;
+const CONTROLLER_CONNECT_RETRY_DELAY: Duration = Duration::from_millis(10);
 
 #[derive(Deserialize)]
 struct LocalControllerEndpoint {
@@ -547,6 +617,19 @@ pub fn local_controller_diagnostics(
     };
     client
         .diagnostics(id)
+        .map_err(LocalControllerError::Management)
+}
+
+/// Drains generic live data from the authenticated local controller.
+pub fn local_controller_live_data(
+    root: &Path,
+) -> Result<Option<AdapterLiveData>, LocalControllerError> {
+    let Some(client) = local_controller_management_client(root)? else {
+        return Ok(None);
+    };
+    client
+        .live_data()
+        .map(Some)
         .map_err(LocalControllerError::Management)
 }
 
@@ -646,6 +729,15 @@ mod tests {
             .unwrap(),
             ManagementCommand::Diagnostics(id)
         );
+    }
+
+    #[test]
+    fn peer_disconnect_classifies_all_socket_close_variants() {
+        assert!(is_peer_disconnect(io::ErrorKind::BrokenPipe));
+        assert!(is_peer_disconnect(io::ErrorKind::ConnectionReset));
+        assert!(is_peer_disconnect(io::ErrorKind::ConnectionAborted));
+        assert!(is_peer_disconnect(io::ErrorKind::NotConnected));
+        assert!(!is_peer_disconnect(io::ErrorKind::WouldBlock));
     }
 }
 

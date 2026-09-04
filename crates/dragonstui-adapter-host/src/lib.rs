@@ -24,7 +24,8 @@ pub use controller_ipc::{
     ControllerClient, ControllerIpcCommand, ControllerIpcDiagnostics, ControllerIpcError,
     ControllerIpcServer, ControllerIpcStatus, ControllerManagementClient,
     ControllerManagementClientError, ControllerManagementRequest, ControllerManagementResponse,
-    LocalControllerError, local_controller_diagnostics, local_controller_management_client,
+    LocalControllerError, local_controller_diagnostics, local_controller_live_data,
+    local_controller_management_client,
 };
 pub use discovery::{
     AdapterClassification, DiscoveredAdapter, DiscoveryError, LocalAdapterRoot, MANIFEST_FILE_NAME,
@@ -36,7 +37,9 @@ pub use installer::{
 pub use management::{
     AdapterManagement, AdapterManagementAction, AdapterManagementError, AdapterManagementOutcome,
 };
-pub use manager::{AdapterDiagnostics, AdapterManager, ManagerError};
+pub use manager::{
+    AdapterDiagnostics, AdapterDisconnect, AdapterLiveData, AdapterManager, ManagerError,
+};
 pub use manifest::{AdapterManifest, ExecutablePath, ManifestError};
 pub use process::{AdapterProcess, AdapterProcessConfig, ProcessError, ProcessStatus};
 pub use protocol::{

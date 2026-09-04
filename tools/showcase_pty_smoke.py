@@ -347,6 +347,7 @@ def setup_m42_fixture(controller_binary: Path, mock_binary: Path) -> tuple[tempf
     write_mock_adapter(root, mock_binary, "adapter-b", "timeout")
     write_mock_adapter(root, mock_binary, "capability-a", "shared-capabilities")
     write_mock_adapter(root, mock_binary, "capability-b", "shared-capabilities")
+    write_mock_adapter(root, mock_binary, "live-a", "live-events")
     daemon = subprocess.Popen(
         [str(controller_binary), "--root", str(root), "controller-daemon"],
         env={**os.environ, "DRAGONSTUI_CONTROLLER_TOKEN": secrets.token_hex(32)},
@@ -509,6 +510,22 @@ def main() -> int:
             send(master, output, b"\x1b")
             visible = fully_reconstructed_visible_text(output)
             require("Adapter Inspector" in visible, "capability browser did not return to the adapter inspector")
+
+            # M44: the live adapter emits one opaque event after its handshake.
+            # The showcase worker drains authenticated controller data away from
+            # the UI loop and the tick applies it to render-owned state.
+            send(master, output, b"\x1b[B" * 4)
+            send(master, output, b"s")
+            wait_for_text(master, output, "State: running", 2.0, "live adapter did not start")
+            wait_for_text(master, output, "Live events received: 1", 3.0, "live event did not reach showcase state")
+            wait_for_text(master, output, "Last live adapter: live-a", 1.0, "live adapter identity was not rendered")
+            wait_for_text(master, output, "Last live stream: live", 1.0, "live stream identity was not rendered")
+            wait_for_text(master, output, "Last live kind: snapshot", 1.0, "live event kind was not rendered")
+            wait_for_text(master, output, "Last live payload: {\"sequence\":1}", 1.0, "opaque live payload was not rendered")
+            send(master, output, b"1")
+            wait_for_text(master, output, "Static benchmark context", 1.0, "input stalled while live worker was active")
+            send(master, output, b"8")
+            wait_for_text(master, output, "Adapter Inspector", 1.0, "adapter inspector did not remain responsive")
 
         # Explicit visible header tabs: 1 Overview through 8 Adapters.
         for x, marker in (

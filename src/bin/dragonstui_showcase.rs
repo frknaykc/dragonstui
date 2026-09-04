@@ -9,7 +9,8 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        mpsc::{self, Receiver, Sender},
+        atomic::{AtomicUsize, Ordering},
+        mpsc::{self, Receiver, Sender, SyncSender, TrySendError},
     },
     thread,
     time::{Duration, Instant},
@@ -30,12 +31,15 @@ use dragons_tui::{
     ViewportState, display_width, is_quit_key, terminal_size,
 };
 use dragonstui_adapter_host::{
-    AdapterClassification, AdapterId, AdapterManagement, AdapterManagementAction,
-    ControllerIpcDiagnostics, DiscoveryError, LocalAdapterRoot, local_controller_diagnostics,
+    AdapterClassification, AdapterDisconnect, AdapterEvent, AdapterId, AdapterLiveData,
+    AdapterManagement, AdapterManagementAction, ControllerIpcDiagnostics, DiscoveryError,
+    LocalAdapterRoot, local_controller_diagnostics, local_controller_live_data,
     local_controller_management_client,
 };
 
 const TICK_INTERVAL: Duration = Duration::from_millis(50);
+const LIVE_DATA_CHANNEL_CAPACITY: usize = 8;
+const LIVE_DATA_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const SPLASH_DURATION: Duration = Duration::from_secs(6);
 const LIST_FOCUS: FocusId = FocusId::new(1);
 const TABLE_FOCUS: FocusId = FocusId::new(2);
@@ -340,6 +344,18 @@ impl Drop for AdapterActionPermit {
     }
 }
 
+type ControllerIoLock = Arc<Mutex<()>>;
+
+struct LivePollPause {
+    active: Arc<AtomicUsize>,
+}
+
+impl Drop for LivePollPause {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 fn execute_adapter_action(root: &Path, action: AdapterManagementAction) -> Result<String, String> {
     match action {
         action @ (AdapterManagementAction::Start { .. }
@@ -364,8 +380,24 @@ fn execute_adapter_action(root: &Path, action: AdapterManagementAction) -> Resul
     }
 }
 
+#[cfg(test)]
 fn adapter_action_worker(
     root: &Path,
+) -> (
+    Sender<AdapterManagementAction>,
+    Receiver<Result<String, String>>,
+) {
+    adapter_action_worker_with_live_poll_pause(
+        root,
+        Arc::new(Mutex::new(())),
+        Arc::new(AtomicUsize::new(0)),
+    )
+}
+
+fn adapter_action_worker_with_live_poll_pause(
+    root: &Path,
+    controller_io_lock: ControllerIoLock,
+    live_poll_pause: Arc<AtomicUsize>,
 ) -> (
     Sender<AdapterManagementAction>,
     Receiver<Result<String, String>>,
@@ -385,10 +417,29 @@ fn adapter_action_worker(
                     continue;
                 }
             };
+            let pause = matches!(
+                &action,
+                AdapterManagementAction::Start { .. }
+                    | AdapterManagementAction::Stop { .. }
+                    | AdapterManagementAction::Restart { .. }
+            )
+            .then(|| {
+                live_poll_pause.fetch_add(1, Ordering::AcqRel);
+                LivePollPause {
+                    active: Arc::clone(&live_poll_pause),
+                }
+            });
             let root = root.clone();
             let results = results.clone();
+            let controller_io_lock = Arc::clone(&controller_io_lock);
             thread::spawn(move || {
+                if pause.is_some() {
+                    let _controller_io = controller_io_lock
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                }
                 let result = execute_adapter_action(&root, action);
+                drop(pause);
                 drop(permit);
                 let _ = results.send(result);
             });
@@ -587,6 +638,122 @@ struct HitRegions {
     color_apply: Rect,
 }
 
+/// A capability-agnostic handoff from the controller receiver to the UI thread.
+#[derive(Clone, Debug)]
+enum LiveDataMessage {
+    Event(AdapterEvent),
+    Disconnected(AdapterDisconnect),
+}
+
+/// The small M44 proof state; this intentionally keeps no event history.
+#[derive(Clone, Debug, Default)]
+struct LiveDataState {
+    received_count: usize,
+    latest_event: Option<AdapterEvent>,
+    latest_disconnect: Option<AdapterDisconnect>,
+}
+
+impl LiveDataState {
+    fn apply(&mut self, message: LiveDataMessage) {
+        self.received_count = self.received_count.saturating_add(1);
+        match message {
+            LiveDataMessage::Event(event) => self.latest_event = Some(event),
+            LiveDataMessage::Disconnected(disconnect) => {
+                self.latest_disconnect = Some(disconnect);
+            }
+        }
+    }
+}
+
+struct LiveDataWorker {
+    shutdown: Sender<()>,
+    join: Option<thread::JoinHandle<()>>,
+}
+
+impl LiveDataWorker {
+    fn stop(&mut self) {
+        let _ = self.shutdown.send(());
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+
+    #[cfg(test)]
+    fn is_finished(&self) -> bool {
+        self.join.is_none()
+    }
+}
+
+impl Drop for LiveDataWorker {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+fn forward_live_data(sender: &SyncSender<LiveDataMessage>, data: AdapterLiveData) -> usize {
+    let mut forwarded = 0;
+    for message in data.events.into_iter().map(LiveDataMessage::Event).chain(
+        data.disconnects
+            .into_iter()
+            .map(LiveDataMessage::Disconnected),
+    ) {
+        match sender.try_send(message) {
+            Ok(()) => forwarded += 1,
+            Err(TrySendError::Full(_)) => {}
+            Err(TrySendError::Disconnected(_)) => break,
+        }
+    }
+    forwarded
+}
+
+fn live_data_worker<F>(mut receive: F) -> (Receiver<LiveDataMessage>, LiveDataWorker)
+where
+    F: FnMut() -> Result<Option<AdapterLiveData>, String> + Send + 'static,
+{
+    let (sender, receiver) = mpsc::sync_channel(LIVE_DATA_CHANNEL_CAPACITY);
+    let (shutdown, shutdown_receiver) = mpsc::channel();
+    let join = thread::spawn(move || {
+        loop {
+            if shutdown_receiver.try_recv().is_ok() {
+                break;
+            }
+            if let Ok(Some(data)) = receive() {
+                forward_live_data(&sender, data);
+            }
+            match shutdown_receiver.recv_timeout(LIVE_DATA_POLL_INTERVAL) {
+                Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+        }
+    });
+    (
+        receiver,
+        LiveDataWorker {
+            shutdown,
+            join: Some(join),
+        },
+    )
+}
+
+fn local_live_data_worker(
+    root: PathBuf,
+    controller_io_lock: ControllerIoLock,
+    live_poll_pause: Arc<AtomicUsize>,
+) -> (Receiver<LiveDataMessage>, LiveDataWorker) {
+    live_data_worker(move || {
+        if live_poll_pause.load(Ordering::Acquire) != 0 {
+            return Ok(None);
+        }
+        let _controller_io = controller_io_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if live_poll_pause.load(Ordering::Acquire) != 0 {
+            return Ok(None);
+        }
+        local_controller_live_data(&root).map_err(|error| error.to_string())
+    })
+}
+
 struct Showcase {
     phase: Phase,
     started: Instant,
@@ -613,10 +780,15 @@ struct Showcase {
     adapter_discovery_error: Option<String>,
     adapter_diagnostics: BTreeMap<String, ControllerIpcDiagnostics>,
     adapter_controller_error: Option<String>,
+    controller_io_lock: ControllerIoLock,
+    live_poll_pause: Arc<AtomicUsize>,
     adapter_diagnostics_sender: Option<Sender<AdapterDiagnosticsSnapshot>>,
     adapter_diagnostics_results: Option<Receiver<AdapterDiagnosticsSnapshot>>,
     adapter_diagnostics_refresh_in_flight: bool,
     last_adapter_diagnostics_refresh: Instant,
+    live_data: LiveDataState,
+    live_data_results: Option<Receiver<LiveDataMessage>>,
+    live_data_worker: Option<LiveDataWorker>,
     adapter_action_sender: Option<Sender<AdapterManagementAction>>,
     adapter_action_results: Option<Receiver<Result<String, String>>>,
     adapter_action_status: Option<String>,
@@ -652,6 +824,8 @@ impl Showcase {
         tree.expand(2);
         tree.set_selected(1);
         let adapter_root = adapter_root.map(Path::to_path_buf);
+        let controller_io_lock = Arc::new(Mutex::new(()));
+        let live_poll_pause = Arc::new(AtomicUsize::new(0));
         let (adapter_rows, adapter_discovery_error) = match adapter_root.as_deref() {
             Some(root) => match adapter_rows_from_root(root) {
                 Ok(rows) => (rows, None),
@@ -661,7 +835,13 @@ impl Showcase {
         };
         let (adapter_action_sender, adapter_action_results) = adapter_root
             .as_deref()
-            .map(adapter_action_worker)
+            .map(|root| {
+                adapter_action_worker_with_live_poll_pause(
+                    root,
+                    Arc::clone(&controller_io_lock),
+                    Arc::clone(&live_poll_pause),
+                )
+            })
             .map_or((None, None), |(sender, receiver)| {
                 (Some(sender), Some(receiver))
             });
@@ -671,6 +851,7 @@ impl Showcase {
         } else {
             (None, None)
         };
+        let (live_data_results, live_data_worker) = (None, None);
         let mut showcase = Self {
             phase: Phase::Splash,
             started,
@@ -704,10 +885,15 @@ impl Showcase {
             adapter_discovery_error,
             adapter_diagnostics: BTreeMap::new(),
             adapter_controller_error: None,
+            controller_io_lock,
+            live_poll_pause,
             adapter_diagnostics_sender,
             adapter_diagnostics_results,
             adapter_diagnostics_refresh_in_flight: false,
             last_adapter_diagnostics_refresh: started,
+            live_data: LiveDataState::default(),
+            live_data_results,
+            live_data_worker,
             adapter_action_sender,
             adapter_action_results,
             adapter_action_status: None,
@@ -732,6 +918,7 @@ impl Showcase {
         let Some(sender) = self.adapter_diagnostics_sender.as_ref().cloned() else {
             return;
         };
+        let controller_io_lock = Arc::clone(&self.controller_io_lock);
         let adapter_ids = self
             .adapter_rows
             .iter()
@@ -747,7 +934,13 @@ impl Showcase {
             let mut diagnostics = BTreeMap::new();
             let mut controller_error = None;
             for (id, adapter_id) in adapter_ids {
-                match local_controller_diagnostics(&root, &adapter_id) {
+                let result = {
+                    let _controller_io = controller_io_lock
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    local_controller_diagnostics(&root, &adapter_id)
+                };
+                match result {
                     Ok(Some(detail)) => {
                         diagnostics.insert(id, detail);
                     }
@@ -773,7 +966,42 @@ impl Showcase {
         self.adapter_diagnostics = diagnostics;
         self.adapter_controller_error = controller_error;
         self.adapter_diagnostics_refresh_in_flight = false;
+        self.ensure_live_data_worker();
         true
+    }
+
+    fn ensure_live_data_worker(&mut self) {
+        if cfg!(test)
+            || self.live_data_worker.is_some()
+            || !self
+                .adapter_diagnostics
+                .values()
+                .any(|diagnostics| diagnostics.state == "running")
+        {
+            return;
+        }
+        let Some(root) = self.adapter_root.clone() else {
+            return;
+        };
+        let (receiver, worker) = local_live_data_worker(
+            root,
+            Arc::clone(&self.controller_io_lock),
+            Arc::clone(&self.live_poll_pause),
+        );
+        self.live_data_results = Some(receiver);
+        self.live_data_worker = Some(worker);
+    }
+
+    fn drain_live_data_results(&mut self) -> bool {
+        let Some(results) = self.live_data_results.as_ref() else {
+            return false;
+        };
+        let mut changed = false;
+        while let Ok(message) = results.try_recv() {
+            self.live_data.apply(message);
+            changed = true;
+        }
+        changed
     }
 
     fn selected_adapter_id(&mut self) -> Option<AdapterId> {
@@ -839,7 +1067,8 @@ impl Showcase {
                 }
             }
             Phase::Showcase => {
-                let mut changed = self.drain_adapter_diagnostics_results();
+                let mut changed = self.drain_live_data_results();
+                changed |= self.drain_adapter_diagnostics_results();
                 changed |= self.drain_adapter_action_results();
                 changed |= self.animation_enabled && self.spinner.update(now);
                 if self.section == Section::Adapters
@@ -1402,6 +1631,14 @@ impl Showcase {
                 redraw: false,
             },
             _ => Outcome::default(),
+        }
+    }
+}
+
+impl Drop for Showcase {
+    fn drop(&mut self) {
+        if let Some(worker) = self.live_data_worker.as_mut() {
+            worker.stop();
         }
     }
 }
@@ -2704,10 +2941,13 @@ fn render_adapter_list(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -
             frame,
             detail,
             selected,
-            diagnostics,
-            showcase.adapter_controller_error.as_deref(),
+            AdapterInspectorContext {
+                diagnostics,
+                controller_error: showcase.adapter_controller_error.as_deref(),
+                live_data: &showcase.live_data,
+            },
             showcase.language,
-            theme,
+            showcase.theme,
         );
     }
     None
@@ -2855,15 +3095,23 @@ fn render_capability_browser(
     None
 }
 
+struct AdapterInspectorContext<'a> {
+    diagnostics: Option<&'a ControllerIpcDiagnostics>,
+    controller_error: Option<&'a str>,
+    live_data: &'a LiveDataState,
+}
+
 fn render_adapter_inspector(
     frame: &mut Frame,
     area: Rect,
     selected: Option<&AdapterRow>,
-    diagnostics: Option<&ControllerIpcDiagnostics>,
-    controller_error: Option<&str>,
+    context: AdapterInspectorContext<'_>,
     language: Language,
     theme: Theme,
 ) {
+    let diagnostics = context.diagnostics;
+    let controller_error = context.controller_error;
+    let live_data = context.live_data;
     let Some(row) = selected else {
         Text::new(localized(
             language,
@@ -2915,6 +3163,31 @@ fn render_adapter_inspector(
         .filter(|item| !item.stderr_tail.is_empty())
         .map(|item| item.stderr_tail.clone())
         .unwrap_or_else(|| unavailable.clone());
+    let live_adapter = live_data
+        .latest_event
+        .as_ref()
+        .map(|event| event.adapter_id.to_string())
+        .unwrap_or_else(|| unavailable.clone());
+    let live_stream = live_data
+        .latest_event
+        .as_ref()
+        .map(|event| event.stream.clone())
+        .unwrap_or_else(|| unavailable.clone());
+    let live_kind = live_data
+        .latest_event
+        .as_ref()
+        .map(|event| event.kind.clone())
+        .unwrap_or_else(|| unavailable.clone());
+    let live_payload = live_data
+        .latest_event
+        .as_ref()
+        .map(|event| event.payload.to_string())
+        .unwrap_or_else(|| unavailable.clone());
+    let latest_disconnect = live_data
+        .latest_disconnect
+        .as_ref()
+        .map(|disconnect| format!("{}: {}", disconnect.adapter_id, disconnect.reason))
+        .unwrap_or_else(|| unavailable.clone());
     let lines = vec![
         (
             localized(language, "Adapter ID", "Adaptör Kimliği"),
@@ -2952,6 +3225,30 @@ fn render_adapter_inspector(
         (
             localized(language, "Dropped events", "Atılan olaylar"),
             dropped_events,
+        ),
+        (
+            localized(language, "Live events received", "Alınan canlı olaylar"),
+            live_data.received_count.to_string(),
+        ),
+        (
+            localized(language, "Last live adapter", "Son canlı adaptör"),
+            live_adapter,
+        ),
+        (
+            localized(language, "Last live stream", "Son canlı akış"),
+            live_stream,
+        ),
+        (
+            localized(language, "Last live kind", "Son canlı tür"),
+            live_kind,
+        ),
+        (
+            localized(language, "Last live payload", "Son canlı yük"),
+            live_payload,
+        ),
+        (
+            localized(language, "Last disconnect", "Son bağlantı kesilmesi"),
+            latest_disconnect,
         ),
         (localized(language, "Last error", "Son hata"), last_error),
         (
@@ -3974,6 +4271,135 @@ mod tests {
         }
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn live_data_handoff_drops_new_messages_when_its_bounded_channel_is_full() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let data = AdapterLiveData {
+            events: vec![
+                AdapterEvent {
+                    adapter_id: AdapterId::new("adapter-a").unwrap(),
+                    stream: "opaque.stream".to_owned(),
+                    kind: "first".to_owned(),
+                    payload: r#"{"sequence":1}"#.parse().unwrap(),
+                },
+                AdapterEvent {
+                    adapter_id: AdapterId::new("adapter-b").unwrap(),
+                    stream: "opaque.stream".to_owned(),
+                    kind: "second".to_owned(),
+                    payload: r#"{"sequence":2}"#.parse().unwrap(),
+                },
+            ],
+            disconnects: Vec::new(),
+        };
+
+        assert_eq!(forward_live_data(&sender, data), 1);
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            LiveDataMessage::Event(AdapterEvent { adapter_id, kind, .. })
+                if adapter_id == AdapterId::new("adapter-a").unwrap() && kind == "first"
+        ));
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn showcase_applies_live_data_on_tick_without_blocking_input() {
+        let (sender, receiver) = mpsc::sync_channel(8);
+        let mut showcase = Showcase::new(Instant::now());
+        showcase.phase = Phase::Showcase;
+        showcase.live_data_results = Some(receiver);
+        sender
+            .send(LiveDataMessage::Event(AdapterEvent {
+                adapter_id: AdapterId::new("adapter-a").unwrap(),
+                stream: "opaque.stream".to_owned(),
+                kind: "updated".to_owned(),
+                payload: r#"{"value":true}"#.parse().unwrap(),
+            }))
+            .unwrap();
+
+        assert!(showcase.handle_key(key(KeyCode::Char('2'))).redraw);
+        assert_eq!(showcase.section, Section::Widgets);
+        assert!(showcase.advance(Instant::now()));
+        assert_eq!(showcase.live_data.received_count, 1);
+        assert!(matches!(
+            showcase.live_data.latest_event.as_ref(),
+            Some(AdapterEvent { adapter_id, stream, kind, payload })
+                if adapter_id == &AdapterId::new("adapter-a").unwrap()
+                    && stream == "opaque.stream"
+                    && kind == "updated"
+                    && payload["value"] == true
+        ));
+    }
+
+    #[test]
+    fn adapter_inspector_renders_latest_generic_live_data_without_decoding_it() {
+        let mut showcase = Showcase::new(Instant::now());
+        showcase.phase = Phase::Showcase;
+        showcase.select_section(Section::Adapters);
+        showcase.adapter_rows = vec![AdapterRow {
+            id: "adapter-a".to_owned(),
+            name: "Adapter A".to_owned(),
+            version: "1.0.0".to_owned(),
+            state: AdapterViewState::Stopped,
+            protocol: "1".to_owned(),
+            executable: "adapter-a".to_owned(),
+            last_error: None,
+        }];
+        showcase
+            .live_data
+            .apply(LiveDataMessage::Event(AdapterEvent {
+                adapter_id: AdapterId::new("adapter-a").unwrap(),
+                stream: "opaque.stream".to_owned(),
+                kind: "updated".to_owned(),
+                payload: r#"{"value":true}"#.parse().unwrap(),
+            }));
+        showcase
+            .live_data
+            .apply(LiveDataMessage::Disconnected(AdapterDisconnect {
+                adapter_id: AdapterId::new("adapter-a").unwrap(),
+                reason: "adapter process exited".to_owned(),
+            }));
+
+        let view = showcase_view(Size::new(160, 55), &mut showcase);
+        for expected in [
+            "Live events received",
+            "adapter-a",
+            "opaque.stream",
+            "updated",
+            "{\"value\":true}",
+            "adapter-a: adapter process exited",
+        ] {
+            assert!(frame_contains(&view.frame, expected), "missing {expected}");
+        }
+    }
+
+    #[test]
+    fn live_data_worker_stops_and_joins_when_the_showcase_shuts_down() {
+        let (started_sender, started) = mpsc::channel();
+        let (receiver, mut worker) = live_data_worker(move || {
+            let _ = started_sender.send(());
+            Ok(Some(AdapterLiveData {
+                events: vec![AdapterEvent {
+                    adapter_id: AdapterId::new("adapter-a").unwrap(),
+                    stream: "opaque.stream".to_owned(),
+                    kind: "updated".to_owned(),
+                    payload: r#"{"value":true}"#.parse().unwrap(),
+                }],
+                disconnects: Vec::new(),
+            }))
+        });
+
+        started.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(matches!(
+            receiver.recv_timeout(Duration::from_secs(1)).unwrap(),
+            LiveDataMessage::Event(AdapterEvent { adapter_id, stream, kind, .. })
+                if adapter_id == AdapterId::new("adapter-a").unwrap()
+                    && stream == "opaque.stream"
+                    && kind == "updated"
+        ));
+        worker.stop();
+        assert!(worker.is_finished());
     }
 
     #[test]

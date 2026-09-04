@@ -154,7 +154,7 @@ fn controller_ipc_returns_live_diagnostics_only_to_authenticated_clients() {
     let address = listener.local_addr().unwrap();
     let controller = AdapterController::new(&root.path, Duration::from_millis(200), 8);
     let server = ControllerIpcServer::new(listener, controller, "correct-token");
-    let worker = thread::spawn(move || server.serve_requests(3));
+    let worker = thread::spawn(move || server.serve_requests(4));
     let id = AdapterId::new("mock").unwrap();
     let client = ControllerClient::new(address, "correct-token");
 
@@ -182,6 +182,10 @@ fn controller_ipc_returns_live_diagnostics_only_to_authenticated_clients() {
     );
     assert_eq!(diagnostics.pending_request_count, 0);
     assert!(diagnostics.event_queue_capacity > 0);
+
+    let live_data = client.live_data().unwrap();
+    assert!(live_data.events.is_empty());
+    assert!(live_data.disconnects.is_empty());
 
     client.stop(&id).unwrap();
     worker.join().unwrap().unwrap();

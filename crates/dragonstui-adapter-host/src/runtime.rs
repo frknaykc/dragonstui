@@ -10,6 +10,7 @@ use crate::{
     AdapterId, AdapterInfo, AdapterManifest, AdapterProcess, AdapterProcessConfig, Capability,
     Hello, PROTOCOL_VERSION, ProcessError, ProcessStatus, ProtocolMessage, Request, RequestId,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -414,7 +415,7 @@ impl AdapterRuntime {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AdapterEvent {
     pub adapter_id: AdapterId,
     pub stream: String,

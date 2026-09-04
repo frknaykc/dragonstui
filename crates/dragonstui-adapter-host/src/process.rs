@@ -14,6 +14,27 @@ use crate::{PROTOCOL_VERSION, ProtocolMessage, Shutdown};
 
 const DEFAULT_STDERR_TAIL_LINES: usize = 64;
 const DEFAULT_STDOUT_QUEUE_CAPACITY: usize = 128;
+const TRANSIENT_SPAWN_RETRIES: u8 = 5;
+const TRANSIENT_SPAWN_RETRY_DELAY: Duration = Duration::from_millis(10);
+
+fn retry_transient_spawn<T>(mut spawn: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    let mut attempts_remaining = TRANSIENT_SPAWN_RETRIES;
+    loop {
+        match spawn() {
+            Ok(value) => return Ok(value),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                ) && attempts_remaining > 0 =>
+            {
+                attempts_remaining -= 1;
+                thread::sleep(TRANSIENT_SPAWN_RETRY_DELAY);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AdapterProcessConfig {
@@ -89,7 +110,7 @@ impl AdapterProcess {
             command.env(key, value);
         }
 
-        let mut child = command.spawn().map_err(ProcessError::Spawn)?;
+        let mut child = retry_transient_spawn(|| command.spawn()).map_err(ProcessError::Spawn)?;
         let stdout = child
             .stdout
             .take()
@@ -351,5 +372,26 @@ impl BoundedText {
 
     fn dropped(&self) -> usize {
         self.dropped
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transient_spawn_retry_retries_would_block_before_succeeding() {
+        let mut attempts = 0;
+        let result = retry_transient_spawn(|| {
+            attempts += 1;
+            if attempts < 3 {
+                Err(io::Error::from(io::ErrorKind::WouldBlock))
+            } else {
+                Ok("started")
+            }
+        });
+
+        assert_eq!(result.unwrap(), "started");
+        assert_eq!(attempts, 3);
     }
 }

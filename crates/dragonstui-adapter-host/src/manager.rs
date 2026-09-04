@@ -6,6 +6,7 @@ use std::{
     time::Duration,
 };
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
@@ -22,6 +23,7 @@ pub struct AdapterManager {
     states: BTreeMap<AdapterId, ManagedState>,
     capabilities: CapabilityRegistry,
     events: VecDeque<AdapterEvent>,
+    disconnects: VecDeque<AdapterDisconnect>,
     event_capacity: usize,
     dropped_events: usize,
     stop_timeout: Duration,
@@ -37,6 +39,7 @@ impl AdapterManager {
             states: BTreeMap::new(),
             capabilities: CapabilityRegistry::new(),
             events: VecDeque::with_capacity(event_capacity),
+            disconnects: VecDeque::with_capacity(event_capacity),
             event_capacity,
             dropped_events: 0,
             stop_timeout,
@@ -166,6 +169,7 @@ impl AdapterManager {
     pub fn poll(&mut self, per_adapter_timeout: Duration) {
         let ids: Vec<_> = self.runtimes.keys().cloned().collect();
         for id in ids {
+            let was_running = self.state(&id) == Some(AdapterState::Running);
             let mut failure = None;
             let mut events = Vec::new();
             if let Some(runtime) = self.runtimes.get_mut(&id) {
@@ -190,8 +194,14 @@ impl AdapterManager {
                 self.capabilities.remove_provider(&id);
                 self.states.insert(
                     id.clone(),
-                    ManagedState::with_error(AdapterState::Crashed, error),
+                    ManagedState::with_error(AdapterState::Crashed, error.clone()),
                 );
+                if was_running {
+                    self.push_disconnect(AdapterDisconnect {
+                        adapter_id: id,
+                        reason: error,
+                    });
+                }
             }
         }
     }
@@ -238,6 +248,15 @@ impl AdapterManager {
 
     pub fn take_events(&mut self) -> Vec<AdapterEvent> {
         std::mem::take(&mut self.events).into_iter().collect()
+    }
+
+    /// Drains generic adapter events and one-shot stream disconnects together.
+    /// Both queues use the manager's fixed event capacity.
+    pub fn take_live_data(&mut self) -> AdapterLiveData {
+        AdapterLiveData {
+            events: self.take_events(),
+            disconnects: std::mem::take(&mut self.disconnects).into_iter().collect(),
+        }
     }
 
     pub fn providers_for(&self, capability: &Capability) -> Vec<AdapterId> {
@@ -319,6 +338,30 @@ impl AdapterManager {
         }
         self.events.push_back(event);
     }
+
+    fn push_disconnect(&mut self, disconnect: AdapterDisconnect) {
+        if self.event_capacity == 0 {
+            return;
+        }
+        if self.disconnects.len() == self.event_capacity {
+            self.disconnects.pop_front();
+        }
+        self.disconnects.push_back(disconnect);
+    }
+}
+
+/// Generic adapter data drained by a controller without capability-specific decoding.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AdapterLiveData {
+    pub events: Vec<AdapterEvent>,
+    pub disconnects: Vec<AdapterDisconnect>,
+}
+
+/// A single transition from a running adapter stream to a terminal failure state.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AdapterDisconnect {
+    pub adapter_id: AdapterId,
+    pub reason: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]

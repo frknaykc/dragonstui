@@ -3,6 +3,7 @@ use std::{
     net::TcpListener,
     path::{Path, PathBuf},
     process::{Command as ProcessCommand, ExitCode, Stdio},
+    sync::{Arc, atomic::AtomicBool},
     thread,
     time::Duration,
 };
@@ -284,6 +285,9 @@ fn controller_client(root: &Path) -> Result<ControllerClient, String> {
 }
 
 fn run_controller_daemon(root: &Path, token: &str) -> Result<(), String> {
+    let sigpipe = Arc::new(AtomicBool::new(false));
+    signal_hook::flag::register(signal_hook::consts::SIGPIPE, Arc::clone(&sigpipe))
+        .map_err(|error| format!("could not install controller SIGPIPE handler: {error}"))?;
     fs::create_dir_all(root.join(CONTROLLER_DIRECTORY)).map_err(|error| error.to_string())?;
     let listener = TcpListener::bind("127.0.0.1:0").map_err(|error| error.to_string())?;
     let endpoint = ControllerEndpoint {
@@ -341,6 +345,7 @@ fn live_state(root: &Path, id: &AdapterId) -> Option<String> {
         ControllerIpcStatus::Missing
         | ControllerIpcStatus::Diagnostics(_)
         | ControllerIpcStatus::Management(_)
+        | ControllerIpcStatus::LiveData(_)
         | ControllerIpcStatus::Completed => None,
     }
 }
