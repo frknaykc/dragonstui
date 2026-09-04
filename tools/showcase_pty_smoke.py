@@ -208,17 +208,27 @@ def wait_for_text(fd: int, output: bytearray, needle: str, timeout: float, messa
     raise RuntimeError(f"{message}; rendered screen tail: {visible[-1200:]!r}")
 
 
+def property_has_value(line: str, label: str, value: str) -> bool:
+    if label not in line:
+        return False
+    actual = line.split(label, 1)[1].lstrip()
+    if not actual.startswith(value):
+        return False
+    suffix = actual[len(value) :]
+    return not suffix or not suffix[0].isalnum()
+
+
 def wait_for_property(
     fd: int, output: bytearray, label: str, value: str, timeout: float, message: str
 ) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         visible = visible_text(output)
-        if any(label in line and line.find(value) > line.find(label) for line in visible.splitlines()):
+        if any(property_has_value(line, label, value) for line in visible.splitlines()):
             return
         read_available(fd, output, min(0.05, deadline - time.monotonic()))
     visible = fully_reconstructed_visible_text(output)
-    if any(label in line and line.find(value) > line.find(label) for line in visible.splitlines()):
+    if any(property_has_value(line, label, value) for line in visible.splitlines()):
         return
     raise RuntimeError(f"{message}; rendered screen tail: {visible[-1200:]!r}")
 
