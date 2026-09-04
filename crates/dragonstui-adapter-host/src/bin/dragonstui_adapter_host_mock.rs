@@ -37,6 +37,7 @@ fn main() {
         "events" => protocol_mode(MockBehavior::Events, &options.id),
         "live-events" => protocol_mode(MockBehavior::LiveEvents, &options.id),
         "semantic-events" => protocol_mode(MockBehavior::SemanticEvents, &options.id),
+        "observability-events" => protocol_mode(MockBehavior::ObservabilityEvents, &options.id),
         "stress-events" => protocol_mode(MockBehavior::StressEvents, &options.id),
         "out-of-order" => protocol_mode(MockBehavior::OutOfOrder, &options.id),
         "unknown-response" => protocol_mode(MockBehavior::UnknownResponse, &options.id),
@@ -155,6 +156,7 @@ fn protocol_mode(behavior: MockBehavior, adapter_id: &str) {
         | MockBehavior::Events
         | MockBehavior::LiveEvents
         | MockBehavior::SemanticEvents
+        | MockBehavior::ObservabilityEvents
         | MockBehavior::StressEvents
         | MockBehavior::OutOfOrder
         | MockBehavior::UnknownResponse
@@ -243,6 +245,14 @@ fn protocol_mode(behavior: MockBehavior, adapter_id: &str) {
                 payload: json!({"sequence": 1}),
             }));
         }
+    }
+    if behavior == MockBehavior::ObservabilityEvents {
+        let (first_batch, second_batch) = observability_fixture_batches();
+        emit_observations(first_batch);
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(1_200));
+            emit_observations(second_batch);
+        });
     }
     if behavior == MockBehavior::StressEvents {
         for index in 0..40 {
@@ -351,6 +361,117 @@ fn emit(message: &ProtocolMessage) {
     flush_stdout();
 }
 
+fn emit_observations(observations: Vec<Observation>) {
+    for observation in observations {
+        emit(&ProtocolMessage::Event(Event {
+            protocol: PROTOCOL_VERSION,
+            stream: "observations".to_owned(),
+            kind: "fixture".to_owned(),
+            observation: Some(observation),
+            payload: json!({"sequence": 1}),
+        }));
+    }
+}
+
+fn observability_fixture_batches() -> (Vec<Observation>, Vec<Observation>) {
+    let first = vec![
+        Observation::Log {
+            text: "fixture log startup".to_owned(),
+            severity: Some(ObservationSeverity::Info),
+            timestamp_millis: Some(1_700_000_000_101),
+        },
+        Observation::Log {
+            text: "fixture log warning".to_owned(),
+            severity: Some(ObservationSeverity::Warning),
+            timestamp_millis: None,
+        },
+        Observation::Metric {
+            name: "fixture.value".to_owned(),
+            value: 10.into(),
+            unit: Some("items".to_owned()),
+            timestamp_millis: Some(1_700_000_000_110),
+        },
+        Observation::Metric {
+            name: "fixture.value".to_owned(),
+            value: 42.into(),
+            unit: Some("items".to_owned()),
+            timestamp_millis: Some(1_700_000_000_120),
+        },
+        Observation::Metric {
+            name: "fixture.value".to_owned(),
+            value: (-5).into(),
+            unit: Some("items".to_owned()),
+            timestamp_millis: Some(1_700_000_000_130),
+        },
+        Observation::Status {
+            entity: "fixture-api".to_owned(),
+            check: "health".to_owned(),
+            status: ObservationStatus::Ok,
+            timestamp_millis: Some(1_700_000_000_140),
+        },
+        Observation::Status {
+            entity: "fixture-worker".to_owned(),
+            check: "queue".to_owned(),
+            status: ObservationStatus::Warning,
+            timestamp_millis: Some(1_700_000_000_150),
+        },
+        Observation::Event {
+            title: "fixture deployment".to_owned(),
+            detail: Some("first timeline detail".to_owned()),
+            timestamp_millis: Some(1_700_000_000_160),
+        },
+    ];
+    let second = vec![
+        Observation::Event {
+            title: "fixture follow-up".to_owned(),
+            detail: Some("second timeline detail".to_owned()),
+            timestamp_millis: Some(1_700_000_000_170),
+        },
+        Observation::Event {
+            title: "fixture arrival".to_owned(),
+            detail: None,
+            timestamp_millis: None,
+        },
+        Observation::Error {
+            message: "fixture error".to_owned(),
+            signature: Some("fixture.error".to_owned()),
+            stack: vec!["frame one".to_owned(), "frame two".to_owned()],
+            timestamp_millis: Some(1_700_000_000_180),
+        },
+        Observation::Error {
+            message: "fixture error".to_owned(),
+            signature: Some("fixture.error".to_owned()),
+            stack: vec!["frame three".to_owned(), "frame four".to_owned()],
+            timestamp_millis: Some(1_700_000_000_190),
+        },
+        Observation::Error {
+            message: "fixture distinct error".to_owned(),
+            signature: None,
+            stack: vec!["distinct frame".to_owned()],
+            timestamp_millis: None,
+        },
+        Observation::Status {
+            entity: "fixture-api".to_owned(),
+            check: "health".to_owned(),
+            status: ObservationStatus::Error,
+            timestamp_millis: Some(1_700_000_000_200),
+        },
+        Observation::Status {
+            entity: "fixture-db".to_owned(),
+            check: "latency".to_owned(),
+            status: ObservationStatus::Unknown,
+            timestamp_millis: Some(1_700_000_000_210),
+        },
+        Observation::Metric {
+            name: "fixture.value".to_owned(),
+            value: 70.into(),
+            unit: Some("items".to_owned()),
+            timestamp_millis: Some(1_700_000_000_220),
+        },
+    ];
+    (first, second)
+}
+
 fn flush_stdout() {
     io::stdout().flush().unwrap();
 }
@@ -366,6 +487,7 @@ enum MockBehavior {
     Events,
     LiveEvents,
     SemanticEvents,
+    ObservabilityEvents,
     StressEvents,
     OutOfOrder,
     UnknownResponse,

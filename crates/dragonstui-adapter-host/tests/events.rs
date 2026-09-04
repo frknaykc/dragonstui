@@ -1,4 +1,4 @@
-use std::{path::PathBuf, time::Duration};
+use std::{path::PathBuf, thread, time::Duration};
 
 use dragonstui_adapter_host::{
     AdapterManifest, AdapterRuntime, AdapterRuntimeConfig, Capability, Observation,
@@ -133,5 +133,59 @@ fn semantic_mock_events_survive_handshake_and_runtime_with_provenance_and_payloa
         events
             .iter()
             .any(|event| matches!(event.observation, Some(Observation::Error { .. })))
+    );
+}
+
+#[test]
+fn observability_fixture_emits_two_bounded_batches_with_all_surface_samples() {
+    let mut runtime = runtime("observability-events", 16);
+
+    thread::sleep(Duration::from_millis(1_300));
+    for _ in 0..16 {
+        runtime.pump(Duration::from_millis(100)).unwrap();
+    }
+
+    let events = std::iter::from_fn(|| runtime.pop_event()).collect::<Vec<_>>();
+    assert_eq!(events.len(), 16);
+    assert!(events.iter().all(|event| {
+        event.adapter_id.as_str() == "mock"
+            && event.stream == "observations"
+            && event.kind == "fixture"
+            && event.payload == json!({"sequence": 1})
+    }));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.observation, Some(Observation::Log { .. })))
+            .count(),
+        2
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.observation, Some(Observation::Metric { .. })))
+            .count(),
+        4
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.observation, Some(Observation::Status { .. })))
+            .count(),
+        4
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.observation, Some(Observation::Event { .. })))
+            .count(),
+        3
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.observation, Some(Observation::Error { .. })))
+            .count(),
+        3
     );
 }

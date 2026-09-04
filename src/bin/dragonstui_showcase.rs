@@ -4297,10 +4297,18 @@ fn render_log_viewer(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -> 
         Style::new().fg(theme.muted).bg(theme.background).dim(),
         Style::new().fg(theme.success).bg(theme.background).bold(),
     );
-    Text::new(localized(
+    let follow_state = localized(
         showcase.language,
-        "O/Esc adapters · / search · P pause · F follow · ↑↓ scroll",
-        "O/Esc adaptörler · / ara · P duraklat · F takip · ↑↓ kaydır",
+        if following { "FOLLOW" } else { "PAUSED" },
+        if following { "TAKİP" } else { "DURAKLATILDI" },
+    );
+    Text::new(format!(
+        "{} · {follow_state}",
+        localized(
+            showcase.language,
+            "O/Esc adapters · / search · P pause · F follow · ↑↓ scroll",
+            "O/Esc adaptörler · / ara · P duraklat · F takip · ↑↓ kaydır",
+        )
     ))
     .style(Style::new().fg(theme.warning).bg(theme.background).dim())
     .render(

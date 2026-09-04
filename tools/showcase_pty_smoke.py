@@ -372,7 +372,7 @@ def setup_m42_fixture(controller_binary: Path, mock_binary: Path) -> tuple[tempf
     write_mock_adapter(root, mock_binary, "adapter-b", "timeout")
     write_mock_adapter(root, mock_binary, "capability-a", "shared-capabilities")
     write_mock_adapter(root, mock_binary, "capability-b", "shared-capabilities")
-    write_mock_adapter(root, mock_binary, "live-a", "semantic-events")
+    write_mock_adapter(root, mock_binary, "live-a", "observability-events")
     write_mock_adapter(root, mock_binary, "stress-a", "stress-events")
     write_mock_adapter(root, mock_binary, "stress-b", "stress-events")
     daemon = subprocess.Popen(
@@ -538,18 +538,18 @@ def main() -> int:
             visible = fully_reconstructed_visible_text(output)
             require("Adapter Inspector" in visible, "capability browser did not return to the adapter inspector")
 
-            # The semantic fixture emits one generic event plus each explicit
-            # observation class after its handshake. The existing inspector is
-            # a debug/property surface, not an observability viewer.
+            # The observability fixture emits two eight-event batches. The gap
+            # exceeds the live worker's one-second poll cadence so the bounded
+            # sync_channel(8) receives each batch without widening M44.
             # The showcase worker drains authenticated controller data away from
             # the UI loop and the tick applies it to render-owned state.
             send(master, output, b"\x1b[B" * 4)
             send(master, output, b"s")
             wait_for_text(master, output, "running", 2.0, "live adapter did not start")
-            wait_for_property(master, output, "Live events received:", "6", 3.0, "semantic events did not reach showcase state")
+            wait_for_property(master, output, "Live events received:", "16", 5.0, "observability fixture did not reach showcase state")
             wait_for_property(master, output, "Last live adapter:", "live-a", 1.0, "live adapter identity was not rendered")
             wait_for_property(master, output, "Last live stream:", "observations", 1.0, "live stream identity was not rendered")
-            wait_for_property(master, output, "Last live kind:", "fixture / error", 1.0, "semantic event class was not rendered")
+            wait_for_property(master, output, "Last live kind:", "fixture / metric", 1.0, "semantic event class was not rendered")
             wait_for_property(master, output, "Last live payload:", "{\"sequence\":1}", 1.0, "opaque live payload was not rendered")
             send(master, output, b"1")
             wait_for_text(master, output, "Static benchmark context", 1.0, "input stalled while live worker was active")
@@ -565,13 +565,16 @@ def main() -> int:
             send(master, output, b"\x1b")
             wait_for_text(master, output, "Adapter Inspector", 1.0, "structured payload browser did not return")
 
-            # M53–M58: one authenticated semantic fixture is sufficient to prove
-            # that every contextual observability surface routes only its declared
-            # Observation variant through the real PTY. Edge ordering/grouping and
-            # eviction cases remain deterministic Rust regressions.
+            # M53–M58: the fixture carries multiple logs/metrics/statuses/events
+            # and two deterministic error groups through the real controller path.
             send(master, output, b"o")
             wait_for_text(master, output, "Observability · Logs", 1.0, "log viewer did not open")
-            wait_for_text(master, output, "fixture log", 1.0, "semantic Log was not visible")
+            wait_for_text(master, output, "fixture log startup", 1.0, "first semantic Log was not visible")
+            wait_for_text(master, output, "fixture log warning", 1.0, "second semantic Log was not visible")
+            send(master, output, b"p")
+            wait_for_text(master, output, "PAUSED", 1.0, "log viewer did not pause semantic follow")
+            send(master, output, b"f")
+            wait_for_text(master, output, "FOLLOW", 1.0, "log viewer did not resume semantic follow")
             send(master, output, b"2")
             wait_for_text(master, output, "Observability · Metrics", 1.0, "metric graph did not open")
             wait_for_text(master, output, "fixture.value", 1.0, "semantic Metric series was not visible")
@@ -579,34 +582,40 @@ def main() -> int:
             wait_for_text(master, output, "Observability · Heatmap", 1.0, "heatmap did not open")
             send(master, output, b"4")
             wait_for_text(master, output, "Observability · Status", 1.0, "status matrix did not open")
-            wait_for_text(master, output, "fixture-entity", 1.0, "semantic Status was not visible")
+            wait_for_text(master, output, "fixture-api", 1.0, "first semantic Status row was not visible")
+            wait_for_text(master, output, "fixture-worker", 1.0, "second semantic Status row was not visible")
+            wait_for_text(master, output, "fixture-db", 1.0, "third semantic Status row was not visible")
             send(master, output, b"5")
             wait_for_text(master, output, "Observability · Timeline", 1.0, "timeline did not open")
-            wait_for_text(master, output, "fixture event", 1.0, "semantic Event was not visible")
+            wait_for_text(master, output, "fixture deployment", 1.0, "first semantic Event was not visible")
+            wait_for_text(master, output, "fixture follow-up", 1.0, "second semantic Event was not visible")
+            send(master, output, b"\x1b[B")
+            wait_for_text(master, output, "second timeline detail", 1.0, "timeline selection did not update detail")
             send(master, output, b"6")
             wait_for_text(master, output, "Observability · Errors", 1.0, "error viewer did not open")
             wait_for_text(master, output, "fixture.error", 1.0, "semantic Error group was not visible")
-            wait_for_text(master, output, "frame one", 1.0, "semantic Error stack was not visible")
+            wait_for_text(master, output, "fixture distinct error", 1.0, "second semantic Error group was not visible")
+            send(master, output, b"\x1b[B")
+            wait_for_text(master, output, "frame three", 1.0, "semantic Error stack was not visible")
             send(master, output, b"1")
             wait_for_text(master, output, "fixture log", 1.0, "log viewer did not survive cross-view navigation")
             send(master, output, b"o")
             wait_for_text(master, output, "Adapter Inspector", 1.0, "log viewer did not return to adapters")
 
-            # M45–M47: the existing stress fixture emits more than the bounded
-            # UI handoff accepts. Two independently started streams plus the
-            # initial semantic fixture fill the retained 16-entry history, evict the
-            # oldest entry, and prove that pause affects only the selection.
+            # M45–M47: the observability fixture already fills retained history.
+            # Each stress stream adds one bounded handoff batch, proving eviction
+            # while pause affects only the selection.
             send(master, output, b"\x1b[B")
             send(master, output, b"s")
-            wait_for_property(master, output, "Live events received:", "14", 3.0, "first stress burst did not fill bounded history")
-            wait_for_property(master, output, "Retained live history:", "14/16", 1.0, "first stress burst did not update retained history")
+            wait_for_property(master, output, "Live events received:", "24", 3.0, "first stress burst did not continue bounded ingestion")
+            wait_for_property(master, output, "Retained live history:", "16/16", 1.0, "first stress burst did not preserve history capacity")
             send(master, output, b"p")
             wait_for_text(master, output, "PAUSED", 1.0, "P did not pause generic live follow state")
             wait_for_property(master, output, "Visible selection:", "stress-a", 1.0, "pause did not preserve the first stress selection")
 
             send(master, output, b"\x1b[B")
             send(master, output, b"s")
-            wait_for_property(master, output, "Live events received:", "22", 3.0, "second stress burst did not continue ingestion while paused")
+            wait_for_property(master, output, "Live events received:", "32", 3.0, "second stress burst did not continue ingestion while paused")
             wait_for_property(master, output, "Retained live history:", "16/16", 1.0, "retained history did not evict at capacity")
             wait_for_property(master, output, "Visible selection:", "stress-a", 1.0, "paused view jumped to the new live tail")
 
