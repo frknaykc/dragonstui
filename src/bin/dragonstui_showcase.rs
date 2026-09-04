@@ -220,6 +220,7 @@ enum AdapterBrowserMode {
 enum ObservabilityMode {
     Logs,
     Metrics,
+    Heatmap,
 }
 
 impl AdapterViewState {
@@ -907,6 +908,37 @@ fn metric_projection(live_data: &LiveDataState) -> Vec<MetricSeries> {
         .collect()
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct HeatmapGrid {
+    rows: usize,
+    columns: usize,
+    cells: Vec<f64>,
+}
+
+impl HeatmapGrid {
+    fn new(rows: usize, columns: usize, cells: Vec<f64>) -> Self {
+        Self {
+            rows,
+            columns,
+            cells: cells
+                .into_iter()
+                .take(rows.saturating_mul(columns))
+                .collect(),
+        }
+    }
+
+    fn normalized(&self, index: usize) -> Option<f64> {
+        let value = *self.cells.get(index)?;
+        let min = self.cells.iter().copied().fold(f64::INFINITY, f64::min);
+        let max = self.cells.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        Some(if min == max {
+            0.5
+        } else {
+            (value - min) / (max - min)
+        })
+    }
+}
+
 impl Default for LiveDataState {
     fn default() -> Self {
         Self::with_history_capacity(LIVE_HISTORY_CAPACITY)
@@ -1521,6 +1553,10 @@ impl Showcase {
                     KeyCode::Char('2') => {
                         self.adapter_browser_mode =
                             AdapterBrowserMode::Observability(ObservabilityMode::Metrics);
+                    }
+                    KeyCode::Char('3') => {
+                        self.adapter_browser_mode =
+                            AdapterBrowserMode::Observability(ObservabilityMode::Heatmap);
                     }
                     _ => return Outcome::default(),
                 }
@@ -3462,7 +3498,59 @@ fn render_adapters(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -> Op
         AdapterBrowserMode::Observability(ObservabilityMode::Metrics) => {
             render_metric_graph(frame, area, showcase)
         }
+        AdapterBrowserMode::Observability(ObservabilityMode::Heatmap) => {
+            render_heatmap(frame, area, showcase)
+        }
     }
+}
+
+fn render_heatmap(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -> Option<Position> {
+    let theme = showcase.theme;
+    let inner = panel(
+        frame,
+        area,
+        "Observability · Heatmap",
+        false,
+        theme,
+        BorderSet::double(),
+    );
+    let cells = metric_projection(&showcase.live_data)
+        .into_iter()
+        .flat_map(|series| series.samples.into_iter().map(|(value, _)| value))
+        .collect::<Vec<_>>();
+    if cells.is_empty() {
+        Text::new("No Metric samples for heatmap.").render(frame, inner);
+        return None;
+    }
+    let columns = 4usize.min(cells.len()).max(1);
+    let rows = cells.len().div_ceil(columns);
+    let grid = HeatmapGrid::new(rows, columns, cells);
+    let cell_width = (inner.width / columns as u16).max(1);
+    let cell_height = (inner.height / rows as u16).max(1);
+    for index in 0..grid.cells.len() {
+        let row = index / columns;
+        let column = index % columns;
+        let intensity = grid.normalized(index).unwrap_or(0.0);
+        let marker = if intensity < 0.34 {
+            '░'
+        } else if intensity < 0.67 {
+            '▒'
+        } else {
+            '▓'
+        };
+        Text::new(marker.to_string())
+            .style(Style::new().fg(theme.secondary).bg(theme.background))
+            .render(
+                frame,
+                Rect::new(
+                    inner.x + column as u16 * cell_width,
+                    inner.y + row as u16 * cell_height,
+                    cell_width,
+                    cell_height,
+                ),
+            );
+    }
+    None
 }
 
 fn render_metric_graph(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -> Option<Position> {
@@ -6169,6 +6257,15 @@ mod tests {
         assert_eq!(series.len(), 1);
         assert_eq!(series[0].samples, vec![(-2.0, Some(10))]);
         assert_eq!(series[0].key.name, "load");
+    }
+
+    #[test]
+    fn heatmap_grid_is_bounded_and_normalizes_constant_and_range_values() {
+        let grid = HeatmapGrid::new(1, 2, vec![2.0, 6.0, 9.0]);
+        assert_eq!(grid.cells, vec![2.0, 6.0]);
+        assert_eq!(grid.normalized(0), Some(0.0));
+        assert_eq!(grid.normalized(1), Some(1.0));
+        assert_eq!(HeatmapGrid::new(1, 1, vec![7.0]).normalized(0), Some(0.5));
     }
 
     #[test]
