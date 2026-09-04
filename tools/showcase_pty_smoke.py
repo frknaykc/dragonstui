@@ -308,6 +308,22 @@ def assert_single_hold_launch(control: Path) -> None:
     require(launches == ["adapter-a"], f"held action launched {launches!r}, expected one adapter-a process")
 
 
+def action_invocations(control: Path) -> list[str]:
+    marker = control / "actions"
+    if not marker.is_file():
+        return []
+    return marker.read_text(encoding="utf-8").splitlines()
+
+
+def wait_for_action_invocations(control: Path, expected: list[str], timeout: float, message: str) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if action_invocations(control) == expected:
+            return
+        time.sleep(0.01)
+    raise RuntimeError(f"{message}; got {action_invocations(control)!r}, expected {expected!r}")
+
+
 def prove_pty_usable_after_exit(master: int, slave_name: str, output: bytearray) -> None:
     slave = os.open(slave_name, os.O_RDWR | os.O_NOCTTY)
     shell = subprocess.Popen(
@@ -375,6 +391,13 @@ def setup_m42_fixture(controller_binary: Path, mock_binary: Path) -> tuple[tempf
     write_mock_adapter(root, mock_binary, "live-a", "observability-events")
     write_mock_adapter(root, mock_binary, "stress-a", "stress-events")
     write_mock_adapter(root, mock_binary, "stress-b", "stress-events")
+    write_mock_adapter(
+        root,
+        mock_binary,
+        "z-actions",
+        "actions",
+        ("--action-marker", str(control / "actions")),
+    )
     daemon = subprocess.Popen(
         [str(controller_binary), "--root", str(root), "controller-daemon"],
         env={**os.environ, "DRAGONSTUI_CONTROLLER_TOKEN": secrets.token_hex(32)},
@@ -624,9 +647,79 @@ def main() -> int:
             send(master, output, b"f")
             wait_for_text(master, output, "FOLLOW", 1.0, "F did not resume generic live follow state")
 
+            # Phase 7: action behavior comes only from the adapter's declared
+            # metadata. The marker is producer-side evidence: cancelling the
+            # confirmation must leave it untouched; confirming adds exactly one
+            # invocation. The delayed action exposes the running state before its
+            # typed terminal result without blocking the input/render loop.
+            send(master, output, b"\x1b[B")
+            wait_for_property(master, output, "Adapter ID:", "z-actions", 1.0, "action adapter was not selected")
+            send(master, output, b"s")
+            wait_for_text(master, output, "running", 2.0, "action adapter did not start")
+            send(master, output, b"a")
+            wait_for_text(master, output, "Adapter Actions", 1.0, "declared action browser did not open")
+            wait_for_text(master, output, "fixture.action.alpha", 1.0, "declared action metadata was not visible")
+
+            send(master, output, b"\r")
+            wait_for_action_invocations(control, ["fixture.action.alpha"], 2.0, "direct action did not invoke once")
+            wait_for_text(master, output, "Operation succeeded", 2.0, "successful operation notification was not visible")
+
+            send(master, output, b"\x1b[B\r")
+            wait_for_action_invocations(
+                control,
+                ["fixture.action.alpha", "fixture.destroy.everything"],
+                2.0,
+                "declared failure action did not invoke once",
+            )
+            wait_for_text(master, output, "Operation failed", 2.0, "failed operation notification was not visible")
+
+            send(master, output, b"\x1b[B\r")
+            wait_for_text(master, output, "Confirm Adapter Action", 1.0, "declared confirmation policy did not open a modal")
+            send(master, output, b"\x1b")
+            drain_for(master, output, 0.20)
+            require(
+                action_invocations(control) == ["fixture.action.alpha", "fixture.destroy.everything"],
+                "cancelled confirmation invoked an adapter action",
+            )
+            send(master, output, b"\r\r")
+            wait_for_action_invocations(
+                control,
+                ["fixture.action.alpha", "fixture.destroy.everything", "fixture.inspect"],
+                2.0,
+                "confirmed action did not invoke exactly once",
+            )
+            wait_for_text(master, output, "Operation succeeded", 2.0, "confirmed operation did not succeed")
+
+            send(master, output, b"\x1b[B\r")
+            wait_for_action_invocations(
+                control,
+                [
+                    "fixture.action.alpha",
+                    "fixture.destroy.everything",
+                    "fixture.inspect",
+                    "fixture.action.delta",
+                ],
+                2.0,
+                "delayed action did not invoke once",
+            )
+            wait_for_text(master, output, "running", 1.0, "delayed operation did not expose running state")
+            wait_for_text(master, output, "succeeded", 2.0, "delayed operation did not reach typed success")
+            send(master, output, b"a")
+            wait_for_text(master, output, "Adapter Inspector", 1.0, "action browser did not return to adapters")
+            send(master, output, b"o")
+            wait_for_text(master, output, "Observability · Logs", 1.0, "action surface did not preserve observability navigation")
+            send(master, output, b"o")
+            wait_for_text(master, output, "Adapter Inspector", 1.0, "observability did not return after action acceptance")
+
+            # The action assertions above already observed each terminal outcome.
+            # Let the bounded five-second informational overlays expire before
+            # asserting underlying adapter-inspector text through later header
+            # navigation; an overlay may legitimately obscure that text without
+            # changing the selected section or hit region.
+            drain_for(master, output, 5.2)
+
         # Explicit visible header tabs: 1 Overview through 8 Adapters.
         for x, marker in (
-            (3, "Static benchmark context"),
             (14, "Primitive index"),
             (24, "Data contract"),
             (31, "Canvas · Braille waveform"),
@@ -634,9 +727,8 @@ def main() -> int:
             (50, "Focus · KeyMap · Style"),
             (64, "Language"),
         ):
-            before = len(output)
             send(master, output, f"\x1b[<0;{x};3M".encode("ascii"))
-            require(marker in output[before:].decode("utf-8", errors="replace"), f"header click missed {marker}")
+            require(marker in visible_text(output), f"header click missed {marker}")
 
         # Adapter management remains an optional application integration: the
         # showcase must expose its empty host root honestly via every entry path.
@@ -649,9 +741,8 @@ def main() -> int:
             else:
                 require("No installed adapters" in adapter_render, "keyboard navigation did not open the empty Adapters section")
         send(master, output, b"1")
-        before = len(output)
         send(master, output, b"\x1b[<0;75;3M")
-        adapter_render = output[before:].decode("utf-8", errors="replace")
+        adapter_render = visible_text(output)
         if args.adapter_id:
             require("Adapter Inspector" in adapter_render and args.adapter_id in adapter_render, "header click did not open the adapter inspector")
         else:

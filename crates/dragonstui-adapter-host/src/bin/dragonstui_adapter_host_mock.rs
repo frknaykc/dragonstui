@@ -19,9 +19,21 @@ fn main() {
     let options = parse_options();
     match options.mode.as_str() {
         "process" => process_mode(),
-        "normal" => protocol_mode(MockBehavior::Normal, &options.id),
-        "bad-protocol" => protocol_mode(MockBehavior::BadProtocol, &options.id),
-        "bad-id" => protocol_mode(MockBehavior::BadId, &options.id),
+        "normal" => protocol_mode(
+            MockBehavior::Normal,
+            &options.id,
+            options.action_marker.as_deref(),
+        ),
+        "bad-protocol" => protocol_mode(
+            MockBehavior::BadProtocol,
+            &options.id,
+            options.action_marker.as_deref(),
+        ),
+        "bad-id" => protocol_mode(
+            MockBehavior::BadId,
+            &options.id,
+            options.action_marker.as_deref(),
+        ),
         "malformed" => {
             println!("{{not json}}");
             flush_stdout();
@@ -30,22 +42,82 @@ fn main() {
         "timeout" => thread::sleep(Duration::from_secs(30)),
         "hold" => {
             hold_before_handshake(&options);
-            protocol_mode(MockBehavior::Normal, &options.id);
+            protocol_mode(
+                MockBehavior::Normal,
+                &options.id,
+                options.action_marker.as_deref(),
+            );
         }
-        "duplicate-capabilities" => protocol_mode(MockBehavior::DuplicateCapabilities, &options.id),
-        "empty-capabilities" => protocol_mode(MockBehavior::EmptyCapabilities, &options.id),
-        "shared-capabilities" => protocol_mode(MockBehavior::SharedCapabilities, &options.id),
-        "events" => protocol_mode(MockBehavior::Events, &options.id),
-        "live-events" => protocol_mode(MockBehavior::LiveEvents, &options.id),
-        "semantic-events" => protocol_mode(MockBehavior::SemanticEvents, &options.id),
-        "observability-events" => protocol_mode(MockBehavior::ObservabilityEvents, &options.id),
-        "actions" => protocol_mode(MockBehavior::Actions, &options.id),
-        "stress-events" => protocol_mode(MockBehavior::StressEvents, &options.id),
-        "out-of-order" => protocol_mode(MockBehavior::OutOfOrder, &options.id),
-        "unknown-response" => protocol_mode(MockBehavior::UnknownResponse, &options.id),
-        "crash-after-handshake" => protocol_mode(MockBehavior::CrashAfterHandshake, &options.id),
-        "crash-on-request" => protocol_mode(MockBehavior::CrashOnRequest, &options.id),
-        _ => protocol_mode(MockBehavior::Normal, &options.id),
+        "duplicate-capabilities" => protocol_mode(
+            MockBehavior::DuplicateCapabilities,
+            &options.id,
+            options.action_marker.as_deref(),
+        ),
+        "empty-capabilities" => protocol_mode(
+            MockBehavior::EmptyCapabilities,
+            &options.id,
+            options.action_marker.as_deref(),
+        ),
+        "shared-capabilities" => protocol_mode(
+            MockBehavior::SharedCapabilities,
+            &options.id,
+            options.action_marker.as_deref(),
+        ),
+        "events" => protocol_mode(
+            MockBehavior::Events,
+            &options.id,
+            options.action_marker.as_deref(),
+        ),
+        "live-events" => protocol_mode(
+            MockBehavior::LiveEvents,
+            &options.id,
+            options.action_marker.as_deref(),
+        ),
+        "semantic-events" => protocol_mode(
+            MockBehavior::SemanticEvents,
+            &options.id,
+            options.action_marker.as_deref(),
+        ),
+        "observability-events" => protocol_mode(
+            MockBehavior::ObservabilityEvents,
+            &options.id,
+            options.action_marker.as_deref(),
+        ),
+        "actions" => protocol_mode(
+            MockBehavior::Actions,
+            &options.id,
+            options.action_marker.as_deref(),
+        ),
+        "stress-events" => protocol_mode(
+            MockBehavior::StressEvents,
+            &options.id,
+            options.action_marker.as_deref(),
+        ),
+        "out-of-order" => protocol_mode(
+            MockBehavior::OutOfOrder,
+            &options.id,
+            options.action_marker.as_deref(),
+        ),
+        "unknown-response" => protocol_mode(
+            MockBehavior::UnknownResponse,
+            &options.id,
+            options.action_marker.as_deref(),
+        ),
+        "crash-after-handshake" => protocol_mode(
+            MockBehavior::CrashAfterHandshake,
+            &options.id,
+            options.action_marker.as_deref(),
+        ),
+        "crash-on-request" => protocol_mode(
+            MockBehavior::CrashOnRequest,
+            &options.id,
+            options.action_marker.as_deref(),
+        ),
+        _ => protocol_mode(
+            MockBehavior::Normal,
+            &options.id,
+            options.action_marker.as_deref(),
+        ),
     }
 }
 
@@ -57,6 +129,7 @@ fn parse_options() -> MockOptions {
         hold_ready: None,
         hold_release: None,
         launch_marker: None,
+        action_marker: None,
     };
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -65,6 +138,7 @@ fn parse_options() -> MockOptions {
             "--hold-ready" => options.hold_ready = args.next().map(PathBuf::from),
             "--hold-release" => options.hold_release = args.next().map(PathBuf::from),
             "--launch-marker" => options.launch_marker = args.next().map(PathBuf::from),
+            "--action-marker" => options.action_marker = args.next().map(PathBuf::from),
             _ => {}
         }
     }
@@ -132,7 +206,11 @@ fn process_mode() {
     }
 }
 
-fn protocol_mode(behavior: MockBehavior, adapter_id: &str) {
+fn protocol_mode(
+    behavior: MockBehavior,
+    adapter_id: &str,
+    action_marker: Option<&std::path::Path>,
+) {
     let stdin = io::stdin();
     let mut lines = stdin.lock().lines();
     let Some(Ok(line)) = lines.next() else {
@@ -347,6 +425,9 @@ fn protocol_mode(behavior: MockBehavior, adapter_id: &str) {
                     continue;
                 }
                 if behavior == MockBehavior::Actions {
+                    if let (Some(marker), Some(action)) = (action_marker, request.action.as_ref()) {
+                        record_action(marker, action);
+                    }
                     match request.action.as_ref().map(ActionId::as_str) {
                         Some("fixture.action.alpha") => {
                             emit(&ProtocolMessage::Response(Response {
@@ -436,6 +517,17 @@ fn emit(message: &ProtocolMessage) {
     serde_json::to_writer(io::stdout(), message).unwrap();
     println!();
     flush_stdout();
+}
+
+fn record_action(marker: &std::path::Path, action: &ActionId) {
+    if let Some(parent) = marker.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(marker)
+        .and_then(|mut file| writeln!(file, "{action}"));
 }
 
 fn emit_observations(observations: Vec<Observation>) {
@@ -582,4 +674,5 @@ struct MockOptions {
     hold_ready: Option<PathBuf>,
     hold_release: Option<PathBuf>,
     launch_marker: Option<PathBuf>,
+    action_marker: Option<PathBuf>,
 }
