@@ -691,13 +691,21 @@ impl LiveViewState {
     }
 
     fn reconcile(&mut self, live_data: &LiveDataState, filter: &LiveDataFilter) {
-        let visible = live_data.filtered_entries(filter).collect::<Vec<_>>();
+        self.reconcile_sequences(
+            live_data
+                .filtered_entries(filter)
+                .map(|entry| entry.sequence),
+        );
+    }
+
+    fn reconcile_sequences(&mut self, visible: impl IntoIterator<Item = u64>) {
+        let visible = visible.into_iter().collect::<Vec<_>>();
         if self.mode == LiveFollowMode::Follow
             || !visible
                 .iter()
-                .any(|entry| Some(entry.sequence) == self.selected_sequence)
+                .any(|sequence| Some(*sequence) == self.selected_sequence)
         {
-            self.selected_sequence = visible.last().map(|entry| entry.sequence);
+            self.selected_sequence = visible.last().copied();
         }
     }
 
@@ -711,6 +719,11 @@ impl LiveViewState {
             .filtered_entries(filter)
             .find(|entry| entry.sequence == selected_sequence)
             .map(|entry| &entry.message)
+    }
+
+    fn follow_sequences(&mut self, visible: impl IntoIterator<Item = u64>) {
+        self.mode = LiveFollowMode::Follow;
+        self.reconcile_sequences(visible);
     }
 }
 
@@ -1163,6 +1176,7 @@ struct Showcase {
     live_data: LiveDataState,
     live_filter: LiveDataFilter,
     live_view: LiveViewState,
+    log_view: LiveViewState,
     live_search_input: Option<TextInput>,
     live_data_results: Option<Receiver<LiveDataMessage>>,
     live_data_worker: Option<LiveDataWorker>,
@@ -1277,6 +1291,7 @@ impl Showcase {
             live_data: LiveDataState::default(),
             live_filter: LiveDataFilter::default(),
             live_view: LiveViewState::default(),
+            log_view: LiveViewState::default(),
             live_search_input: None,
             live_data_results,
             live_data_worker,
@@ -1382,14 +1397,41 @@ impl Showcase {
         self.live_data_worker = Some(worker);
     }
 
+    fn log_sequences(&self) -> Vec<u64> {
+        log_projection(&self.live_data, &self.live_filter)
+            .into_iter()
+            .map(|entry| entry.sequence)
+            .collect()
+    }
+
+    fn reconcile_log_view(&mut self) {
+        self.log_view.reconcile_sequences(self.log_sequences());
+    }
+
+    fn follow_log_view(&mut self) {
+        self.log_view.follow_sequences(self.log_sequences());
+        self.observability_viewport.end();
+    }
+
+    fn pause_log_view(&mut self) {
+        self.reconcile_log_view();
+        self.log_view.pause();
+        if self.observability_viewport.is_at_bottom() {
+            self.observability_viewport.scroll_up();
+        }
+    }
+
     fn drain_live_data_results(&mut self) -> bool {
-        let Some(results) = self.live_data_results.as_ref() else {
-            return false;
-        };
+        let messages = self
+            .live_data_results
+            .as_ref()
+            .map(|results| std::iter::from_fn(|| results.try_recv().ok()).collect::<Vec<_>>())
+            .unwrap_or_default();
         let mut changed = false;
-        while let Ok(message) = results.try_recv() {
+        for message in messages {
             self.live_data.apply(message);
             self.live_view.reconcile(&self.live_data, &self.live_filter);
+            self.reconcile_log_view();
             changed = true;
         }
         changed
@@ -1578,9 +1620,21 @@ impl Showcase {
                         self.adapter_browser_mode = AdapterBrowserMode::Adapters;
                         self.focus.set_focus(TABLE_FOCUS);
                     }
+                    KeyCode::Char('p' | 'P')
+                        if self.adapter_browser_mode
+                            == AdapterBrowserMode::Observability(ObservabilityMode::Logs) =>
+                    {
+                        self.pause_log_view();
+                    }
                     KeyCode::Char('p' | 'P') => {
                         self.live_view.reconcile(&self.live_data, &self.live_filter);
                         self.live_view.pause();
+                    }
+                    KeyCode::Char('f' | 'F')
+                        if self.adapter_browser_mode
+                            == AdapterBrowserMode::Observability(ObservabilityMode::Logs) =>
+                    {
+                        self.follow_log_view();
                     }
                     KeyCode::Char('f' | 'F') => {
                         self.live_view.follow(&self.live_data, &self.live_filter);
@@ -1865,6 +1919,7 @@ impl Showcase {
                 if let Some(input) = self.live_search_input.take() {
                     self.live_filter.query = input.text().to_owned();
                     self.live_view.reconcile(&self.live_data, &self.live_filter);
+                    self.reconcile_log_view();
                 }
             }
             _ => {
@@ -3723,6 +3778,9 @@ fn render_log_viewer(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -> 
         inner.width.saturating_sub(1),
         inner.height,
     );
+    showcase.reconcile_log_view();
+    let selected_sequence = showcase.log_view.selected_sequence;
+    let following = showcase.log_view.mode == LiveFollowMode::Follow;
     let lines = log_projection(&showcase.live_data, &showcase.live_filter)
         .into_iter()
         .map(|entry| {
@@ -3732,8 +3790,16 @@ fn render_log_viewer(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -> 
                 .unwrap_or_else(|| format!("#{}", entry.sequence));
             let severity = entry.severity.map_or("-", severity_label);
             format!(
-                "[{ordering}] {severity} {} {}/{} · {}",
-                entry.adapter_id, entry.stream, entry.kind, entry.text
+                "{} [{ordering}] {severity} {} {}/{} · {}",
+                if Some(entry.sequence) == selected_sequence {
+                    '›'
+                } else {
+                    ' '
+                },
+                entry.adapter_id,
+                entry.stream,
+                entry.kind,
+                entry.text
             )
         })
         .collect::<Vec<_>>();
@@ -3749,6 +3815,9 @@ fn render_log_viewer(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -> 
             .observability_viewport
             .update_dimensions(0, viewport_area.height);
     } else {
+        if following {
+            showcase.observability_viewport.end();
+        }
         Viewport::new(&lines)
             .style(Style::new().fg(theme.text).bg(theme.background))
             .render(frame, viewport_area, &mut showcase.observability_viewport);
@@ -6299,12 +6368,41 @@ mod tests {
         showcase
             .live_data
             .apply(LiveDataMessage::Event(event("adapter-c", None)));
+        showcase.live_data.apply(LiveDataMessage::Event(event(
+            "adapter-d",
+            Some(Observation::Status {
+                entity: "excluded-status".to_owned(),
+                check: "check".to_owned(),
+                status: dragonstui_adapter_host::ObservationStatus::Ok,
+                timestamp_millis: None,
+            }),
+        )));
+        showcase.live_data.apply(LiveDataMessage::Event(event(
+            "adapter-e",
+            Some(Observation::Event {
+                title: "excluded-event".to_owned(),
+                detail: None,
+                timestamp_millis: None,
+            }),
+        )));
+        showcase.live_data.apply(LiveDataMessage::Event(event(
+            "adapter-f",
+            Some(Observation::Error {
+                message: "excluded-error".to_owned(),
+                signature: None,
+                stack: Vec::new(),
+                timestamp_millis: None,
+            }),
+        )));
 
         let initial = showcase_view(Size::new(100, 24), &mut showcase);
         assert!(frame_contains(&initial.frame, "M53 Unicode günlük 🚀"));
         assert!(frame_contains(&initial.frame, "info"));
         assert!(frame_contains(&initial.frame, "adapter-a"));
         assert!(!frame_contains(&initial.frame, "not.a.log"));
+        assert!(!frame_contains(&initial.frame, "excluded-status"));
+        assert!(!frame_contains(&initial.frame, "excluded-event"));
+        assert!(!frame_contains(&initial.frame, "excluded-error"));
 
         showcase.live_filter.query = "günlük".to_owned();
         let filtered = showcase_view(Size::new(100, 24), &mut showcase);
@@ -6313,6 +6411,47 @@ mod tests {
             log_projection(&showcase.live_data, &showcase.live_filter).len(),
             1
         );
+    }
+
+    #[test]
+    fn log_follow_pause_and_eviction_use_only_visible_log_sequences() {
+        let mut showcase = Showcase::new(Instant::now());
+        showcase.live_data = LiveDataState::with_history_capacity(2);
+        let log = |text: &str| AdapterEvent {
+            adapter_id: AdapterId::new("adapter-a").unwrap(),
+            stream: "semantic".to_owned(),
+            kind: "fixture".to_owned(),
+            observation: Some(Observation::Log {
+                text: text.to_owned(),
+                severity: None,
+                timestamp_millis: None,
+            }),
+            payload: "null".parse().unwrap(),
+        };
+        showcase
+            .live_data
+            .apply(LiveDataMessage::Event(log("first")));
+        showcase.reconcile_log_view();
+        assert_eq!(showcase.log_view.selected_sequence, Some(0));
+        showcase.pause_log_view();
+        showcase
+            .live_data
+            .apply(LiveDataMessage::Event(log("second")));
+        showcase.reconcile_log_view();
+        assert_eq!(showcase.log_view.selected_sequence, Some(0));
+        showcase.follow_log_view();
+        assert_eq!(showcase.log_view.selected_sequence, Some(1));
+        showcase.pause_log_view();
+        showcase
+            .live_data
+            .apply(LiveDataMessage::Event(log("third")));
+        showcase.reconcile_log_view();
+        assert_eq!(showcase.log_view.selected_sequence, Some(1));
+        showcase
+            .live_data
+            .apply(LiveDataMessage::Event(log("fourth")));
+        showcase.reconcile_log_view();
+        assert_eq!(showcase.log_view.selected_sequence, Some(3));
     }
 
     #[test]
