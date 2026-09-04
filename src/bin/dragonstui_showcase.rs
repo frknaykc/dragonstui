@@ -34,8 +34,8 @@ use dragons_tui::{
 use dragonstui_adapter_host::{
     AdapterClassification, AdapterDisconnect, AdapterEvent, AdapterId, AdapterLiveData,
     AdapterManagement, AdapterManagementAction, ControllerIpcDiagnostics, DiscoveryError,
-    LocalAdapterRoot, Observation, local_controller_diagnostics, local_controller_live_data,
-    local_controller_management_client,
+    LocalAdapterRoot, Observation, ObservationSeverity, local_controller_diagnostics,
+    local_controller_live_data, local_controller_management_client,
 };
 
 const TICK_INTERVAL: Duration = Duration::from_millis(50);
@@ -213,6 +213,12 @@ enum AdapterBrowserMode {
     Adapters,
     Capabilities,
     StructuredPayload,
+    Observability(ObservabilityMode),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ObservabilityMode {
+    Logs,
 }
 
 impl AdapterViewState {
@@ -732,6 +738,7 @@ impl LiveDataFilter {
                             event.stream.clone(),
                             event.kind.clone(),
                             event.payload.to_string(),
+                            observation_search_text(event.observation.as_ref()),
                         ]
                         .iter()
                         .any(|value| value.to_lowercase().contains(&query)))
@@ -751,6 +758,53 @@ impl LiveDataFilter {
     }
 }
 
+fn observation_search_text(observation: Option<&Observation>) -> String {
+    match observation {
+        Some(Observation::Log { text, severity, .. }) => {
+            format!("{} {text}", severity.map_or("", severity_label))
+        }
+        Some(Observation::Metric { name, unit, .. }) => {
+            format!("{} {}", name, unit.as_deref().unwrap_or(""))
+        }
+        Some(Observation::Status {
+            entity,
+            check,
+            status,
+            ..
+        }) => {
+            format!("{entity} {check} {status:?}")
+        }
+        Some(Observation::Event { title, detail, .. }) => {
+            format!("{} {}", title, detail.as_deref().unwrap_or(""))
+        }
+        Some(Observation::Error {
+            message,
+            signature,
+            stack,
+            ..
+        }) => {
+            format!(
+                "{} {} {}",
+                message,
+                signature.as_deref().unwrap_or(""),
+                stack.join(" ")
+            )
+        }
+        None => String::new(),
+    }
+}
+
+fn severity_label(severity: ObservationSeverity) -> &'static str {
+    match severity {
+        ObservationSeverity::Trace => "trace",
+        ObservationSeverity::Debug => "debug",
+        ObservationSeverity::Info => "info",
+        ObservationSeverity::Warning => "warning",
+        ObservationSeverity::Error => "error",
+        ObservationSeverity::Critical => "critical",
+    }
+}
+
 /// Render-owned, globally ordered generic live history. Every entry retains its
 /// protocol provenance; one queue prevents unbounded partition-key growth.
 #[derive(Clone, Debug)]
@@ -761,6 +815,46 @@ struct LiveDataState {
     latest_disconnect: Option<AdapterDisconnect>,
     history_capacity: usize,
     history: VecDeque<LiveHistoryEntry>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LogProjection {
+    sequence: u64,
+    adapter_id: AdapterId,
+    stream: String,
+    kind: String,
+    text: String,
+    severity: Option<ObservationSeverity>,
+    timestamp_millis: Option<u64>,
+}
+
+fn log_projection(live_data: &LiveDataState, filter: &LiveDataFilter) -> Vec<LogProjection> {
+    live_data
+        .filtered_entries(filter)
+        .filter_map(|entry| match &entry.message {
+            LiveDataMessage::Event(AdapterEvent {
+                adapter_id,
+                stream,
+                kind,
+                observation:
+                    Some(Observation::Log {
+                        text,
+                        severity,
+                        timestamp_millis,
+                    }),
+                ..
+            }) => Some(LogProjection {
+                sequence: entry.sequence,
+                adapter_id: adapter_id.clone(),
+                stream: stream.clone(),
+                kind: kind.clone(),
+                text: text.clone(),
+                severity: *severity,
+                timestamp_millis: *timestamp_millis,
+            }),
+            _ => None,
+        })
+        .collect()
 }
 
 impl Default for LiveDataState {
@@ -958,6 +1052,7 @@ struct Showcase {
     adapter_inspector_split: InspectorSplitState,
     adapter_property_viewport: ViewportState,
     adapter_property_scrollbar: ScrollbarState,
+    observability_viewport: ViewportState,
     palette: Option<CommandPalette>,
     modal_open: bool,
     focus_before_modal: Option<FocusId>,
@@ -1071,6 +1166,7 @@ impl Showcase {
             adapter_inspector_split: InspectorSplitState::new(),
             adapter_property_viewport: ViewportState::new(),
             adapter_property_scrollbar: ScrollbarState::new(),
+            observability_viewport: ViewportState::new(),
             palette: None,
             modal_open: false,
             focus_before_modal: None,
@@ -1302,8 +1398,10 @@ impl Showcase {
         }
 
         if self.section == Section::Adapters {
-            if self.adapter_browser_mode == AdapterBrowserMode::Adapters
-                && matches!(key.code, KeyCode::Char('/'))
+            if matches!(
+                self.adapter_browser_mode,
+                AdapterBrowserMode::Adapters | AdapterBrowserMode::Observability(_)
+            ) && matches!(key.code, KeyCode::Char('/'))
             {
                 let mut input = TextInput::new();
                 for character in self.live_filter.query.chars() {
@@ -1350,6 +1448,28 @@ impl Showcase {
                     _ => {}
                 }
             }
+            if self.adapter_browser_mode
+                == AdapterBrowserMode::Observability(ObservabilityMode::Logs)
+            {
+                match key.code {
+                    KeyCode::Char('o' | 'O') | KeyCode::Escape => {
+                        self.adapter_browser_mode = AdapterBrowserMode::Adapters;
+                        self.focus.set_focus(TABLE_FOCUS);
+                    }
+                    KeyCode::Char('p' | 'P') => {
+                        self.live_view.reconcile(&self.live_data, &self.live_filter);
+                        self.live_view.pause();
+                    }
+                    KeyCode::Char('f' | 'F') => {
+                        self.live_view.follow(&self.live_data, &self.live_filter);
+                    }
+                    _ => return Outcome::default(),
+                }
+                return Outcome {
+                    quit: false,
+                    redraw: true,
+                };
+            }
             if self.adapter_browser_mode == AdapterBrowserMode::StructuredPayload {
                 if matches!(key.code, KeyCode::Char('j' | 'J') | KeyCode::Escape) {
                     self.adapter_browser_mode = AdapterBrowserMode::Adapters;
@@ -1389,6 +1509,17 @@ impl Showcase {
                 self.adapter_browser_mode = AdapterBrowserMode::Capabilities;
                 self.table.set_selected(0);
                 self.focus.set_focus(TABLE_FOCUS);
+                return Outcome {
+                    quit: false,
+                    redraw: true,
+                };
+            }
+            if self.adapter_browser_mode == AdapterBrowserMode::Adapters
+                && matches!(key.code, KeyCode::Char('o' | 'O'))
+            {
+                self.adapter_browser_mode =
+                    AdapterBrowserMode::Observability(ObservabilityMode::Logs);
+                self.focus.set_focus(VIEWPORT_FOCUS);
                 return Outcome {
                     quit: false,
                     redraw: true,
@@ -1552,6 +1683,21 @@ impl Showcase {
                     KeyCode::PageDown => self.adapter_property_viewport.page_down(),
                     KeyCode::Home => self.adapter_property_viewport.home(),
                     KeyCode::End => self.adapter_property_viewport.end(),
+                    _ => false,
+                }
+            }
+            Some(VIEWPORT_FOCUS)
+                if self.section == Section::Adapters
+                    && self.adapter_browser_mode
+                        == AdapterBrowserMode::Observability(ObservabilityMode::Logs) =>
+            {
+                match key.code {
+                    KeyCode::Up => self.observability_viewport.scroll_up(),
+                    KeyCode::Down => self.observability_viewport.scroll_down(),
+                    KeyCode::PageUp => self.observability_viewport.page_up(),
+                    KeyCode::PageDown => self.observability_viewport.page_down(),
+                    KeyCode::Home => self.observability_viewport.home(),
+                    KeyCode::End => self.observability_viewport.end(),
                     _ => false,
                 }
             }
@@ -3251,7 +3397,86 @@ fn render_adapters(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -> Op
         AdapterBrowserMode::StructuredPayload => {
             render_structured_payload_browser(frame, area, showcase)
         }
+        AdapterBrowserMode::Observability(ObservabilityMode::Logs) => {
+            render_log_viewer(frame, area, showcase)
+        }
     }
+}
+
+fn render_log_viewer(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -> Option<Position> {
+    let theme = showcase.theme;
+    let inner = panel(
+        frame,
+        area,
+        localized(
+            showcase.language,
+            "Observability · Logs",
+            "Gözlemlenebilirlik · Günlükler",
+        ),
+        showcase.focus.current() == Some(VIEWPORT_FOCUS),
+        theme,
+        BorderSet::double(),
+    );
+    let track = Rect::new(inner.right().saturating_sub(1), inner.y, 1, inner.height);
+    let viewport_area = Rect::new(
+        inner.x,
+        inner.y,
+        inner.width.saturating_sub(1),
+        inner.height,
+    );
+    let lines = log_projection(&showcase.live_data, &showcase.live_filter)
+        .into_iter()
+        .map(|entry| {
+            let ordering = entry
+                .timestamp_millis
+                .map(|timestamp| timestamp.to_string())
+                .unwrap_or_else(|| format!("#{}", entry.sequence));
+            let severity = entry.severity.map_or("-", severity_label);
+            format!(
+                "[{ordering}] {severity} {} {}/{} · {}",
+                entry.adapter_id, entry.stream, entry.kind, entry.text
+            )
+        })
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        Text::new(localized(
+            showcase.language,
+            "No Log observations in retained history.",
+            "Tutulan geçmişte Log gözlemi yok.",
+        ))
+        .style(Style::new().fg(theme.muted).bg(theme.background))
+        .render(frame, viewport_area);
+        showcase
+            .observability_viewport
+            .update_dimensions(0, viewport_area.height);
+    } else {
+        Viewport::new(&lines)
+            .style(Style::new().fg(theme.text).bg(theme.background))
+            .render(frame, viewport_area, &mut showcase.observability_viewport);
+    }
+    let _ = Scrollbar::render(
+        frame,
+        &showcase.observability_viewport,
+        track,
+        Style::new().fg(theme.muted).bg(theme.background).dim(),
+        Style::new().fg(theme.success).bg(theme.background).bold(),
+    );
+    Text::new(localized(
+        showcase.language,
+        "O/Esc adapters · / search · P pause · F follow · ↑↓ scroll",
+        "O/Esc adaptörler · / ara · P duraklat · F takip · ↑↓ kaydır",
+    ))
+    .style(Style::new().fg(theme.warning).bg(theme.background).dim())
+    .render(
+        frame,
+        Rect::new(
+            viewport_area.x,
+            viewport_area.bottom().saturating_sub(1),
+            viewport_area.width,
+            1,
+        ),
+    );
+    None
 }
 
 fn render_adapter_list(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -> Option<Position> {
@@ -4180,7 +4405,7 @@ impl Drop for TerminalGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dragonstui_adapter_host::{Observation, ObservationKind};
+    use dragonstui_adapter_host::{Observation, ObservationKind, ObservationSeverity};
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent {
@@ -5739,6 +5964,55 @@ mod tests {
                 timestamp_millis: None,
             })),
             "error"
+        );
+    }
+
+    #[test]
+    fn observability_logs_project_only_explicit_logs_and_reuse_the_generic_query() {
+        let mut showcase = Showcase::new(Instant::now());
+        showcase.phase = Phase::Showcase;
+        showcase.section = Section::Adapters;
+        showcase.adapter_browser_mode = AdapterBrowserMode::Observability(ObservabilityMode::Logs);
+        let event = |adapter_id: &str, observation: Option<Observation>| AdapterEvent {
+            adapter_id: AdapterId::new(adapter_id).unwrap(),
+            stream: "semantic".to_owned(),
+            kind: "fixture".to_owned(),
+            observation,
+            payload: r#"{"opaque":"preserved"}"#.parse().unwrap(),
+        };
+        showcase.live_data.apply(LiveDataMessage::Event(event(
+            "adapter-a",
+            Some(Observation::Log {
+                text: "M53 Unicode günlük 🚀".to_owned(),
+                severity: Some(ObservationSeverity::Info),
+                timestamp_millis: Some(7),
+            }),
+        )));
+        showcase.live_data.apply(LiveDataMessage::Event(event(
+            "adapter-b",
+            Some(Observation::Metric {
+                name: "not.a.log".to_owned(),
+                value: 42.into(),
+                unit: None,
+                timestamp_millis: Some(8),
+            }),
+        )));
+        showcase
+            .live_data
+            .apply(LiveDataMessage::Event(event("adapter-c", None)));
+
+        let initial = showcase_view(Size::new(100, 24), &mut showcase);
+        assert!(frame_contains(&initial.frame, "M53 Unicode günlük 🚀"));
+        assert!(frame_contains(&initial.frame, "info"));
+        assert!(frame_contains(&initial.frame, "adapter-a"));
+        assert!(!frame_contains(&initial.frame, "not.a.log"));
+
+        showcase.live_filter.query = "günlük".to_owned();
+        let filtered = showcase_view(Size::new(100, 24), &mut showcase);
+        assert!(frame_contains(&filtered.frame, "M53 Unicode günlük 🚀"));
+        assert_eq!(
+            log_projection(&showcase.live_data, &showcase.live_filter).len(),
+            1
         );
     }
 
