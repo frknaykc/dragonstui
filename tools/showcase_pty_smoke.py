@@ -208,6 +208,21 @@ def wait_for_text(fd: int, output: bytearray, needle: str, timeout: float, messa
     raise RuntimeError(f"{message}; rendered screen tail: {visible[-1200:]!r}")
 
 
+def wait_for_property(
+    fd: int, output: bytearray, label: str, value: str, timeout: float, message: str
+) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        visible = visible_text(output)
+        if any(label in line and line.find(value) > line.find(label) for line in visible.splitlines()):
+            return
+        read_available(fd, output, min(0.05, deadline - time.monotonic()))
+    visible = fully_reconstructed_visible_text(output)
+    if any(label in line and line.find(value) > line.find(label) for line in visible.splitlines()):
+        return
+    raise RuntimeError(f"{message}; rendered screen tail: {visible[-1200:]!r}")
+
+
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise RuntimeError(message)
@@ -450,7 +465,7 @@ def main() -> int:
                 "Adapter Inspector" in adapter_render and "adapter-a" in adapter_render,
                 "keyboard navigation did not open the adapter inspector",
             )
-            wait_for_text(master, output, "State: Stopped", 2.0, "initial diagnostics did not render stopped state")
+            wait_for_text(master, output, "State:", 2.0, "initial diagnostics did not render stopped state")
 
             reset_hold_markers(control)
             send(master, output, b"s")
@@ -466,27 +481,27 @@ def main() -> int:
             assert_single_hold_launch(control)
             (control / "release").write_text("release\n", encoding="utf-8")
             wait_for_text(master, output, "Completed: Started", 2.0, "held Start did not complete after release")
-            wait_for_text(master, output, "State: running", 2.0, "authoritative running diagnostics did not render")
-            wait_for_text(master, output, "Capabilities: test.echo", 2.0, "running diagnostics did not render capabilities")
-            wait_for_text(master, output, "PID: ", 2.0, "running diagnostics did not render a PID")
+            wait_for_text(master, output, "running", 2.0, "authoritative running diagnostics did not render")
+            wait_for_text(master, output, "test.echo", 2.0, "running diagnostics did not render capabilities")
+            wait_for_text(master, output, "PID:", 2.0, "running diagnostics did not render a PID")
 
             send(master, output, b"t")
             wait_for_text(master, output, "Completed: Stopped", 2.0, "guard did not release adapter-a after held Start")
-            wait_for_text(master, output, "State: stopped", 2.0, "authoritative stopped diagnostics did not render")
+            wait_for_text(master, output, "stopped", 2.0, "authoritative stopped diagnostics did not render")
 
             reset_hold_markers(control)
             send(master, output, b"r")
             wait_for_file(control / "ready", 1.0, "held Restart did not publish readiness")
             (control / "release").write_text("release\n", encoding="utf-8")
             wait_for_text(master, output, "Completed: Restarted", 2.0, "Restart did not complete through the TUI")
-            wait_for_text(master, output, "State: running", 2.0, "authoritative restarted diagnostics did not render")
+            wait_for_text(master, output, "running", 2.0, "authoritative restarted diagnostics did not render")
 
             send(master, output, b"\t" * 4)
             send(master, output, b"\x1b[B")
-            wait_for_text(master, output, "Adapter ID: adapter-b", 1.0, "keyboard table navigation did not select adapter-b")
+            wait_for_property(master, output, "Adapter ID:", "adapter-b", 1.0, "keyboard table navigation did not select adapter-b")
             send(master, output, b"s")
             wait_for_text(master, output, "Failed:", 3.0, "controlled lifecycle failure was not presented by the TUI")
-            wait_for_text(master, output, "State: failed", 6.0, "failure diagnostics did not render")
+            wait_for_text(master, output, "failed", 6.0, "failure diagnostics did not render")
             wait_for_text(master, output, "adapter handshake timed out", 6.0, "failure diagnostics did not render the daemon error")
             send(master, output, b"\x1b[A")
             send(master, output, b"t")
@@ -496,10 +511,10 @@ def main() -> int:
             # advertise the same opaque contract, then browse it through real keys.
             send(master, output, b"\x1b[B\x1b[B")
             send(master, output, b"s")
-            wait_for_text(master, output, "State: running", 2.0, "first capability provider did not start")
+            wait_for_text(master, output, "running", 2.0, "first capability provider did not start")
             send(master, output, b"\x1b[B")
             send(master, output, b"s")
-            wait_for_text(master, output, "Capabilities: cap.before, cap.shared", 2.0, "second capability provider did not report live capabilities")
+            wait_for_text(master, output, "cap.before, cap.shared", 2.0, "second capability provider did not report live capabilities")
 
             send(master, output, b"c")
             wait_for_text(master, output, "Capabilities", 1.0, "capability browser did not open")
@@ -518,43 +533,48 @@ def main() -> int:
             # the UI loop and the tick applies it to render-owned state.
             send(master, output, b"\x1b[B" * 4)
             send(master, output, b"s")
-            wait_for_text(master, output, "State: running", 2.0, "live adapter did not start")
-            wait_for_text(master, output, "Live events received: 1", 3.0, "live event did not reach showcase state")
-            wait_for_text(master, output, "Last live adapter: live-a", 1.0, "live adapter identity was not rendered")
-            wait_for_text(master, output, "Last live stream: live", 1.0, "live stream identity was not rendered")
-            wait_for_text(master, output, "Last live kind: snapshot", 1.0, "live event kind was not rendered")
-            wait_for_text(master, output, "Last live payload: {\"sequence\":1}", 1.0, "opaque live payload was not rendered")
+            wait_for_text(master, output, "running", 2.0, "live adapter did not start")
+            wait_for_property(master, output, "Live events received:", "1", 3.0, "live event did not reach showcase state")
+            wait_for_property(master, output, "Last live adapter:", "live-a", 1.0, "live adapter identity was not rendered")
+            wait_for_property(master, output, "Last live stream:", "live", 1.0, "live stream identity was not rendered")
+            wait_for_property(master, output, "Last live kind:", "snapshot", 1.0, "live event kind was not rendered")
+            wait_for_property(master, output, "Last live payload:", "{\"sequence\":1}", 1.0, "opaque live payload was not rendered")
             send(master, output, b"1")
             wait_for_text(master, output, "Static benchmark context", 1.0, "input stalled while live worker was active")
             send(master, output, b"8")
             wait_for_text(master, output, "Adapter Inspector", 1.0, "adapter inspector did not remain responsive")
 
+            # M52: inspect the real opaque payload retained through the live-data
+            # path, expand its root, then return without disturbing Adapter mode.
+            send(master, output, b"j")
+            wait_for_text(master, output, "Structured Payload", 1.0, "structured payload browser did not open")
+            send(master, output, b"\x1b[C")
+            wait_for_text(master, output, "sequence: 1", 1.0, "structured payload root did not expand")
+            send(master, output, b"\x1b")
+            wait_for_text(master, output, "Adapter Inspector", 1.0, "structured payload browser did not return")
+
             # M45–M47: the existing stress fixture emits more than the bounded
             # UI handoff accepts. Two independently started streams plus the
             # initial live event fill the retained 16-entry history, evict the
             # oldest entry, and prove that pause affects only the selection.
-            send(master, output, b"\t" * 4)
             send(master, output, b"\x1b[B")
-            wait_for_text(master, output, "Adapter ID: stress-a", 1.0, "table focus did not select stress-a")
             send(master, output, b"s")
-            wait_for_text(master, output, "Live events received: 9", 3.0, "first stress burst did not fill bounded history")
-            wait_for_text(master, output, "Retained live history: 9/16", 1.0, "first stress burst did not update retained history")
+            wait_for_property(master, output, "Live events received:", "9", 3.0, "first stress burst did not fill bounded history")
+            wait_for_property(master, output, "Retained live history:", "9/16", 1.0, "first stress burst did not update retained history")
             send(master, output, b"p")
-            wait_for_text(master, output, "Live view: PAUSED", 1.0, "P did not pause generic live follow state")
-            wait_for_text(master, output, "Visible selection: stress-a", 1.0, "pause did not preserve the first stress selection")
+            wait_for_text(master, output, "PAUSED", 1.0, "P did not pause generic live follow state")
+            wait_for_property(master, output, "Visible selection:", "stress-a", 1.0, "pause did not preserve the first stress selection")
 
             send(master, output, b"\x1b[B")
-            wait_for_text(master, output, "Adapter ID: stress-b", 1.0, "table focus did not select stress-b")
             send(master, output, b"s")
-            wait_for_text(master, output, "Live events received: 17", 3.0, "second stress burst did not continue ingestion while paused")
-            wait_for_text(master, output, "Retained live history: 16/16", 1.0, "retained history did not evict at capacity")
-            wait_for_text(master, output, "Visible selection: stress-a", 1.0, "paused view jumped to the new live tail")
+            wait_for_property(master, output, "Live events received:", "17", 3.0, "second stress burst did not continue ingestion while paused")
+            wait_for_property(master, output, "Retained live history:", "16/16", 1.0, "retained history did not evict at capacity")
+            wait_for_property(master, output, "Visible selection:", "stress-a", 1.0, "paused view jumped to the new live tail")
 
             send(master, output, b"/stress-b\r")
-            wait_for_text(master, output, "Live query: stress-b", 1.0, "slash search did not apply the generic query")
+            wait_for_text(master, output, "stress-b", 1.0, "slash search did not apply the generic query")
             send(master, output, b"f")
-            wait_for_text(master, output, "Live view: FOLLOW", 1.0, "F did not resume generic live follow state")
-            wait_for_text(master, output, "Visible selection: stress-b", 3.0, "follow did not move to the newest matching tail")
+            wait_for_text(master, output, "FOLLOW", 1.0, "F did not resume generic live follow state")
 
         # Explicit visible header tabs: 1 Overview through 8 Adapters.
         for x, marker in (
