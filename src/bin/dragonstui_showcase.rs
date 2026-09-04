@@ -26,10 +26,10 @@ use dragons_tui::{
     Alignment, Animation, BorderSet, Canvas, Cell, Color, CommandId, CommandPalette, Constraint,
     Event, FocusId, FocusState, Frame, Gauge, InspectorLayout, InspectorSplitState, KeyCode,
     KeyEvent, KeyMap, KeyModifiers, Line, List, ListState, Modal, MouseEvent, MouseKind,
-    PaletteCommand, Panel, Position, ProgressBar, Rect, RichText, Runtime, ShutdownSignal, Size,
-    Span, Sparkline, Spinner, Style, Table, TableColumn, TableState, Text, TextArea, TextInput,
-    Theme, Tree, TreeNode, TreeState, Viewport, ViewportState, display_width, is_quit_key,
-    terminal_size,
+    PaletteCommand, Panel, Position, ProgressBar, Rect, RichText, Runtime, Scrollbar,
+    ScrollbarState, ShutdownSignal, Size, Span, Sparkline, Spinner, Style, Table, TableColumn,
+    TableState, Text, TextArea, TextInput, Theme, Tree, TreeNode, TreeState, Viewport,
+    ViewportState, display_width, is_quit_key, terminal_size,
 };
 use dragonstui_adapter_host::{
     AdapterClassification, AdapterDisconnect, AdapterEvent, AdapterId, AdapterLiveData,
@@ -639,6 +639,7 @@ struct HitRegions {
     color_inputs: [Rect; 3],
     color_apply: Rect,
     adapter_inspector: Rect,
+    scrollbar_track: Rect,
 }
 
 /// A capability-agnostic handoff from the controller receiver to the UI thread.
@@ -923,6 +924,7 @@ struct Showcase {
     table: TableState,
     tree: TreeState,
     viewport: ViewportState,
+    scrollbar: ScrollbarState,
     input: TextInput,
     area: TextArea,
     adapter_root: Option<PathBuf>,
@@ -1032,6 +1034,7 @@ impl Showcase {
             table: TableState::new(),
             tree,
             viewport: ViewportState::new(),
+            scrollbar: ScrollbarState::new(),
             input: seeded_input(),
             area: TextArea::from("İstanbul\n你好\n🚀  é  ❤️\n👨‍👩‍👧‍👦  🇹🇷"),
             adapter_root,
@@ -1619,6 +1622,40 @@ impl Showcase {
                     redraw: true,
                 };
             }
+        }
+
+        if mouse.kind == MouseKind::LeftDown {
+            if let Some(geometry) = Scrollbar::geometry(&self.viewport, self.hits.scrollbar_track) {
+                if geometry.thumb.contains(point) {
+                    return Outcome {
+                        quit: false,
+                        redraw: self.scrollbar.start_drag(geometry, point),
+                    };
+                }
+            }
+            if self
+                .scrollbar
+                .track_click(&mut self.viewport, self.hits.scrollbar_track, point)
+            {
+                return Outcome {
+                    quit: false,
+                    redraw: true,
+                };
+            }
+        }
+        let scrollbar_redraw = match mouse.kind {
+            MouseKind::Drag(dragons_tui::MouseButton::Left) => {
+                self.scrollbar
+                    .drag_to(&mut self.viewport, self.hits.scrollbar_track, point)
+            }
+            MouseKind::LeftUp => self.scrollbar.stop_drag(),
+            _ => false,
+        };
+        if scrollbar_redraw {
+            return Outcome {
+                quit: false,
+                redraw: true,
+            };
         }
 
         if mouse.kind == MouseKind::LeftDown {
@@ -2823,10 +2860,25 @@ fn render_widgets(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -> Opt
             theme,
             BorderSet::rounded(),
         );
-        showcase.hits.viewport = inner;
+        let track = Rect::new(inner.right().saturating_sub(1), inner.y, 1, inner.height);
+        let viewport_area = Rect::new(
+            inner.x,
+            inner.y,
+            inner.width.saturating_sub(1),
+            inner.height,
+        );
+        showcase.hits.viewport = viewport_area;
+        showcase.hits.scrollbar_track = track;
         Viewport::new(&output_lines())
             .style(Style::new().fg(theme.text).bg(theme.background))
-            .render(frame, inner, &mut showcase.viewport);
+            .render(frame, viewport_area, &mut showcase.viewport);
+        let _ = Scrollbar::render(
+            frame,
+            &showcase.viewport,
+            track,
+            Style::new().fg(theme.muted).bg(theme.background).dim(),
+            Style::new().fg(theme.success).bg(theme.background).bold(),
+        );
     }
     None
 }
@@ -4196,6 +4248,64 @@ mod tests {
                 .redraw
         );
         assert!(!showcase.adapter_inspector_split.is_dragging());
+    }
+
+    #[test]
+    fn showcase_viewport_scrollbar_routes_track_click_and_thumb_drag_without_focus_regression() {
+        let mut showcase = Showcase::new(Instant::now());
+        showcase.phase = Phase::Showcase;
+        showcase.section = Section::Widgets;
+        showcase.focus.set_focus(VIEWPORT_FOCUS);
+        let _ = showcase_view(Size::new(100, 25), &mut showcase);
+        let track = showcase.hits.scrollbar_track;
+        let geometry = Scrollbar::geometry(&showcase.viewport, track).unwrap();
+
+        assert!(
+            showcase
+                .handle_mouse(MouseEvent {
+                    x: track.x,
+                    y: track.bottom().saturating_sub(1),
+                    kind: MouseKind::LeftDown,
+                    modifiers: KeyModifiers::default(),
+                })
+                .redraw
+        );
+        assert!(showcase.viewport.is_at_bottom());
+        let bottom_thumb = Scrollbar::geometry(&showcase.viewport, track).unwrap();
+        assert!(
+            showcase
+                .handle_mouse(MouseEvent {
+                    x: bottom_thumb.thumb.x,
+                    y: bottom_thumb.thumb.y,
+                    kind: MouseKind::LeftDown,
+                    modifiers: KeyModifiers::default(),
+                })
+                .redraw
+        );
+        assert!(showcase.scrollbar.is_dragging());
+        assert!(
+            showcase
+                .handle_mouse(MouseEvent {
+                    x: track.x,
+                    y: geometry.track.y,
+                    kind: MouseKind::Drag(dragons_tui::MouseButton::Left),
+                    modifiers: KeyModifiers::default(),
+                })
+                .redraw
+        );
+        assert_eq!(showcase.viewport.offset(), 0);
+        assert_eq!(showcase.focus.current(), Some(VIEWPORT_FOCUS));
+        assert!(
+            showcase
+                .handle_mouse(MouseEvent {
+                    x: track.x,
+                    y: geometry.track.y,
+                    kind: MouseKind::LeftUp,
+                    modifiers: KeyModifiers::default(),
+                })
+                .redraw
+        );
+        assert!(!showcase.scrollbar.is_dragging());
     }
 
     #[test]

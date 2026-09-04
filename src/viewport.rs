@@ -73,7 +73,8 @@ impl ViewportState {
         self.set_offset(self.max_scroll())
     }
 
-    fn set_offset(&mut self, offset: usize) -> bool {
+    /// Sets a scroll offset, clamped to the current content and viewport dimensions.
+    pub fn set_offset(&mut self, offset: usize) -> bool {
         let offset = offset.min(self.max_scroll());
         if self.offset == offset {
             return false;
