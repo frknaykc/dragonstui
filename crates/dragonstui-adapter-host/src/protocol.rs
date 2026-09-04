@@ -201,6 +201,9 @@ pub struct AdapterAction {
     pub label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Producer-declared UI policy. This is confirmation UX, not authorization.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub confirmation_required: bool,
     /// Existing capability RPC operation used to execute this declared action.
     pub operation: Capability,
 }

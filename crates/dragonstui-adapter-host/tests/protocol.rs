@@ -83,6 +83,7 @@ fn adapter_actions_are_additive_typed_metadata_and_requests_keep_their_identity(
         id: ActionId::new("fixture.action.alpha").unwrap(),
         label: "Run alpha".to_owned(),
         description: Some("Adapter-declared action".to_owned()),
+        confirmation_required: false,
         operation: Capability::new("test.echo").unwrap(),
     };
     let message = ProtocolMessage::Request(Request {
@@ -99,4 +100,15 @@ fn adapter_actions_are_additive_typed_metadata_and_requests_keep_their_identity(
     );
     assert!(ActionId::new("fixture.destroy.everything").is_ok());
     assert!(ActionId::new("Fixture action").is_err());
+}
+
+#[test]
+fn action_confirmation_policy_is_explicit_and_additive() {
+    let legacy: AdapterInfo = serde_json::from_str(
+        r#"{"protocol":1,"id":"fixture","version":"1.0.0","capabilities":["test.echo"],"actions":[{"id":"fixture.destroy.everything","label":"Alarming but direct","operation":"test.echo"},{"id":"fixture.inspect","label":"Harmless but confirmed","operation":"test.echo","confirmation_required":true}]}"#,
+    )
+    .unwrap();
+
+    assert!(!legacy.actions[0].confirmation_required);
+    assert!(legacy.actions[1].confirmation_required);
 }

@@ -257,6 +257,7 @@ fn manager_discovers_and_invokes_declared_actions_without_identifier_semantics()
     let id = AdapterId::new("mock").unwrap();
     let alpha = ActionId::new("fixture.action.alpha").unwrap();
     let alarming = ActionId::new("fixture.destroy.everything").unwrap();
+    let confirmed = ActionId::new("fixture.inspect").unwrap();
     let unknown = ActionId::new("fixture.action.missing").unwrap();
     let mut manager = AdapterManager::new(Duration::from_millis(200), 8);
     manager.discover(LocalAdapterRoot::new(&root.path)).unwrap();
@@ -271,7 +272,7 @@ fn manager_discovers_and_invokes_declared_actions_without_identifier_semantics()
             .into_iter()
             .map(|action| action.id)
             .collect::<Vec<_>>(),
-        vec![alpha.clone(), alarming.clone()]
+        vec![alpha.clone(), alarming.clone(), confirmed]
     );
 
     let accepted = manager

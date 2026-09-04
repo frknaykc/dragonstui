@@ -483,6 +483,7 @@ fn authenticated_action_client_discovers_invokes_and_reports_typed_outcomes() {
     let id = AdapterId::new("mock").unwrap();
     let alpha = ActionId::new("fixture.action.alpha").unwrap();
     let alarming = ActionId::new("fixture.destroy.everything").unwrap();
+    let confirmed = ActionId::new("fixture.inspect").unwrap();
     let missing = ActionId::new("fixture.action.missing").unwrap();
     let legacy = ControllerClient::new(address, "correct-token");
     let client = ControllerActionClient::new(address, "correct-token");
@@ -495,7 +496,7 @@ fn authenticated_action_client_discovers_invokes_and_reports_typed_outcomes() {
             .into_iter()
             .map(|action| action.id)
             .collect::<Vec<_>>(),
-        vec![alpha.clone(), alarming.clone()]
+        vec![alpha.clone(), alarming.clone(), confirmed]
     );
     assert!(matches!(
         client.invoke(&id, &alpha, serde_json::json!({})).unwrap().outcome,
@@ -520,6 +521,37 @@ fn authenticated_action_client_discovers_invokes_and_reports_typed_outcomes() {
             .unwrap_err()
             .to_string()
             .contains("authentication failed")
+    );
+
+    legacy.shutdown().unwrap();
+    worker.join().unwrap().unwrap();
+}
+
+#[test]
+fn authenticated_action_client_preserves_producer_confirmation_policy() {
+    let root = TempRoot::actions();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let controller = AdapterController::new(&root.path, Duration::from_millis(200), 8);
+    let server = ControllerIpcServer::new(listener, controller, "correct-token");
+    let worker = thread::spawn(move || server.serve_forever());
+    let id = AdapterId::new("mock").unwrap();
+    let legacy = ControllerClient::new(address, "correct-token");
+    let client = ControllerActionClient::new(address, "correct-token");
+
+    legacy.start(&id).unwrap();
+    assert_eq!(
+        client
+            .actions(&id)
+            .unwrap()
+            .into_iter()
+            .map(|action| (action.id.to_string(), action.confirmation_required))
+            .collect::<Vec<_>>(),
+        vec![
+            ("fixture.action.alpha".to_owned(), false),
+            ("fixture.destroy.everything".to_owned(), false),
+            ("fixture.inspect".to_owned(), true),
+        ]
     );
 
     legacy.shutdown().unwrap();

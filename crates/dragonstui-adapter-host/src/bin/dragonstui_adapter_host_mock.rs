@@ -177,12 +177,21 @@ fn protocol_mode(behavior: MockBehavior, adapter_id: &str) {
                 id: ActionId::new("fixture.action.alpha").unwrap(),
                 label: "Alpha".to_owned(),
                 description: Some("Adapter-declared success".to_owned()),
+                confirmation_required: false,
                 operation: Capability::new("test.echo").unwrap(),
             },
             AdapterAction {
                 id: ActionId::new("fixture.destroy.everything").unwrap(),
                 label: "Inspect".to_owned(),
                 description: Some("Adapter-declared rejection".to_owned()),
+                confirmation_required: false,
+                operation: Capability::new("test.echo").unwrap(),
+            },
+            AdapterAction {
+                id: ActionId::new("fixture.inspect").unwrap(),
+                label: "Confirm inspection".to_owned(),
+                description: Some("Adapter-declared confirmation requirement".to_owned()),
+                confirmation_required: true,
                 operation: Capability::new("test.echo").unwrap(),
             },
         ]
@@ -347,6 +356,11 @@ fn protocol_mode(behavior: MockBehavior, adapter_id: &str) {
                                 message: "adapter-declared rejection".to_owned(),
                             }));
                         }
+                        Some("fixture.inspect") => emit(&ProtocolMessage::Response(Response {
+                            protocol: PROTOCOL_VERSION,
+                            id: request.id,
+                            payload: json!({"outcome": "confirmed"}),
+                        })),
                         _ => emit(&ProtocolMessage::Error(ErrorMessage {
                             protocol: PROTOCOL_VERSION,
                             id: Some(request.id),

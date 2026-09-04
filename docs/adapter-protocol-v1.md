@@ -9,8 +9,8 @@ Every envelope has an explicit numeric `protocol` field. The M24–M34 host supp
 | Type | Direction | Typed fields | Flexible field |
 | --- | --- | --- | --- |
 | `hello` | host → adapter | `protocol`, `host_version` | — |
-| `adapter_info` | adapter → host | `protocol`, `id`, `version`, `capabilities` | — |
-| `request` | host → adapter | `protocol`, `id`, `operation` | `payload` |
+| `adapter_info` | adapter → host | `protocol`, `id`, `version`, `capabilities`, optional `actions` | — |
+| `request` | host → adapter | `protocol`, `id`, `operation`, optional `action` | `payload` |
 | `response` | adapter → host | `protocol`, `id` | `payload` |
 | `error` | adapter → host | `protocol`, optional `id`, `code`, `message` | — |
 | `event` | adapter → host | `protocol`, `stream`, `kind`, optional `observation` | `payload` |
@@ -18,6 +18,14 @@ Every envelope has an explicit numeric `protocol` field. The M24–M34 host supp
 | `shutdown_ack` | adapter → host | `protocol` | — |
 
 `payload` is JSON to keep adapter-specific domain data outside the host's generic model. Envelope, identity, capability, stream, and request-correlation fields remain typed.
+
+## Adapter actions and confirmation
+
+An adapter may declare ordered `actions` in `adapter_info`. Each action has a producer-owned `id`, human-readable `label`, optional `description`, an existing capability `operation`, and an optional `confirmation_required` boolean. An action invocation is a normal `request` carrying the declared `operation`, opaque `payload`, and optional `action` identity. The host never derives action semantics from an adapter name, action ID, label, capability text, stream, kind, or payload keys.
+
+`confirmation_required: true` is producer-declared **UI confirmation policy**: a compliant UI must require a distinct user confirmation before sending that invocation. Omission defaults to `false`; an alarming-looking identifier remains directly invokable when the producer declares no confirmation, while a harmless-looking identifier can require confirmation. The UI captures the adapter ID, action ID, and payload when opening confirmation, so selection changes cannot redirect the eventual request.
+
+Confirmation is not authorization. It prevents accidental UI dispatch only; it does not grant permissions, prove an adapter is safe, or provide an adapter-side idempotency guarantee. Existing authenticated loopback controller IPC continues to authenticate callers before dispatch, but protocol v1 has no action-specific permission or RBAC authority to enforce. No such claim is made by `confirmation_required`.
 
 ## Observability event semantics
 
@@ -53,6 +61,7 @@ The semantic contract backs M53 Log, M54 metric graph, M55 heatmap-from-metrics,
 
 - `AdapterId`: one lower-case ASCII segment beginning with `[a-z0-9]`, then lower-case ASCII alphanumerics, `_`, or `-`.
 - `Capability`: one or more such segments joined by `.`; for example `containers.logs` or `test.echo`.
+- `ActionId`: one or more such segments joined by `.`; it is an opaque producer identity, not a policy selector.
 - `RequestId`: a non-empty bounded ASCII correlation token.
 
 Unknown message types, malformed JSON, and invalid typed identifiers are rejected. A validly decoded protocol number different from `1` is handled by compatibility negotiation, not silently accepted as running.

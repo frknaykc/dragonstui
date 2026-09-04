@@ -491,6 +491,15 @@ enum AdapterInvocationResult {
     },
 }
 
+/// A single UI-owned confirmation prompt for an adapter-declared invocation.
+/// This captures the producer-declared identity; it is not an authorization grant.
+#[derive(Clone, Debug)]
+struct AdapterActionConfirmation {
+    adapter_id: AdapterId,
+    action: AdapterAction,
+    payload: serde_json::Value,
+}
+
 struct AdapterInvocationWorker {
     join: Option<thread::JoinHandle<()>>,
 }
@@ -1381,6 +1390,7 @@ struct Showcase {
     adapter_browser_mode: AdapterBrowserMode,
     adapter_actions: Vec<AdapterAction>,
     adapter_actions_adapter: Option<AdapterId>,
+    adapter_action_confirmation: Option<AdapterActionConfirmation>,
     adapter_invocation_sender: Option<SyncSender<AdapterInvocation>>,
     adapter_invocation_results: Option<Receiver<AdapterInvocationResult>>,
     adapter_invocation_worker: Option<AdapterInvocationWorker>,
@@ -1512,6 +1522,7 @@ impl Showcase {
             adapter_browser_mode: AdapterBrowserMode::default(),
             adapter_actions: Vec::new(),
             adapter_actions_adapter: None,
+            adapter_action_confirmation: None,
             adapter_invocation_sender,
             adapter_invocation_results,
             adapter_invocation_worker,
@@ -1794,11 +1805,38 @@ impl Showcase {
             self.adapter_action_status = Some("No adapter action is selected".to_owned());
             return;
         };
+        let payload = serde_json::json!({});
+        if action.confirmation_required {
+            self.adapter_action_confirmation = Some(AdapterActionConfirmation {
+                adapter_id,
+                action,
+                payload,
+            });
+            self.open_modal();
+            return;
+        }
         self.queue_adapter_invocation(AdapterInvocation::Invoke {
             adapter_id,
             action_id: action.id,
-            payload: serde_json::json!({}),
+            payload,
         });
+    }
+
+    fn confirm_adapter_action_confirmation(&mut self) {
+        let Some(confirmation) = self.adapter_action_confirmation.take() else {
+            return;
+        };
+        self.close_modal();
+        self.queue_adapter_invocation(AdapterInvocation::Invoke {
+            adapter_id: confirmation.adapter_id,
+            action_id: confirmation.action.id,
+            payload: confirmation.payload,
+        });
+    }
+
+    fn cancel_adapter_action_confirmation(&mut self) {
+        self.adapter_action_confirmation = None;
+        self.close_modal();
     }
 
     fn drain_adapter_invocation_results(&mut self) -> bool {
@@ -1942,6 +1980,18 @@ impl Showcase {
 
         if self.color_editor.is_some() {
             return self.handle_color_editor_key(key);
+        }
+
+        if self.adapter_action_confirmation.is_some() {
+            match key.code {
+                KeyCode::Enter => self.confirm_adapter_action_confirmation(),
+                KeyCode::Escape => self.cancel_adapter_action_confirmation(),
+                _ => return Outcome::default(),
+            }
+            return Outcome {
+                quit: false,
+                redraw: true,
+            };
         }
 
         if self.modal_open {
@@ -2460,7 +2510,11 @@ impl Showcase {
         }
         if self.modal_open {
             if mouse.kind == MouseKind::LeftDown && self.hits.modal.contains(point) {
-                self.close_modal();
+                if self.adapter_action_confirmation.is_some() {
+                    self.cancel_adapter_action_confirmation();
+                } else {
+                    self.close_modal();
+                }
                 return Outcome {
                     quit: false,
                     redraw: true,
@@ -4975,6 +5029,17 @@ fn render_adapter_actions(
                     Span::styled("operation: ", Style::new().fg(theme.warning).bold()),
                     Span::styled(action.operation.to_string(), Style::new().fg(theme.text)),
                 ]),
+                Line::new([
+                    Span::styled("confirmation: ", Style::new().fg(theme.warning).bold()),
+                    Span::styled(
+                        if action.confirmation_required {
+                            localized(showcase.language, "required", "gerekli")
+                        } else {
+                            localized(showcase.language, "not required", "gerekli değil")
+                        },
+                        Style::new().fg(theme.text),
+                    ),
+                ]),
                 Line::from(""),
                 Line::from(action.description.unwrap_or_else(|| {
                     localized(
@@ -5416,7 +5481,61 @@ fn render_settings(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -> Op
 fn render_overlays(frame: &mut Frame, size: Size, showcase: &mut Showcase) {
     let theme = showcase.theme;
     let parent = Rect::new(0, 0, size.width, size.height);
-    if showcase.modal_open {
+    if let Some(confirmation) = showcase.adapter_action_confirmation.as_ref() {
+        let rect = Modal::new(
+            localized(
+                showcase.language,
+                "Confirm Adapter Action",
+                "Adaptör Eylemini Onayla",
+            ),
+            [
+                Line::new([
+                    Span::styled("label: ", Style::new().fg(theme.warning).bold()),
+                    Span::styled(&confirmation.action.label, Style::new().fg(theme.text)),
+                ]),
+                Line::new([
+                    Span::styled("id: ", Style::new().fg(theme.warning).bold()),
+                    Span::styled(
+                        confirmation.action.id.to_string(),
+                        Style::new().fg(theme.text),
+                    ),
+                ]),
+                Line::new([
+                    Span::styled("adapter: ", Style::new().fg(theme.warning).bold()),
+                    Span::styled(
+                        confirmation.adapter_id.to_string(),
+                        Style::new().fg(theme.text),
+                    ),
+                ]),
+                Line::from(""),
+                Line::from(
+                    confirmation
+                        .action
+                        .description
+                        .as_deref()
+                        .unwrap_or_else(|| {
+                            localized(
+                                showcase.language,
+                                "The adapter requires confirmation for this action.",
+                                "Adaptör bu eylem için onay istiyor.",
+                            )
+                        }),
+                ),
+                Line::from(""),
+                Line::from(localized(
+                    showcase.language,
+                    "Enter confirms once · Esc or click cancels",
+                    "Enter bir kez onaylar · Esc veya tıklama iptal eder",
+                )),
+            ],
+        )
+        .size(58, 13)
+        .border_style(Style::new().fg(theme.warning).bg(theme.background).bold())
+        .title_style(Style::new().fg(theme.success).bg(theme.background).bold())
+        .content_style(Style::new().fg(theme.text).bg(theme.background))
+        .render(frame, parent);
+        showcase.hits.modal = rect;
+    } else if showcase.modal_open {
         let rect = Modal::new(
             "DragonsTUI",
             [
@@ -5646,12 +5765,14 @@ mod tests {
                 id: ActionId::new("fixture.action.alpha").unwrap(),
                 label: "Alpha".to_owned(),
                 description: Some("producer-defined success".to_owned()),
+                confirmation_required: false,
                 operation: Capability::new("fixture.execute").unwrap(),
             },
             AdapterAction {
                 id: ActionId::new("fixture.destroy.everything").unwrap(),
                 label: "Inspect".to_owned(),
                 description: Some("producer-defined second action".to_owned()),
+                confirmation_required: true,
                 operation: Capability::new("fixture.execute").unwrap(),
             },
         ];
@@ -5668,10 +5789,66 @@ mod tests {
             "fixture.action.alpha"
         );
         showcase.handle_key(key(KeyCode::Down));
+        let rendered = showcase_view(Size::new(120, 32), &mut showcase);
+        assert!(frame_contains(&rendered.frame, "confirmation: required"));
         assert_eq!(
             showcase.selected_adapter_action().unwrap().id.as_str(),
             "fixture.destroy.everything"
         );
+    }
+
+    #[test]
+    fn action_confirmation_uses_declared_policy_and_dispatches_once_after_confirm() {
+        let mut showcase = Showcase::new(Instant::now());
+        showcase.phase = Phase::Showcase;
+        showcase.section = Section::Adapters;
+        showcase.adapter_browser_mode = AdapterBrowserMode::Actions;
+        showcase.adapter_actions_adapter = Some(AdapterId::new("fixture").unwrap());
+        showcase.adapter_actions = vec![
+            AdapterAction {
+                id: ActionId::new("fixture.destroy.everything").unwrap(),
+                label: "Alarming but direct".to_owned(),
+                description: None,
+                confirmation_required: false,
+                operation: Capability::new("fixture.execute").unwrap(),
+            },
+            AdapterAction {
+                id: ActionId::new("fixture.inspect").unwrap(),
+                label: "Harmless but confirmed".to_owned(),
+                description: None,
+                confirmation_required: true,
+                operation: Capability::new("fixture.execute").unwrap(),
+            },
+        ];
+        let (sender, receiver) = mpsc::sync_channel(2);
+        showcase.adapter_invocation_sender = Some(sender);
+
+        showcase.handle_key(key(KeyCode::Enter));
+        assert!(
+            matches!(receiver.try_recv(), Ok(AdapterInvocation::Invoke { action_id, .. })
+            if action_id.as_str() == "fixture.destroy.everything")
+        );
+
+        showcase.handle_key(key(KeyCode::Down));
+        showcase.handle_key(key(KeyCode::Enter));
+        assert!(showcase.adapter_action_confirmation.is_some());
+        assert!(showcase.modal_open);
+        let rendered = showcase_view(Size::new(80, 20), &mut showcase);
+        assert!(frame_contains(&rendered.frame, "Confirm Adapter Action"));
+        assert!(receiver.try_recv().is_err());
+
+        showcase.handle_key(key(KeyCode::Escape));
+        assert!(showcase.adapter_action_confirmation.is_none());
+        assert!(!showcase.modal_open);
+        assert!(receiver.try_recv().is_err());
+
+        showcase.handle_key(key(KeyCode::Enter));
+        showcase.handle_key(key(KeyCode::Enter));
+        assert!(
+            matches!(receiver.try_recv(), Ok(AdapterInvocation::Invoke { action_id, .. })
+            if action_id.as_str() == "fixture.inspect")
+        );
+        assert!(receiver.try_recv().is_err());
     }
 
     #[test]
