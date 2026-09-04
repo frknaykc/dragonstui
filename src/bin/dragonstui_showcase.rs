@@ -3636,6 +3636,13 @@ fn render_status_matrix(
         BorderSet::double(),
     );
     let matrix = status_matrix(&showcase.live_data);
+    let track = Rect::new(inner.right().saturating_sub(1), inner.y, 1, inner.height);
+    let viewport_area = Rect::new(
+        inner.x,
+        inner.y,
+        inner.width.saturating_sub(1),
+        inner.height,
+    );
     let mut lines = Vec::new();
     lines.push(format!("entity | {}", matrix.columns.join(" | ")));
     for row in &matrix.rows {
@@ -3654,7 +3661,14 @@ fn render_status_matrix(
     }
     Viewport::new(&lines)
         .style(Style::new().fg(theme.text).bg(theme.background))
-        .render(frame, inner, &mut showcase.observability_viewport);
+        .render(frame, viewport_area, &mut showcase.observability_viewport);
+    let _ = Scrollbar::render(
+        frame,
+        &showcase.observability_viewport,
+        track,
+        Style::new().fg(theme.muted).bg(theme.background).dim(),
+        Style::new().fg(theme.success).bg(theme.background).bold(),
+    );
     None
 }
 
@@ -6564,6 +6578,48 @@ mod tests {
         assert_eq!(
             matrix.cells[&("zeta".to_owned(), "disk".to_owned())],
             "warning"
+        );
+    }
+
+    #[test]
+    fn status_matrix_rebuilds_latest_cells_and_orders_multiple_rows_and_columns() {
+        use dragonstui_adapter_host::ObservationStatus;
+        let mut live = LiveDataState::with_history_capacity(8);
+        let status = |entity: &str, check: &str, status| AdapterEvent {
+            adapter_id: AdapterId::new("adapter-a").unwrap(),
+            stream: "semantic".to_owned(),
+            kind: "fixture".to_owned(),
+            observation: Some(Observation::Status {
+                entity: entity.to_owned(),
+                check: check.to_owned(),
+                status,
+                timestamp_millis: None,
+            }),
+            payload: "null".parse().unwrap(),
+        };
+        live.apply(LiveDataMessage::Event(status(
+            "zeta",
+            "disk",
+            ObservationStatus::Warning,
+        )));
+        live.apply(LiveDataMessage::Event(status(
+            "alpha",
+            "network",
+            ObservationStatus::Error,
+        )));
+        live.apply(LiveDataMessage::Event(status(
+            "zeta",
+            "disk",
+            ObservationStatus::Ok,
+        )));
+
+        let matrix = status_matrix(&live);
+        assert_eq!(matrix.rows, ["alpha", "zeta"]);
+        assert_eq!(matrix.columns, ["disk", "network"]);
+        assert_eq!(matrix.cells[&("zeta".to_owned(), "disk".to_owned())], "ok");
+        assert_eq!(
+            matrix.cells[&("alpha".to_owned(), "network".to_owned())],
+            "error"
         );
     }
 
