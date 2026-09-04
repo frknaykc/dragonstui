@@ -22,6 +22,7 @@ fn process_uses_piped_protocol_stdout_and_keeps_stderr_as_diagnostics() {
             protocol: PROTOCOL_VERSION,
             id: RequestId::new("req-process").unwrap(),
             operation: Capability::new("test.echo").unwrap(),
+            action: None,
             payload: json!({"value": 7}),
         }))
         .unwrap();

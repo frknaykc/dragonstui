@@ -9,10 +9,11 @@ use std::{
 };
 
 use dragonstui_adapter_host::{
-    AdapterController, AdapterId, AdapterManagementOutcome, ControllerClient, ControllerIpcCommand,
-    ControllerIpcServer, ControllerIpcStatus, ControllerManagementClient,
-    ControllerManagementClientError, ControllerManagementRequest, ControllerManagementResponse,
-    ObservationKind, PROTOCOL_VERSION, local_controller_diagnostics,
+    ActionId, AdapterController, AdapterId, AdapterManagementOutcome, ControllerActionClient,
+    ControllerActionOutcome, ControllerClient, ControllerIpcCommand, ControllerIpcServer,
+    ControllerIpcStatus, ControllerManagementClient, ControllerManagementClientError,
+    ControllerManagementRequest, ControllerManagementResponse, ObservationKind, PROTOCOL_VERSION,
+    local_controller_diagnostics,
 };
 
 static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -73,6 +74,19 @@ impl TempRoot {
         fs::write(
             bin.join("mock"),
             "#!/bin/sh\nexec \"$(dirname \"$0\")/mock-fixture\" --mode semantic-events \"$@\"\n",
+        )
+        .unwrap();
+        make_executable(&bin.join("mock"));
+        root
+    }
+
+    fn actions() -> Self {
+        let root = Self::new();
+        let bin = root.path.join("mock/bin");
+        fs::rename(bin.join("mock"), bin.join("mock-fixture")).unwrap();
+        fs::write(
+            bin.join("mock"),
+            "#!/bin/sh\nexec \"$(dirname \"$0\")/mock-fixture\" --mode actions \"$@\"\n",
         )
         .unwrap();
         make_executable(&bin.join("mock"));
@@ -456,6 +470,60 @@ fn typed_management_client_waits_for_a_lifecycle_timeout_response() {
         AdapterManagementOutcome::Started { id }
     );
     worker.join().unwrap();
+}
+
+#[test]
+fn authenticated_action_client_discovers_invokes_and_reports_typed_outcomes() {
+    let root = TempRoot::actions();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let controller = AdapterController::new(&root.path, Duration::from_millis(200), 8);
+    let server = ControllerIpcServer::new(listener, controller, "correct-token");
+    let worker = thread::spawn(move || server.serve_forever());
+    let id = AdapterId::new("mock").unwrap();
+    let alpha = ActionId::new("fixture.action.alpha").unwrap();
+    let alarming = ActionId::new("fixture.destroy.everything").unwrap();
+    let missing = ActionId::new("fixture.action.missing").unwrap();
+    let legacy = ControllerClient::new(address, "correct-token");
+    let client = ControllerActionClient::new(address, "correct-token");
+
+    legacy.start(&id).unwrap();
+    assert_eq!(
+        client
+            .actions(&id)
+            .unwrap()
+            .into_iter()
+            .map(|action| action.id)
+            .collect::<Vec<_>>(),
+        vec![alpha.clone(), alarming.clone()]
+    );
+    assert!(matches!(
+        client.invoke(&id, &alpha, serde_json::json!({})).unwrap().outcome,
+        ControllerActionOutcome::Succeeded { payload }
+            if payload == serde_json::json!({"outcome": "accepted"})
+    ));
+    assert!(matches!(
+        client.invoke(&id, &alarming, serde_json::json!({})).unwrap().outcome,
+        ControllerActionOutcome::Failed { code, message }
+            if code == "fixture_rejected" && message == "adapter-declared rejection"
+    ));
+    assert_eq!(
+        client
+            .invoke(&id, &missing, serde_json::json!({}))
+            .unwrap_err()
+            .to_string(),
+        "unknown action fixture.action.missing for adapter mock"
+    );
+    assert!(
+        ControllerActionClient::new(address, "wrong-token")
+            .actions(&id)
+            .unwrap_err()
+            .to_string()
+            .contains("authentication failed")
+    );
+
+    legacy.shutdown().unwrap();
+    worker.join().unwrap().unwrap();
 }
 
 #[test]

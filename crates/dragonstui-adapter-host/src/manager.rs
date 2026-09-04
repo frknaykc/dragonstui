@@ -10,9 +10,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    AdapterEvent, AdapterId, AdapterRuntime, AdapterRuntimeConfig, AdapterStartError, AdapterState,
-    Capability, CapabilityRegistry, DiscoveredAdapter, DiscoveryError, LocalAdapterRoot,
-    ProcessStatus, RpcError, RpcOutcome,
+    ActionId, AdapterAction, AdapterEvent, AdapterId, AdapterRuntime, AdapterRuntimeConfig,
+    AdapterStartError, AdapterState, Capability, CapabilityRegistry, DiscoveredAdapter,
+    DiscoveryError, LocalAdapterRoot, ProcessStatus, RpcError, RpcOutcome,
 };
 
 /// Coordinates discovered adapters without imposing an event loop on a DragonsTUI application.
@@ -222,6 +222,40 @@ impl AdapterManager {
             .map_err(ManagerError::Rpc)
     }
 
+    /// Returns producer-declared actions from the currently running adapter.
+    pub fn actions(&self, id: &AdapterId) -> Result<Vec<AdapterAction>, ManagerError> {
+        self.runtimes
+            .get(id)
+            .map(|runtime| runtime.actions().to_vec())
+            .ok_or_else(|| ManagerError::NotRunning(id.clone()))
+    }
+
+    /// Resolves an exact producer-declared action identity before writing an RPC request.
+    pub fn invoke_action(
+        &mut self,
+        id: &AdapterId,
+        action_id: &ActionId,
+        payload: Value,
+        timeout: Duration,
+    ) -> Result<crate::RequestId, ManagerError> {
+        let runtime = self
+            .runtimes
+            .get_mut(id)
+            .ok_or_else(|| ManagerError::NotRunning(id.clone()))?;
+        let action = runtime
+            .actions()
+            .iter()
+            .find(|action| action.id == *action_id)
+            .cloned()
+            .ok_or_else(|| ManagerError::UnknownAction {
+                adapter_id: id.clone(),
+                action_id: action_id.clone(),
+            })?;
+        runtime
+            .send_action_request(&action, payload, timeout)
+            .map_err(ManagerError::Rpc)
+    }
+
     /// Retrieves a completed response/error outcome without blocking the UI thread.
     pub fn take_response(
         &mut self,
@@ -408,6 +442,10 @@ impl ManagedState {
 pub enum ManagerError {
     UnknownAdapter(AdapterId),
     NotRunning(AdapterId),
+    UnknownAction {
+        adapter_id: AdapterId,
+        action_id: ActionId,
+    },
     Start(AdapterStartError),
     Stop(crate::ProcessError),
     Rpc(RpcError),
@@ -417,6 +455,13 @@ impl fmt::Display for ManagerError {
         match self {
             Self::UnknownAdapter(id) => write!(formatter, "unknown adapter {id}"),
             Self::NotRunning(id) => write!(formatter, "adapter {id} is not running"),
+            Self::UnknownAction {
+                adapter_id,
+                action_id,
+            } => write!(
+                formatter,
+                "unknown action {action_id} for adapter {adapter_id}"
+            ),
             Self::Start(error) => error.fmt(formatter),
             Self::Stop(error) => error.fmt(formatter),
             Self::Rpc(error) => error.fmt(formatter),

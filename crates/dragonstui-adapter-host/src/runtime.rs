@@ -7,8 +7,9 @@ use std::{
 };
 
 use crate::{
-    AdapterId, AdapterInfo, AdapterManifest, AdapterProcess, AdapterProcessConfig, Capability,
-    Hello, PROTOCOL_VERSION, ProcessError, ProcessStatus, ProtocolMessage, Request, RequestId,
+    ActionId, AdapterAction, AdapterId, AdapterInfo, AdapterManifest, AdapterProcess,
+    AdapterProcessConfig, Capability, Hello, PROTOCOL_VERSION, ProcessError, ProcessStatus,
+    ProtocolMessage, Request, RequestId,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -186,6 +187,10 @@ impl AdapterRuntime {
         &self.info.capabilities
     }
 
+    pub fn actions(&self) -> &[AdapterAction] {
+        &self.info.actions
+    }
+
     pub fn pid(&self) -> u32 {
         self.process.pid()
     }
@@ -221,6 +226,30 @@ impl AdapterRuntime {
         payload: Value,
         timeout: Duration,
     ) -> Result<RequestId, RpcError> {
+        self.send_request_with_action(operation, None, payload, timeout)
+    }
+
+    pub fn send_action_request(
+        &mut self,
+        action: &AdapterAction,
+        payload: Value,
+        timeout: Duration,
+    ) -> Result<RequestId, RpcError> {
+        self.send_request_with_action(
+            action.operation.clone(),
+            Some(action.id.clone()),
+            payload,
+            timeout,
+        )
+    }
+
+    fn send_request_with_action(
+        &mut self,
+        operation: Capability,
+        action: Option<ActionId>,
+        payload: Value,
+        timeout: Duration,
+    ) -> Result<RequestId, RpcError> {
         if self.state != AdapterState::Running {
             return Err(RpcError::Crashed);
         }
@@ -232,6 +261,7 @@ impl AdapterRuntime {
                 protocol: PROTOCOL_VERSION,
                 id: id.clone(),
                 operation,
+                action,
                 payload,
             }))
             .map_err(|error| {

@@ -21,10 +21,11 @@ mod runtime;
 pub use capabilities::CapabilityRegistry;
 pub use controller::{AdapterController, ControllerError};
 pub use controller_ipc::{
-    ControllerClient, ControllerIpcCommand, ControllerIpcDiagnostics, ControllerIpcError,
-    ControllerIpcServer, ControllerIpcStatus, ControllerManagementClient,
-    ControllerManagementClientError, ControllerManagementRequest, ControllerManagementResponse,
-    LocalControllerError, local_controller_diagnostics, local_controller_live_data,
+    ControllerActionClient, ControllerActionOutcome, ControllerActionResponse, ControllerClient,
+    ControllerIpcCommand, ControllerIpcDiagnostics, ControllerIpcError, ControllerIpcServer,
+    ControllerIpcStatus, ControllerManagementClient, ControllerManagementClientError,
+    ControllerManagementRequest, ControllerManagementResponse, LocalControllerError,
+    local_controller_action_client, local_controller_diagnostics, local_controller_live_data,
     local_controller_management_client,
 };
 pub use discovery::{
@@ -43,9 +44,9 @@ pub use manager::{
 pub use manifest::{AdapterManifest, ExecutablePath, ManifestError};
 pub use process::{AdapterProcess, AdapterProcessConfig, ProcessError, ProcessStatus};
 pub use protocol::{
-    AdapterId, AdapterInfo, Capability, ErrorMessage, Event, Hello, IdentifierError, Observation,
-    ObservationKind, ObservationSeverity, ObservationStatus, PROTOCOL_VERSION, ProtocolMessage,
-    Request, RequestId, Response, Shutdown, ShutdownAck,
+    ActionId, AdapterAction, AdapterId, AdapterInfo, Capability, ErrorMessage, Event, Hello,
+    IdentifierError, Observation, ObservationKind, ObservationSeverity, ObservationStatus,
+    PROTOCOL_VERSION, ProtocolMessage, Request, RequestId, Response, Shutdown, ShutdownAck,
 };
 pub use registry::{
     AdapterArtifact, AdapterEntry, AdapterRelease, ArtifactSource, Platform, Registry,

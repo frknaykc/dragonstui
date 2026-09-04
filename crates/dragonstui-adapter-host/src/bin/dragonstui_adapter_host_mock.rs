@@ -9,8 +9,9 @@ use std::{
 };
 
 use dragonstui_adapter_host::{
-    AdapterId, AdapterInfo, Capability, ErrorMessage, Event, Observation, ObservationSeverity,
-    ObservationStatus, PROTOCOL_VERSION, ProtocolMessage, Response, ShutdownAck,
+    ActionId, AdapterAction, AdapterId, AdapterInfo, Capability, ErrorMessage, Event, Observation,
+    ObservationSeverity, ObservationStatus, PROTOCOL_VERSION, ProtocolMessage, Response,
+    ShutdownAck,
 };
 use serde_json::{Value, json};
 
@@ -38,6 +39,7 @@ fn main() {
         "live-events" => protocol_mode(MockBehavior::LiveEvents, &options.id),
         "semantic-events" => protocol_mode(MockBehavior::SemanticEvents, &options.id),
         "observability-events" => protocol_mode(MockBehavior::ObservabilityEvents, &options.id),
+        "actions" => protocol_mode(MockBehavior::Actions, &options.id),
         "stress-events" => protocol_mode(MockBehavior::StressEvents, &options.id),
         "out-of-order" => protocol_mode(MockBehavior::OutOfOrder, &options.id),
         "unknown-response" => protocol_mode(MockBehavior::UnknownResponse, &options.id),
@@ -157,6 +159,7 @@ fn protocol_mode(behavior: MockBehavior, adapter_id: &str) {
         | MockBehavior::LiveEvents
         | MockBehavior::SemanticEvents
         | MockBehavior::ObservabilityEvents
+        | MockBehavior::Actions
         | MockBehavior::StressEvents
         | MockBehavior::OutOfOrder
         | MockBehavior::UnknownResponse
@@ -168,6 +171,24 @@ fn protocol_mode(behavior: MockBehavior, adapter_id: &str) {
         ),
     };
 
+    let actions = if behavior == MockBehavior::Actions {
+        vec![
+            AdapterAction {
+                id: ActionId::new("fixture.action.alpha").unwrap(),
+                label: "Alpha".to_owned(),
+                description: Some("Adapter-declared success".to_owned()),
+                operation: Capability::new("test.echo").unwrap(),
+            },
+            AdapterAction {
+                id: ActionId::new("fixture.destroy.everything").unwrap(),
+                label: "Inspect".to_owned(),
+                description: Some("Adapter-declared rejection".to_owned()),
+                operation: Capability::new("test.echo").unwrap(),
+            },
+        ]
+    } else {
+        Vec::new()
+    };
     let info = AdapterInfo {
         protocol,
         id: AdapterId::new(id).unwrap(),
@@ -176,6 +197,7 @@ fn protocol_mode(behavior: MockBehavior, adapter_id: &str) {
             .into_iter()
             .map(|capability| Capability::new(capability).unwrap())
             .collect(),
+        actions,
     };
     emit(&ProtocolMessage::AdapterInfo(info));
 
@@ -306,6 +328,32 @@ fn protocol_mode(behavior: MockBehavior, adapter_id: &str) {
                         code: "duplicate_request".to_owned(),
                         message: "duplicate request id".to_owned(),
                     }));
+                    continue;
+                }
+                if behavior == MockBehavior::Actions {
+                    match request.action.as_ref().map(ActionId::as_str) {
+                        Some("fixture.action.alpha") => {
+                            emit(&ProtocolMessage::Response(Response {
+                                protocol: PROTOCOL_VERSION,
+                                id: request.id,
+                                payload: json!({"outcome": "accepted"}),
+                            }))
+                        }
+                        Some("fixture.destroy.everything") => {
+                            emit(&ProtocolMessage::Error(ErrorMessage {
+                                protocol: PROTOCOL_VERSION,
+                                id: Some(request.id),
+                                code: "fixture_rejected".to_owned(),
+                                message: "adapter-declared rejection".to_owned(),
+                            }));
+                        }
+                        _ => emit(&ProtocolMessage::Error(ErrorMessage {
+                            protocol: PROTOCOL_VERSION,
+                            id: Some(request.id),
+                            code: "unsupported_action".to_owned(),
+                            message: "undeclared action".to_owned(),
+                        })),
+                    }
                     continue;
                 }
                 match request.operation.as_str() {
@@ -488,6 +536,7 @@ enum MockBehavior {
     LiveEvents,
     SemanticEvents,
     ObservabilityEvents,
+    Actions,
     StressEvents,
     OutOfOrder,
     UnknownResponse,

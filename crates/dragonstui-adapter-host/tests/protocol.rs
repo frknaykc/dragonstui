@@ -1,6 +1,6 @@
 use dragonstui_adapter_host::{
-    AdapterId, Capability, ErrorMessage, Event, PROTOCOL_VERSION, ProtocolMessage, Request,
-    RequestId, Response,
+    ActionId, AdapterAction, AdapterId, AdapterInfo, Capability, ErrorMessage, Event,
+    PROTOCOL_VERSION, ProtocolMessage, Request, RequestId, Response,
 };
 use serde_json::json;
 
@@ -10,6 +10,7 @@ fn request_round_trips_with_protocol_and_correlation() {
         protocol: PROTOCOL_VERSION,
         id: RequestId::new("req-42").unwrap(),
         operation: Capability::new("containers.list").unwrap(),
+        action: None,
         payload: json!({"limit": 5}),
     });
 
@@ -68,4 +69,34 @@ fn malformed_unknown_and_invalid_identifiers_are_rejected() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn adapter_actions_are_additive_typed_metadata_and_requests_keep_their_identity() {
+    let legacy: AdapterInfo = serde_json::from_str(
+        r#"{"protocol":1,"id":"fixture","version":"1.0.0","capabilities":["test.echo"]}"#,
+    )
+    .unwrap();
+    assert!(legacy.actions.is_empty());
+
+    let action = AdapterAction {
+        id: ActionId::new("fixture.action.alpha").unwrap(),
+        label: "Run alpha".to_owned(),
+        description: Some("Adapter-declared action".to_owned()),
+        operation: Capability::new("test.echo").unwrap(),
+    };
+    let message = ProtocolMessage::Request(Request {
+        protocol: PROTOCOL_VERSION,
+        id: RequestId::new("action-1").unwrap(),
+        operation: action.operation.clone(),
+        action: Some(action.id.clone()),
+        payload: json!({}),
+    });
+
+    assert_eq!(
+        serde_json::from_str::<ProtocolMessage>(&serde_json::to_string(&message).unwrap()).unwrap(),
+        message
+    );
+    assert!(ActionId::new("fixture.destroy.everything").is_ok());
+    assert!(ActionId::new("Fixture action").is_err());
 }

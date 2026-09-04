@@ -9,9 +9,11 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::{
-    AdapterController, AdapterDiagnostics, AdapterId, AdapterLiveData, AdapterManagementOutcome,
+    ActionId, AdapterAction, AdapterController, AdapterDiagnostics, AdapterId, AdapterLiveData,
+    AdapterManagementOutcome, RpcOutcome,
 };
 
 /// Loopback-only controller command. A daemon persists the controller and
@@ -40,6 +42,14 @@ pub enum ControllerIpcCommand {
     Management {
         request: ControllerManagementRequest,
     },
+    Actions {
+        id: String,
+    },
+    InvokeAction {
+        id: String,
+        action_id: String,
+        payload: Value,
+    },
     LiveData,
     Shutdown,
 }
@@ -67,11 +77,27 @@ pub enum ControllerManagementResponse {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct ControllerActionResponse {
+    pub adapter_id: AdapterId,
+    pub action_id: ActionId,
+    pub outcome: ControllerActionOutcome,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(tag = "result", rename_all = "snake_case")]
+pub enum ControllerActionOutcome {
+    Succeeded { payload: Value },
+    Failed { code: String, message: String },
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub enum ControllerIpcStatus {
     Missing,
     State(String),
     Diagnostics(Box<ControllerIpcDiagnostics>),
     Management(ControllerManagementResponse),
+    Actions(Vec<AdapterAction>),
+    Action(ControllerActionResponse),
     LiveData(AdapterLiveData),
     Completed,
 }
@@ -143,6 +169,10 @@ enum ManagementResult {
 
 fn adapter_id(id: &str) -> Result<AdapterId, ControllerIpcError> {
     AdapterId::new(id).map_err(|error| ControllerIpcError::InvalidId(error.to_string()))
+}
+
+fn action_id(id: &str) -> Result<ActionId, ControllerIpcError> {
+    ActionId::new(id).map_err(|error| ControllerIpcError::InvalidId(error.to_string()))
 }
 
 fn legacy_management_status(result: ManagementResult) -> ControllerIpcStatus {
@@ -319,6 +349,40 @@ impl ControllerIpcServer {
                         false,
                     )
                 }),
+            ControllerIpcCommand::Actions { id } => {
+                let id = adapter_id(&id)?;
+                self.controller
+                    .actions(&id)
+                    .map(ControllerIpcStatus::Actions)
+                    .map(|status| (status, false))
+                    .map_err(ControllerIpcError::Controller)
+            }
+            ControllerIpcCommand::InvokeAction {
+                id,
+                action_id: action_id_value,
+                payload,
+            } => {
+                let adapter_id = adapter_id(&id)?;
+                let action_id = action_id(&action_id_value)?;
+                let outcome = self
+                    .controller
+                    .invoke_action(&adapter_id, &action_id, payload)
+                    .map_err(ControllerIpcError::Controller)?;
+                let outcome = match outcome {
+                    RpcOutcome::Response(payload) => ControllerActionOutcome::Succeeded { payload },
+                    RpcOutcome::AdapterError { code, message } => {
+                        ControllerActionOutcome::Failed { code, message }
+                    }
+                };
+                Ok((
+                    ControllerIpcStatus::Action(ControllerActionResponse {
+                        adapter_id,
+                        action_id,
+                        outcome,
+                    }),
+                    false,
+                ))
+            }
             ControllerIpcCommand::LiveData => Ok((
                 ControllerIpcStatus::LiveData(self.controller.take_live_data()),
                 false,
@@ -573,6 +637,49 @@ impl ControllerManagementClient {
     }
 }
 
+/// Typed action client for the authoritative local controller daemon.
+///
+/// Each method uses the existing authenticated connect-per-operation transport.
+/// Application UI code must call this facade from its background worker.
+#[derive(Clone, Debug)]
+pub struct ControllerActionClient {
+    client: ControllerClient,
+}
+
+impl ControllerActionClient {
+    pub fn new(address: SocketAddr, token: impl Into<String>) -> Self {
+        Self {
+            client: ControllerClient::new(address, token),
+        }
+    }
+
+    pub fn actions(&self, id: &AdapterId) -> Result<Vec<AdapterAction>, ControllerIpcError> {
+        match self
+            .client
+            .call(ControllerIpcCommand::Actions { id: id.to_string() })?
+        {
+            ControllerIpcStatus::Actions(actions) => Ok(actions),
+            status => Err(ControllerIpcError::UnexpectedStatus(format!("{status:?}"))),
+        }
+    }
+
+    pub fn invoke(
+        &self,
+        id: &AdapterId,
+        action_id: &ActionId,
+        payload: Value,
+    ) -> Result<ControllerActionResponse, ControllerIpcError> {
+        match self.client.call(ControllerIpcCommand::InvokeAction {
+            id: id.to_string(),
+            action_id: action_id.to_string(),
+            payload,
+        })? {
+            ControllerIpcStatus::Action(response) => Ok(response),
+            status => Err(ControllerIpcError::UnexpectedStatus(format!("{status:?}"))),
+        }
+    }
+}
+
 const CONTROLLER_DIRECTORY: &str = ".controller";
 const CONTROLLER_ENDPOINT: &str = "endpoint.json";
 const CONTROLLER_CONNECT_RETRIES: u16 = 250;
@@ -601,6 +708,28 @@ pub fn local_controller_management_client(
         return Err(LocalControllerError::NonLoopbackEndpoint);
     }
     Ok(Some(ControllerManagementClient::new(
+        endpoint.address,
+        endpoint.token,
+    )))
+}
+
+/// Reads the private local controller endpoint for generic adapter action
+/// discovery and invocation without exposing its credential to callers.
+pub fn local_controller_action_client(
+    root: &Path,
+) -> Result<Option<ControllerActionClient>, LocalControllerError> {
+    let endpoint_path = root.join(CONTROLLER_DIRECTORY).join(CONTROLLER_ENDPOINT);
+    let body = match fs::read(&endpoint_path) {
+        Ok(body) => body,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(LocalControllerError::Read(error)),
+    };
+    let endpoint: LocalControllerEndpoint =
+        serde_json::from_slice(&body).map_err(LocalControllerError::Decode)?;
+    if !endpoint.address.ip().is_loopback() {
+        return Err(LocalControllerError::NonLoopbackEndpoint);
+    }
+    Ok(Some(ControllerActionClient::new(
         endpoint.address,
         endpoint.token,
     )))

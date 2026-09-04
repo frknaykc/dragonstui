@@ -6,8 +6,8 @@ use std::{
 };
 
 use dragonstui_adapter_host::{
-    AdapterId, AdapterManager, AdapterRuntimeConfig, AdapterState, Capability, LocalAdapterRoot,
-    ManagerError, PROTOCOL_VERSION, RpcOutcome,
+    ActionId, AdapterId, AdapterManager, AdapterRuntimeConfig, AdapterState, Capability,
+    LocalAdapterRoot, ManagerError, PROTOCOL_VERSION, RpcOutcome,
 };
 use serde_json::json;
 
@@ -248,4 +248,56 @@ fn deterministic_mock_live_event_reaches_the_generic_manager_boundary() {
     assert_eq!(event.stream, "live");
     assert_eq!(event.kind, "snapshot");
     assert_eq!(event.payload, serde_json::json!({"sequence": 1}));
+}
+
+#[test]
+fn manager_discovers_and_invokes_declared_actions_without_identifier_semantics() {
+    let root = TempRoot::new("actions");
+    root.adapter("mock");
+    let id = AdapterId::new("mock").unwrap();
+    let alpha = ActionId::new("fixture.action.alpha").unwrap();
+    let alarming = ActionId::new("fixture.destroy.everything").unwrap();
+    let unknown = ActionId::new("fixture.action.missing").unwrap();
+    let mut manager = AdapterManager::new(Duration::from_millis(200), 8);
+    manager.discover(LocalAdapterRoot::new(&root.path)).unwrap();
+    manager
+        .start_with_config(&id, config("mock", "actions"))
+        .unwrap();
+
+    assert_eq!(
+        manager
+            .actions(&id)
+            .unwrap()
+            .into_iter()
+            .map(|action| action.id)
+            .collect::<Vec<_>>(),
+        vec![alpha.clone(), alarming.clone()]
+    );
+
+    let accepted = manager
+        .invoke_action(&id, &alpha, json!({}), Duration::from_secs(2))
+        .unwrap();
+    assert_eq!(
+        manager
+            .wait_response(&id, &accepted, Duration::from_secs(2))
+            .unwrap(),
+        RpcOutcome::Response(json!({"outcome": "accepted"}))
+    );
+
+    let rejected = manager
+        .invoke_action(&id, &alarming, json!({}), Duration::from_secs(2))
+        .unwrap();
+    assert_eq!(
+        manager
+            .wait_response(&id, &rejected, Duration::from_secs(2))
+            .unwrap(),
+        RpcOutcome::AdapterError {
+            code: "fixture_rejected".to_owned(),
+            message: "adapter-declared rejection".to_owned(),
+        }
+    );
+    assert!(matches!(
+        manager.invoke_action(&id, &unknown, json!({}), Duration::from_secs(2)),
+        Err(ManagerError::UnknownAction { .. })
+    ));
 }

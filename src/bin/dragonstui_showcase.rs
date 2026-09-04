@@ -32,10 +32,11 @@ use dragons_tui::{
     TreeNode, TreeState, Viewport, ViewportState, display_width, is_quit_key, terminal_size,
 };
 use dragonstui_adapter_host::{
-    AdapterClassification, AdapterDisconnect, AdapterEvent, AdapterId, AdapterLiveData,
-    AdapterManagement, AdapterManagementAction, ControllerIpcDiagnostics, DiscoveryError,
-    LocalAdapterRoot, Observation, ObservationSeverity, local_controller_diagnostics,
-    local_controller_live_data, local_controller_management_client,
+    ActionId, AdapterAction, AdapterClassification, AdapterDisconnect, AdapterEvent, AdapterId,
+    AdapterLiveData, AdapterManagement, AdapterManagementAction, ControllerActionOutcome,
+    ControllerIpcDiagnostics, DiscoveryError, LocalAdapterRoot, Observation, ObservationSeverity,
+    local_controller_action_client, local_controller_diagnostics, local_controller_live_data,
+    local_controller_management_client,
 };
 
 const TICK_INTERVAL: Duration = Duration::from_millis(50);
@@ -212,6 +213,7 @@ enum AdapterBrowserMode {
     #[default]
     Adapters,
     Capabilities,
+    Actions,
     StructuredPayload,
     Observability(ObservabilityMode),
 }
@@ -460,6 +462,99 @@ fn adapter_action_worker_with_live_poll_pause(
         }
     });
     (actions, result_receiver)
+}
+
+const ACTION_REQUEST_CHANNEL_CAPACITY: usize = 1;
+
+#[derive(Clone, Debug)]
+enum AdapterInvocation {
+    Discover {
+        adapter_id: AdapterId,
+    },
+    Invoke {
+        adapter_id: AdapterId,
+        action_id: ActionId,
+        payload: serde_json::Value,
+    },
+}
+
+#[derive(Clone, Debug)]
+enum AdapterInvocationResult {
+    Discovered {
+        adapter_id: AdapterId,
+        actions: Result<Vec<AdapterAction>, String>,
+    },
+    Invoked {
+        adapter_id: AdapterId,
+        action_id: ActionId,
+        outcome: Result<ControllerActionOutcome, String>,
+    },
+}
+
+struct AdapterInvocationWorker {
+    join: Option<thread::JoinHandle<()>>,
+}
+
+impl AdapterInvocationWorker {
+    fn stop(&mut self, sender: &mut Option<SyncSender<AdapterInvocation>>) {
+        sender.take();
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+fn adapter_invocation_worker(
+    root: &Path,
+) -> (
+    SyncSender<AdapterInvocation>,
+    Receiver<AdapterInvocationResult>,
+    AdapterInvocationWorker,
+) {
+    let (requests, receiver) = mpsc::sync_channel(ACTION_REQUEST_CHANNEL_CAPACITY);
+    let (results, result_receiver) = mpsc::sync_channel(ACTION_REQUEST_CHANNEL_CAPACITY);
+    let root = root.to_path_buf();
+    let join = thread::spawn(move || {
+        while let Ok(request) = receiver.recv() {
+            let client = local_controller_action_client(&root)
+                .map_err(|error| error.to_string())
+                .and_then(|client| {
+                    client.ok_or_else(|| "controller daemon is unavailable".to_owned())
+                });
+            let result = match request {
+                AdapterInvocation::Discover { adapter_id } => AdapterInvocationResult::Discovered {
+                    actions: client.and_then(|client| {
+                        client
+                            .actions(&adapter_id)
+                            .map_err(|error| error.to_string())
+                    }),
+                    adapter_id,
+                },
+                AdapterInvocation::Invoke {
+                    adapter_id,
+                    action_id,
+                    payload,
+                } => AdapterInvocationResult::Invoked {
+                    outcome: client.and_then(|client| {
+                        client
+                            .invoke(&adapter_id, &action_id, payload)
+                            .map(|response| response.outcome)
+                            .map_err(|error| error.to_string())
+                    }),
+                    adapter_id,
+                    action_id,
+                },
+            };
+            if results.send(result).is_err() {
+                break;
+            }
+        }
+    });
+    (
+        requests,
+        result_receiver,
+        AdapterInvocationWorker { join: Some(join) },
+    )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1284,6 +1379,11 @@ struct Showcase {
     adapter_install_id: Option<AdapterId>,
     adapter_rows: Vec<AdapterRow>,
     adapter_browser_mode: AdapterBrowserMode,
+    adapter_actions: Vec<AdapterAction>,
+    adapter_actions_adapter: Option<AdapterId>,
+    adapter_invocation_sender: Option<SyncSender<AdapterInvocation>>,
+    adapter_invocation_results: Option<Receiver<AdapterInvocationResult>>,
+    adapter_invocation_worker: Option<AdapterInvocationWorker>,
     adapter_discovery_error: Option<String>,
     adapter_diagnostics: BTreeMap<String, ControllerIpcDiagnostics>,
     adapter_controller_error: Option<String>,
@@ -1364,6 +1464,13 @@ impl Showcase {
             .map_or((None, None), |(sender, receiver)| {
                 (Some(sender), Some(receiver))
             });
+        let (adapter_invocation_sender, adapter_invocation_results, adapter_invocation_worker) =
+            adapter_root
+                .as_deref()
+                .map(adapter_invocation_worker)
+                .map_or((None, None, None), |(sender, receiver, worker)| {
+                    (Some(sender), Some(receiver), Some(worker))
+                });
         let (adapter_diagnostics_sender, adapter_diagnostics_results) = if adapter_root.is_some() {
             let (sender, receiver) = mpsc::channel();
             (Some(sender), Some(receiver))
@@ -1403,6 +1510,11 @@ impl Showcase {
             adapter_install_id,
             adapter_rows,
             adapter_browser_mode: AdapterBrowserMode::default(),
+            adapter_actions: Vec::new(),
+            adapter_actions_adapter: None,
+            adapter_invocation_sender,
+            adapter_invocation_results,
+            adapter_invocation_worker,
             adapter_discovery_error,
             adapter_diagnostics: BTreeMap::new(),
             adapter_controller_error: None,
@@ -1634,6 +1746,110 @@ impl Showcase {
         capability_provider_index(&self.adapter_rows, &self.adapter_diagnostics)
     }
 
+    fn selected_adapter_action(&mut self) -> Option<AdapterAction> {
+        self.table
+            .selected_index(self.adapter_actions.len())
+            .and_then(|index| self.adapter_actions.get(index))
+            .cloned()
+    }
+
+    fn queue_adapter_invocation(&mut self, request: AdapterInvocation) {
+        let Some(sender) = &self.adapter_invocation_sender else {
+            self.adapter_action_status = Some("Adapter root is required for actions".to_owned());
+            return;
+        };
+        match sender.try_send(request) {
+            Ok(()) => {
+                self.adapter_action_status = Some("Adapter action request in progress…".to_owned())
+            }
+            Err(TrySendError::Full(_)) => {
+                self.adapter_action_status = Some("Adapter action request queue is full".to_owned())
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                self.adapter_action_status = Some("Adapter action worker unavailable".to_owned())
+            }
+        }
+    }
+
+    fn open_adapter_actions(&mut self) {
+        let Some(adapter_id) = self.selected_adapter_id() else {
+            self.adapter_action_status =
+                Some("Select an adapter before opening actions".to_owned());
+            return;
+        };
+        self.adapter_actions.clear();
+        self.adapter_actions_adapter = Some(adapter_id.clone());
+        self.table.set_selected(0);
+        self.adapter_browser_mode = AdapterBrowserMode::Actions;
+        self.focus.set_focus(TABLE_FOCUS);
+        self.queue_adapter_invocation(AdapterInvocation::Discover { adapter_id });
+    }
+
+    fn invoke_selected_adapter_action(&mut self) {
+        let Some(adapter_id) = self.adapter_actions_adapter.clone() else {
+            self.adapter_action_status = Some("No adapter action provider is selected".to_owned());
+            return;
+        };
+        let Some(action) = self.selected_adapter_action() else {
+            self.adapter_action_status = Some("No adapter action is selected".to_owned());
+            return;
+        };
+        self.queue_adapter_invocation(AdapterInvocation::Invoke {
+            adapter_id,
+            action_id: action.id,
+            payload: serde_json::json!({}),
+        });
+    }
+
+    fn drain_adapter_invocation_results(&mut self) -> bool {
+        let result = self
+            .adapter_invocation_results
+            .as_ref()
+            .and_then(|results| results.try_recv().ok());
+        let Some(result) = result else {
+            return false;
+        };
+        match result {
+            AdapterInvocationResult::Discovered {
+                adapter_id,
+                actions,
+            } => {
+                if self.adapter_actions_adapter.as_ref() == Some(&adapter_id) {
+                    match actions {
+                        Ok(actions) => {
+                            self.adapter_actions = actions;
+                            self.table.set_selected(0);
+                            self.adapter_action_status = Some(format!(
+                                "Discovered {} adapter actions",
+                                self.adapter_actions.len()
+                            ));
+                        }
+                        Err(error) => {
+                            self.adapter_action_status =
+                                Some(format!("Adapter action discovery failed: {error}"))
+                        }
+                    }
+                }
+            }
+            AdapterInvocationResult::Invoked {
+                adapter_id,
+                action_id,
+                outcome,
+            } => {
+                self.adapter_action_status = Some(match outcome {
+                    Ok(ControllerActionOutcome::Succeeded { payload }) => {
+                        format!("Action {action_id} on {adapter_id} completed: {payload}")
+                    }
+                    Ok(ControllerActionOutcome::Failed { code, message }) => {
+                        format!("Action {action_id} on {adapter_id} failed [{code}]: {message}")
+                    }
+                    Err(error) => format!("Action {action_id} on {adapter_id} failed: {error}"),
+                });
+            }
+        }
+        true
+    }
+
     fn queue_adapter_action(&mut self, action: AdapterManagementAction) {
         let Some(sender) = &self.adapter_action_sender else {
             self.adapter_action_status = Some("Adapter root is required for actions".to_owned());
@@ -1689,6 +1905,7 @@ impl Showcase {
                 let mut changed = self.drain_live_data_results();
                 changed |= self.drain_adapter_diagnostics_results();
                 changed |= self.drain_adapter_action_results();
+                changed |= self.drain_adapter_invocation_results();
                 changed |= self.animation_enabled && self.spinner.update(now);
                 if self.section == Section::Adapters
                     && now.saturating_duration_since(self.last_adapter_diagnostics_refresh)
@@ -1899,6 +2116,21 @@ impl Showcase {
                 ) {
                     return Outcome::default();
                 }
+            } else if self.adapter_browser_mode == AdapterBrowserMode::Actions {
+                match key.code {
+                    KeyCode::Char('a' | 'A') | KeyCode::Escape => {
+                        self.adapter_browser_mode = AdapterBrowserMode::Adapters;
+                        self.focus.set_focus(TABLE_FOCUS);
+                    }
+                    KeyCode::Up => self.table.previous(self.adapter_actions.len()),
+                    KeyCode::Down => self.table.next(self.adapter_actions.len()),
+                    KeyCode::Enter | KeyCode::Char(' ') => self.invoke_selected_adapter_action(),
+                    _ => return Outcome::default(),
+                }
+                return Outcome {
+                    quit: false,
+                    redraw: true,
+                };
             } else if self.adapter_browser_mode == AdapterBrowserMode::Capabilities {
                 if matches!(key.code, KeyCode::Char('c' | 'C') | KeyCode::Escape) {
                     self.adapter_browser_mode = AdapterBrowserMode::Adapters;
@@ -1917,6 +2149,12 @@ impl Showcase {
                 ) {
                     return Outcome::default();
                 }
+            } else if matches!(key.code, KeyCode::Char('a' | 'A')) {
+                self.open_adapter_actions();
+                return Outcome {
+                    quit: false,
+                    redraw: true,
+                };
             } else if matches!(key.code, KeyCode::Char('c' | 'C')) {
                 self.adapter_browser_mode = AdapterBrowserMode::Capabilities;
                 self.table.set_selected(0);
@@ -2461,6 +2699,9 @@ impl Showcase {
             Section::Adapters if self.adapter_browser_mode == AdapterBrowserMode::Capabilities => {
                 self.capability_provider_index().len()
             }
+            Section::Adapters if self.adapter_browser_mode == AdapterBrowserMode::Actions => {
+                self.adapter_actions.len()
+            }
             Section::Adapters => self.adapter_rows.len(),
             _ => table_rows().len(),
         }
@@ -2604,6 +2845,9 @@ impl Showcase {
 
 impl Drop for Showcase {
     fn drop(&mut self) {
+        if let Some(worker) = self.adapter_invocation_worker.as_mut() {
+            worker.stop(&mut self.adapter_invocation_sender);
+        }
         if let Some(worker) = self.live_data_worker.as_mut() {
             worker.stop();
         }
@@ -3807,6 +4051,7 @@ fn render_adapters(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -> Op
     match showcase.adapter_browser_mode {
         AdapterBrowserMode::Adapters => render_adapter_list(frame, area, showcase),
         AdapterBrowserMode::Capabilities => render_capability_browser(frame, area, showcase),
+        AdapterBrowserMode::Actions => render_adapter_actions(frame, area, showcase),
         AdapterBrowserMode::StructuredPayload => {
             render_structured_payload_browser(frame, area, showcase)
         }
@@ -4424,8 +4669,8 @@ fn render_adapter_list(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -
         showcase.adapter_action_status.clone().unwrap_or_else(|| {
             localized(
                 showcase.language,
-                "↔ drag divider · C capabilities · I install · S start · T stop · R restart · U update · X remove · / search · P pause · F follow",
-                "↔ ayırıcıyı sürükle · C yetenekler · I kur · S başlat · T durdur · R yeniden başlat · U güncelle · X kaldır · / ara · P duraklat · F takip",
+                "↔ drag divider · A actions · C capabilities · I install · S start · T stop · R restart · U update · X remove · / search · P pause · F follow",
+                "↔ ayırıcıyı sürükle · A eylemler · C yetenekler · I kur · S başlat · T durdur · R yeniden başlat · U güncelle · X kaldır · / ara · P duraklat · F takip",
             )
             .to_owned()
         })
@@ -4631,6 +4876,118 @@ fn render_capability_browser(
         );
         RichText::new(lines).render(frame, detail);
     }
+    None
+}
+
+fn render_adapter_actions(
+    frame: &mut Frame,
+    area: Rect,
+    showcase: &mut Showcase,
+) -> Option<Position> {
+    let theme = showcase.theme;
+    let layout = InspectorLayout::new(55, 22, 28);
+    let panes = layout.split(area);
+    let list = panel(
+        frame,
+        panes.master,
+        localized(showcase.language, "Adapter Actions", "Adaptör Eylemleri"),
+        showcase.focus.current() == Some(TABLE_FOCUS),
+        theme,
+        BorderSet::double(),
+    );
+    showcase.hits.table = list;
+    if showcase.adapter_actions.is_empty() {
+        Text::new(
+            showcase
+                .adapter_action_status
+                .as_deref()
+                .unwrap_or_else(|| {
+                    localized(
+                        showcase.language,
+                        "No actions declared by this adapter.",
+                        "Bu adaptör eylem bildirmiyor.",
+                    )
+                }),
+        )
+        .style(Style::new().fg(theme.muted).bg(theme.background))
+        .render(frame, list);
+    } else {
+        let rows = showcase
+            .adapter_actions
+            .iter()
+            .map(|action| {
+                vec![
+                    Line::new([Span::styled(&action.label, Style::new().bold())]),
+                    Line::from(action.id.as_str()),
+                ]
+            })
+            .collect::<Vec<_>>();
+        Table::new([
+            TableColumn::new(Constraint::Fill(3)),
+            TableColumn::new(Constraint::Fill(4)),
+        ])
+        .header([
+            Line::from(localized(showcase.language, "ACTION", "EYLEM")),
+            Line::from(localized(showcase.language, "IDENTIFIER", "KİMLİK")),
+        ])
+        .rows(rows)
+        .selected_style(Style::new().fg(theme.success).bg(theme.primary).bold())
+        .render(frame, list, &mut showcase.table);
+    }
+    Text::new(localized(
+        showcase.language,
+        "A/Esc adapters · ↑↓ select · Enter invokes",
+        "A/Esc adaptörler · ↑↓ seç · Enter çalıştırır",
+    ))
+    .style(Style::new().fg(theme.warning).bg(theme.background).dim())
+    .render(
+        frame,
+        Rect::new(list.x, list.bottom().saturating_sub(1), list.width, 1),
+    );
+
+    let detail = panel(
+        frame,
+        panes.detail,
+        localized(showcase.language, "Action Detail", "Eylem Ayrıntısı"),
+        false,
+        theme,
+        BorderSet::rounded(),
+    );
+    let detail_lines = showcase.selected_adapter_action().map_or_else(
+        || {
+            vec![Line::from(localized(
+                showcase.language,
+                "Select an adapter-declared action.",
+                "Adaptörün bildirdiği bir eylemi seçin.",
+            ))]
+        },
+        |action| {
+            vec![
+                Line::new([
+                    Span::styled("label: ", Style::new().fg(theme.warning).bold()),
+                    Span::styled(action.label, Style::new().fg(theme.text)),
+                ]),
+                Line::new([
+                    Span::styled("id: ", Style::new().fg(theme.warning).bold()),
+                    Span::styled(action.id.to_string(), Style::new().fg(theme.text)),
+                ]),
+                Line::new([
+                    Span::styled("operation: ", Style::new().fg(theme.warning).bold()),
+                    Span::styled(action.operation.to_string(), Style::new().fg(theme.text)),
+                ]),
+                Line::from(""),
+                Line::from(action.description.unwrap_or_else(|| {
+                    localized(
+                        showcase.language,
+                        "No description supplied.",
+                        "Açıklama sağlanmadı.",
+                    )
+                    .to_owned()
+                })),
+            ]
+        },
+    );
+    RichText::new(detail_lines).render(frame, detail);
     None
 }
 
@@ -5249,7 +5606,9 @@ impl Drop for TerminalGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dragonstui_adapter_host::{Observation, ObservationKind, ObservationSeverity};
+    use dragonstui_adapter_host::{
+        ActionId, AdapterAction, Capability, Observation, ObservationKind, ObservationSeverity,
+    };
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent {
@@ -5273,6 +5632,46 @@ mod tests {
         let showcase = Showcase::new(Instant::now());
         assert_eq!(showcase.phase, Phase::Splash);
         assert_eq!(showcase.section, Section::Overview);
+    }
+
+    #[test]
+    fn actions_surface_renders_and_selects_declared_metadata_without_identifier_semantics() {
+        let mut showcase = Showcase::new(Instant::now());
+        showcase.phase = Phase::Showcase;
+        showcase.section = Section::Adapters;
+        showcase.adapter_browser_mode = AdapterBrowserMode::Actions;
+        showcase.adapter_actions_adapter = Some(AdapterId::new("fixture").unwrap());
+        showcase.adapter_actions = vec![
+            AdapterAction {
+                id: ActionId::new("fixture.action.alpha").unwrap(),
+                label: "Alpha".to_owned(),
+                description: Some("producer-defined success".to_owned()),
+                operation: Capability::new("fixture.execute").unwrap(),
+            },
+            AdapterAction {
+                id: ActionId::new("fixture.destroy.everything").unwrap(),
+                label: "Inspect".to_owned(),
+                description: Some("producer-defined second action".to_owned()),
+                operation: Capability::new("fixture.execute").unwrap(),
+            },
+        ];
+        showcase.table.set_selected(0);
+
+        let rendered = showcase_view(Size::new(120, 32), &mut showcase);
+        assert!(frame_contains(&rendered.frame, "Adapter Actions"));
+        assert!(frame_contains(
+            &rendered.frame,
+            "fixture.destroy.everything"
+        ));
+        assert_eq!(
+            showcase.selected_adapter_action().unwrap().id.as_str(),
+            "fixture.action.alpha"
+        );
+        showcase.handle_key(key(KeyCode::Down));
+        assert_eq!(
+            showcase.selected_adapter_action().unwrap().id.as_str(),
+            "fixture.destroy.everything"
+        );
     }
 
     #[test]

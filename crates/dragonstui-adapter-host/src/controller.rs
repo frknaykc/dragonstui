@@ -6,9 +6,10 @@ use std::{
 };
 
 use crate::{
-    AdapterDiagnostics, AdapterId, AdapterLiveData, AdapterManager, AdapterState, DiscoveryError,
-    LocalAdapterRoot, ManagerError,
+    ActionId, AdapterAction, AdapterDiagnostics, AdapterId, AdapterLiveData, AdapterManager,
+    AdapterState, DiscoveryError, LocalAdapterRoot, ManagerError, RpcOutcome,
 };
+use serde_json::Value;
 
 /// Stateful lifecycle owner intended for a long-lived host controller process.
 ///
@@ -82,6 +83,29 @@ impl AdapterController {
 
     pub fn diagnostics(&self, id: &AdapterId) -> Option<AdapterDiagnostics> {
         self.manager.diagnostics(id)
+    }
+
+    /// Returns adapter-declared actions from the currently running runtime.
+    pub fn actions(&self, id: &AdapterId) -> Result<Vec<AdapterAction>, ControllerError> {
+        self.manager.actions(id).map_err(ControllerError::Manager)
+    }
+
+    /// Invokes one exact producer-declared action through the existing runtime
+    /// request queue and returns its typed generic RPC outcome.
+    pub fn invoke_action(
+        &mut self,
+        id: &AdapterId,
+        action_id: &ActionId,
+        payload: Value,
+    ) -> Result<RpcOutcome, ControllerError> {
+        self.ensure_discovered(id)?;
+        let request_id = self
+            .manager
+            .invoke_action(id, action_id, payload, Duration::from_secs(2))
+            .map_err(ControllerError::Manager)?;
+        self.manager
+            .wait_response(id, &request_id, Duration::from_secs(2))
+            .map_err(ControllerError::Manager)
     }
 
     pub fn poll(&mut self, per_adapter_timeout: Duration) {

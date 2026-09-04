@@ -55,6 +55,33 @@ impl fmt::Display for Capability {
     }
 }
 
+/// A producer-owned, stable identity for one adapter-declared action.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ActionId(String);
+
+impl ActionId {
+    pub fn new(value: impl Into<String>) -> Result<Self, IdentifierError> {
+        let value = value.into();
+        if value
+            .split('.')
+            .any(|segment| validate_segment(segment, "action id").is_err())
+        {
+            return Err(IdentifierError::new("action id", value));
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ActionId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
 /// Correlates a request with a response or error envelope.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct RequestId(String);
@@ -145,6 +172,7 @@ macro_rules! string_identifier_serde {
 
 string_identifier_serde!(AdapterId);
 string_identifier_serde!(Capability);
+string_identifier_serde!(ActionId);
 string_identifier_serde!(RequestId);
 
 /// Host-to-adapter startup greeting.
@@ -161,6 +189,20 @@ pub struct AdapterInfo {
     pub id: AdapterId,
     pub version: String,
     pub capabilities: Vec<Capability>,
+    /// Optional producer-declared actions. Legacy adapters decode with none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<AdapterAction>,
+}
+
+/// Metadata describing one generic action that an adapter explicitly exposes.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AdapterAction {
+    pub id: ActionId,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Existing capability RPC operation used to execute this declared action.
+    pub operation: Capability,
 }
 
 /// Generic capability operation sent by the host.
@@ -169,6 +211,9 @@ pub struct Request {
     pub protocol: u32,
     pub id: RequestId,
     pub operation: Capability,
+    /// Optional producer-declared action identity for an action invocation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<ActionId>,
     pub payload: Value,
 }
 
