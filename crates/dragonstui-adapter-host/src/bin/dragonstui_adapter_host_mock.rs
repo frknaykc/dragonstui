@@ -9,8 +9,8 @@ use std::{
 };
 
 use dragonstui_adapter_host::{
-    AdapterId, AdapterInfo, Capability, ErrorMessage, Event, PROTOCOL_VERSION, ProtocolMessage,
-    Response, ShutdownAck,
+    AdapterId, AdapterInfo, Capability, ErrorMessage, Event, Observation, ObservationSeverity,
+    ObservationStatus, PROTOCOL_VERSION, ProtocolMessage, Response, ShutdownAck,
 };
 use serde_json::{Value, json};
 
@@ -36,6 +36,7 @@ fn main() {
         "shared-capabilities" => protocol_mode(MockBehavior::SharedCapabilities, &options.id),
         "events" => protocol_mode(MockBehavior::Events, &options.id),
         "live-events" => protocol_mode(MockBehavior::LiveEvents, &options.id),
+        "semantic-events" => protocol_mode(MockBehavior::SemanticEvents, &options.id),
         "stress-events" => protocol_mode(MockBehavior::StressEvents, &options.id),
         "out-of-order" => protocol_mode(MockBehavior::OutOfOrder, &options.id),
         "unknown-response" => protocol_mode(MockBehavior::UnknownResponse, &options.id),
@@ -153,6 +154,7 @@ fn protocol_mode(behavior: MockBehavior, adapter_id: &str) {
         MockBehavior::Normal
         | MockBehavior::Events
         | MockBehavior::LiveEvents
+        | MockBehavior::SemanticEvents
         | MockBehavior::StressEvents
         | MockBehavior::OutOfOrder
         | MockBehavior::UnknownResponse
@@ -190,8 +192,57 @@ fn protocol_mode(behavior: MockBehavior, adapter_id: &str) {
             protocol: PROTOCOL_VERSION,
             stream: "live".to_owned(),
             kind: "snapshot".to_owned(),
+            observation: None,
             payload: json!({"sequence": 1}),
         }));
+    }
+    if behavior == MockBehavior::SemanticEvents {
+        emit(&ProtocolMessage::Event(Event {
+            protocol: PROTOCOL_VERSION,
+            stream: "observations".to_owned(),
+            kind: "fixture".to_owned(),
+            observation: None,
+            payload: json!({"sequence": 1}),
+        }));
+        let observations = [
+            Observation::Log {
+                text: "fixture log".to_owned(),
+                severity: Some(ObservationSeverity::Info),
+                timestamp_millis: Some(1_700_000_000_001),
+            },
+            Observation::Metric {
+                name: "fixture.value".to_owned(),
+                value: 42.into(),
+                unit: Some("items".to_owned()),
+                timestamp_millis: Some(1_700_000_000_002),
+            },
+            Observation::Status {
+                entity: "fixture-entity".to_owned(),
+                check: "fixture-check".to_owned(),
+                status: ObservationStatus::Ok,
+                timestamp_millis: Some(1_700_000_000_003),
+            },
+            Observation::Event {
+                title: "fixture event".to_owned(),
+                detail: Some("fixture detail".to_owned()),
+                timestamp_millis: Some(1_700_000_000_004),
+            },
+            Observation::Error {
+                message: "fixture error".to_owned(),
+                signature: Some("fixture.error".to_owned()),
+                stack: vec!["frame one".to_owned(), "frame two".to_owned()],
+                timestamp_millis: Some(1_700_000_000_005),
+            },
+        ];
+        for observation in observations {
+            emit(&ProtocolMessage::Event(Event {
+                protocol: PROTOCOL_VERSION,
+                stream: "observations".to_owned(),
+                kind: "fixture".to_owned(),
+                observation: Some(observation),
+                payload: json!({"sequence": 1}),
+            }));
+        }
     }
     if behavior == MockBehavior::StressEvents {
         for index in 0..40 {
@@ -199,6 +250,7 @@ fn protocol_mode(behavior: MockBehavior, adapter_id: &str) {
                 protocol: PROTOCOL_VERSION,
                 stream: "stress".to_owned(),
                 kind: "tick".to_owned(),
+                observation: None,
                 payload: json!({"index": index}),
             }));
         }
@@ -257,6 +309,7 @@ fn protocol_mode(behavior: MockBehavior, adapter_id: &str) {
                             protocol: PROTOCOL_VERSION,
                             stream: "test".to_owned(),
                             kind: "started".to_owned(),
+                            observation: None,
                             payload: json!({"request": request.id.as_str()}),
                         }));
                         emit(&ProtocolMessage::Response(Response {
@@ -312,6 +365,7 @@ enum MockBehavior {
     SharedCapabilities,
     Events,
     LiveEvents,
+    SemanticEvents,
     StressEvents,
     OutOfOrder,
     UnknownResponse,

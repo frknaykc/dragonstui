@@ -117,9 +117,11 @@ DragonsTUI is under active development and remains pre-1.0. The core framework a
 | Adapter host foundation | Complete |
 | Distribution and management | Complete (M35–M43) |
 | Generic live data | Complete (M44–M47) |
+| Generic inspector UX | Complete (M48–M52) |
+| Observability semantic contract | Complete; views not started |
 | SDK and conformance tooling | Planned |
 
-Adapter distribution and management now includes registry/install/update/remove integrity boundaries, CLI and TUI management, typed authenticated controller IPC, per-adapter lifecycle conflict protection, real PTY acceptance, and M43 capability discovery. Capability browsing derives only from live daemon diagnostics: it answers which adapters currently report an opaque capability without claiming that stopped, declared-only, or unobserved adapters can provide it. Generic live data now transports adapter events away from the UI thread into bounded retained history, derives opaque text and identity filters, and supports pause/follow selection without stopping ingestion. It is infrastructure only: there is no log, metric, graph, or domain-specific viewer. The next phase is Generic Inspector UX, beginning with M48 Inspector Layout.
+Adapter distribution and management now includes registry/install/update/remove integrity boundaries, CLI and TUI management, typed authenticated controller IPC, per-adapter lifecycle conflict protection, real PTY acceptance, and M43 capability discovery. Generic live data transports adapter events away from the UI thread into bounded retained history, derives opaque text and identity filters, and supports pause/follow selection without stopping ingestion. Generic Inspector UX provides reusable layout, viewport, property, and structured-data primitives. The adapter protocol additionally accepts optional capability-neutral observation metadata for future log, metric, status, timeline, and error projections while preserving legacy opaque events. These are foundations only: M53–M58 observability views and M59 capability actions are not implemented.
 
 ## Development
 

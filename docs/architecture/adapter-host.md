@@ -75,7 +75,7 @@ The host sends `hello` and accepts `adapter_info` only when the negotiated proto
 
 `request` returns immediately with a generated request ID. Application code continues its own event loop and calls `poll`, then retrieves completed outcomes by ID. Responses and adapter errors are correlated independently of arrival order. Unknown response IDs are counted. A crash turns all pending requests into deterministic crash failures.
 
-`event` messages are generic (`stream`, `kind`, JSON `payload`) and are annotated with their emitting adapter. Per-adapter event order follows that adapter's stdout order. There is intentionally no cross-adapter global ordering guarantee.
+`event` messages are generic (`stream`, `kind`, JSON `payload`) and are annotated with their emitting adapter. They may additionally carry an optional typed `Observation` (`Log`, `Metric`, `Status`, `Event`, or `Error`), which is explicit producer-declared data semantics rather than a UI choice. Omitted metadata remains Generic/Unclassified; the host does not infer semantics from adapter identity, stream, kind, or payload keys. Per-adapter event order follows that adapter's stdout order. There is intentionally no cross-adapter global ordering guarantee. See [Adapter Protocol v1](../adapter-protocol-v1.md#observability-event-semantics) for the exact additive wire contract and compatibility policy.
 
 ## Backpressure and diagnostics
 

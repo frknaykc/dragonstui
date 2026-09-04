@@ -43,8 +43,9 @@ pub use manager::{
 pub use manifest::{AdapterManifest, ExecutablePath, ManifestError};
 pub use process::{AdapterProcess, AdapterProcessConfig, ProcessError, ProcessStatus};
 pub use protocol::{
-    AdapterId, AdapterInfo, Capability, ErrorMessage, Event, Hello, IdentifierError,
-    PROTOCOL_VERSION, ProtocolMessage, Request, RequestId, Response, Shutdown, ShutdownAck,
+    AdapterId, AdapterInfo, Capability, ErrorMessage, Event, Hello, IdentifierError, Observation,
+    ObservationKind, ObservationSeverity, ObservationStatus, PROTOCOL_VERSION, ProtocolMessage,
+    Request, RequestId, Response, Shutdown, ShutdownAck,
 };
 pub use registry::{
     AdapterArtifact, AdapterEntry, AdapterRelease, ArtifactSource, Platform, Registry,

@@ -1,7 +1,8 @@
 use std::{path::PathBuf, time::Duration};
 
 use dragonstui_adapter_host::{
-    AdapterManifest, AdapterRuntime, AdapterRuntimeConfig, Capability, PROTOCOL_VERSION, RpcOutcome,
+    AdapterManifest, AdapterRuntime, AdapterRuntimeConfig, Capability, Observation,
+    PROTOCOL_VERSION, RpcOutcome,
 };
 use serde_json::json;
 
@@ -88,5 +89,49 @@ fn event_bursts_stay_bounded_drop_oldest_and_do_not_drop_response_queue() {
     assert_eq!(
         runtime.take_outcome(&id),
         Some(RpcOutcome::Response(json!({"still": "responsive"})))
+    );
+}
+
+#[test]
+fn semantic_mock_events_survive_handshake_and_runtime_with_provenance_and_payload() {
+    let mut runtime = runtime("semantic-events", 8);
+
+    for _ in 0..8 {
+        runtime.pump(Duration::from_secs(1)).unwrap();
+    }
+
+    let events = std::iter::from_fn(|| runtime.pop_event()).collect::<Vec<_>>();
+    assert_eq!(events.len(), 6);
+    assert!(events.iter().all(|event| {
+        event.adapter_id.as_str() == "mock"
+            && event.stream == "observations"
+            && event.kind == "fixture"
+            && event.payload == json!({"sequence": 1})
+    }));
+    assert!(events.iter().any(|event| event.observation.is_none()));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.observation, Some(Observation::Log { .. })))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.observation, Some(Observation::Metric { .. })))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.observation, Some(Observation::Status { .. })))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.observation, Some(Observation::Event { .. })))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.observation, Some(Observation::Error { .. })))
     );
 }

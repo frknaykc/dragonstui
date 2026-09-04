@@ -189,12 +189,127 @@ pub struct ErrorMessage {
     pub message: String,
 }
 
+/// Producer-declared, capability-neutral observability metadata for an event.
+///
+/// This describes an observation's data rather than a future UI. The host does
+/// not infer this classification from `stream`, `kind`, or `payload`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Observation {
+    /// A human-readable record suitable for a future log projection.
+    Log {
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        severity: Option<ObservationSeverity>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timestamp_millis: Option<u64>,
+    },
+    /// One finite JSON numeric sample for a named series.
+    Metric {
+        name: String,
+        value: serde_json::Number,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        unit: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timestamp_millis: Option<u64>,
+    },
+    /// One generic entity/check state observation.
+    Status {
+        entity: String,
+        check: String,
+        status: ObservationStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timestamp_millis: Option<u64>,
+    },
+    /// A chronological, human-readable observation without product semantics.
+    Event {
+        title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timestamp_millis: Option<u64>,
+    },
+    /// A generic error with optional producer grouping and textual stack lines.
+    Error {
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        stack: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timestamp_millis: Option<u64>,
+    },
+}
+
+impl Observation {
+    /// Returns the explicit semantic class used by future projections.
+    pub const fn kind(&self) -> ObservationKind {
+        match self {
+            Self::Log { .. } => ObservationKind::Log,
+            Self::Metric { .. } => ObservationKind::Metric,
+            Self::Status { .. } => ObservationKind::Status,
+            Self::Event { .. } => ObservationKind::Event,
+            Self::Error { .. } => ObservationKind::Error,
+        }
+    }
+}
+
+/// Stable category for routing an explicitly classified observation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ObservationKind {
+    Log,
+    Metric,
+    Status,
+    Event,
+    Error,
+}
+
+impl ObservationKind {
+    /// Stable lower-case label for a generic observation projection.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Log => "log",
+            Self::Metric => "metric",
+            Self::Status => "status",
+            Self::Event => "event",
+            Self::Error => "error",
+        }
+    }
+}
+
+/// Optional producer-declared severity for a log observation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ObservationSeverity {
+    Trace,
+    Debug,
+    Info,
+    Warning,
+    Error,
+    Critical,
+}
+
+/// Generic state carried by a status observation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ObservationStatus {
+    Ok,
+    Warning,
+    Error,
+    Unknown,
+}
+
 /// Generic adapter-originated event.
+///
+/// `observation` is additive. Events emitted by existing adapters decode with
+/// `None`, meaning Generic/Unclassified, while preserving all original fields.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Event {
     pub protocol: u32,
     pub stream: String,
     pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation: Option<Observation>,
     pub payload: Value,
 }
 

@@ -395,6 +395,7 @@ impl AdapterRuntime {
                     adapter_id: self.info.id.clone(),
                     stream: event.stream,
                     kind: event.kind,
+                    observation: event.observation,
                     payload: event.payload,
                 });
             }
@@ -420,6 +421,8 @@ pub struct AdapterEvent {
     pub adapter_id: AdapterId,
     pub stream: String,
     pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation: Option<crate::Observation>,
     pub payload: Value,
 }
 

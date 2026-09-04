@@ -34,7 +34,7 @@ use dragons_tui::{
 use dragonstui_adapter_host::{
     AdapterClassification, AdapterDisconnect, AdapterEvent, AdapterId, AdapterLiveData,
     AdapterManagement, AdapterManagementAction, ControllerIpcDiagnostics, DiscoveryError,
-    LocalAdapterRoot, local_controller_diagnostics, local_controller_live_data,
+    LocalAdapterRoot, Observation, local_controller_diagnostics, local_controller_live_data,
     local_controller_management_client,
 };
 
@@ -3719,8 +3719,12 @@ fn render_adapter_inspector(
         .map(|message| match message {
             LiveDataMessage::Event(event) => {
                 format!(
-                    "{} · {} · {} · {}",
-                    event.adapter_id, event.stream, event.kind, event.payload
+                    "{} · {} · {} · {} · observation={}",
+                    event.adapter_id,
+                    event.stream,
+                    event.kind,
+                    event.payload,
+                    observation_label(event.observation.as_ref())
                 )
             }
             LiveDataMessage::Disconnected(disconnect) => {
@@ -3736,7 +3740,13 @@ fn render_adapter_inspector(
     let live_kind = live_data
         .latest_event
         .as_ref()
-        .map(|event| event.kind.clone())
+        .map(|event| {
+            format!(
+                "{} / {}",
+                event.kind,
+                observation_label(event.observation.as_ref())
+            )
+        })
         .unwrap_or_else(|| unavailable.clone());
     let live_payload = live_data
         .latest_event
@@ -3848,6 +3858,12 @@ fn render_adapter_inspector(
 
 fn format_uptime_millis(millis: u64) -> String {
     format!("{}.{:03}s", millis / 1_000, millis % 1_000)
+}
+
+fn observation_label(observation: Option<&Observation>) -> &'static str {
+    observation
+        .map(|observation| observation.kind().as_str())
+        .unwrap_or("generic/unclassified")
 }
 
 fn render_settings(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -> Option<Position> {
@@ -4164,6 +4180,7 @@ impl Drop for TerminalGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dragonstui_adapter_host::{Observation, ObservationKind};
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent {
@@ -4599,6 +4616,7 @@ mod tests {
                 adapter_id: AdapterId::new("adapter-a").unwrap(),
                 stream: "opaque.stream".to_owned(),
                 kind: "updated".to_owned(),
+                observation: None,
                 payload: r#"{"user":{"name":"Ada","roles":["developer"]}}"#.parse().unwrap(),
             }));
 
@@ -5148,12 +5166,14 @@ mod tests {
                     adapter_id: AdapterId::new("adapter-a").unwrap(),
                     stream: "opaque.stream".to_owned(),
                     kind: "first".to_owned(),
+                    observation: None,
                     payload: r#"{"sequence":1}"#.parse().unwrap(),
                 },
                 AdapterEvent {
                     adapter_id: AdapterId::new("adapter-b").unwrap(),
                     stream: "opaque.stream".to_owned(),
                     kind: "second".to_owned(),
+                    observation: None,
                     payload: r#"{"sequence":2}"#.parse().unwrap(),
                 },
             ],
@@ -5181,6 +5201,7 @@ mod tests {
                 adapter_id: AdapterId::new(adapter).unwrap(),
                 stream: stream.to_owned(),
                 kind: kind.to_owned(),
+                observation: None,
                 payload: format!(r#"{{"sequence":{sequence}}}"#).parse().unwrap(),
             }));
         }
@@ -5188,7 +5209,7 @@ mod tests {
         assert_eq!(live_data.history.len(), 2);
         assert!(matches!(
             &live_data.history[0].message,
-            LiveDataMessage::Event(AdapterEvent { adapter_id, stream, kind, payload })
+            LiveDataMessage::Event(AdapterEvent { adapter_id, stream, kind, payload, .. })
                 if *adapter_id == AdapterId::new("adapter-b").unwrap()
                     && stream == "beta"
                     && kind == "second"
@@ -5196,7 +5217,7 @@ mod tests {
         ));
         assert!(matches!(
             &live_data.history[1].message,
-            LiveDataMessage::Event(AdapterEvent { adapter_id, stream, kind, payload })
+            LiveDataMessage::Event(AdapterEvent { adapter_id, stream, kind, payload, .. })
                 if *adapter_id == AdapterId::new("adapter-a").unwrap()
                     && stream == "alpha"
                     && kind == "third"
@@ -5211,6 +5232,7 @@ mod tests {
             adapter_id: AdapterId::new("adapter-a").unwrap(),
             stream: "alpha".to_owned(),
             kind: "first".to_owned(),
+            observation: None,
             payload: r#"{"sequence":1}"#.parse().unwrap(),
         }));
         live_data.apply(LiveDataMessage::Disconnected(AdapterDisconnect {
@@ -5238,6 +5260,7 @@ mod tests {
                 adapter_id: AdapterId::new("adapter-a").unwrap(),
                 stream: "alpha".to_owned(),
                 kind: "sample".to_owned(),
+                observation: None,
                 payload: format!(r#"{{"sequence":{sequence}}}"#).parse().unwrap(),
             }));
             assert!(live_data.history.len() <= 3);
@@ -5270,6 +5293,7 @@ mod tests {
                 adapter_id: AdapterId::new(adapter).unwrap(),
                 stream: stream.to_owned(),
                 kind: kind.to_owned(),
+                observation: None,
                 payload: payload.parse().unwrap(),
             }));
         }
@@ -5317,6 +5341,7 @@ mod tests {
                     adapter_id: AdapterId::new("adapter-a").unwrap(),
                     stream: "alpha".to_owned(),
                     kind: "notice".to_owned(),
+                    observation: None,
                     payload: payload.parse().unwrap(),
                 }));
         }
@@ -5344,6 +5369,7 @@ mod tests {
                 adapter_id: AdapterId::new("adapter-a").unwrap(),
                 stream: "opaque.stream".to_owned(),
                 kind: "updated".to_owned(),
+                observation: None,
                 payload: r#"{"value":true}"#.parse().unwrap(),
             }))
             .unwrap();
@@ -5354,7 +5380,7 @@ mod tests {
         assert_eq!(showcase.live_data.received_count, 1);
         assert!(matches!(
             showcase.live_data.latest_event.as_ref(),
-            Some(AdapterEvent { adapter_id, stream, kind, payload })
+            Some(AdapterEvent { adapter_id, stream, kind, payload, .. })
                 if adapter_id == &AdapterId::new("adapter-a").unwrap()
                     && stream == "opaque.stream"
                     && kind == "updated"
@@ -5382,6 +5408,7 @@ mod tests {
                 adapter_id: AdapterId::new("adapter-a").unwrap(),
                 stream: "opaque.stream".to_owned(),
                 kind: "updated".to_owned(),
+                observation: None,
                 payload: r#"{"value":true}"#.parse().unwrap(),
             }));
         showcase
@@ -5425,6 +5452,7 @@ mod tests {
                     adapter_id: AdapterId::new("adapter-a").unwrap(),
                     stream: "opaque.stream".to_owned(),
                     kind: "updated".to_owned(),
+                    observation: None,
                     payload: format!(r#"{{"sequence":{sequence}}}"#).parse().unwrap(),
                 }));
         }
@@ -5447,6 +5475,7 @@ mod tests {
                 adapter_id: AdapterId::new(adapter).unwrap(),
                 stream: stream.to_owned(),
                 kind: kind.to_owned(),
+                observation: None,
                 payload: format!(r#"{{"message":"{payload}"}}"#).parse().unwrap(),
             })
         };
@@ -5489,6 +5518,7 @@ mod tests {
                 adapter_id: AdapterId::new("adapter-a").unwrap(),
                 stream: "telemetry".to_owned(),
                 kind: "sample".to_owned(),
+                observation: None,
                 payload: format!(r#"{{"sequence":{sequence}}}"#).parse().unwrap(),
             })
         };
@@ -5524,6 +5554,7 @@ mod tests {
                 adapter_id: AdapterId::new("adapter-a").unwrap(),
                 stream: "telemetry".to_owned(),
                 kind: "sample".to_owned(),
+                observation: None,
                 payload: format!(r#"{{"sequence":{sequence}}}"#).parse().unwrap(),
             })
         };
@@ -5572,6 +5603,7 @@ mod tests {
                     adapter_id: AdapterId::new("adapter-a").unwrap(),
                     stream: "telemetry".to_owned(),
                     kind: "sample".to_owned(),
+                    observation: None,
                     payload: format!(r#"{{"sequence":{sequence}}}"#).parse().unwrap(),
                 }))
                 .unwrap();
@@ -5604,6 +5636,113 @@ mod tests {
     }
 
     #[test]
+    fn semantic_observations_survive_bounded_handoff_history_filter_and_follow_without_payload_routing()
+     {
+        assert_eq!(observation_label(None), "generic/unclassified");
+        let event = |observation| AdapterEvent {
+            adapter_id: AdapterId::new("semantic-adapter").unwrap(),
+            stream: "observations".to_owned(),
+            kind: "fixture".to_owned(),
+            observation,
+            payload: r#"{"fixture":"semantic"}"#.parse().unwrap(),
+        };
+        let (sender, receiver) = mpsc::sync_channel(LIVE_DATA_CHANNEL_CAPACITY);
+        let data = AdapterLiveData {
+            events: vec![
+                event(Some(Observation::Metric {
+                    name: "fixture.value".to_owned(),
+                    value: 42.into(),
+                    unit: None,
+                    timestamp_millis: Some(1),
+                })),
+                event(Some(Observation::Error {
+                    message: "fixture error".to_owned(),
+                    signature: None,
+                    stack: vec!["frame one".to_owned()],
+                    timestamp_millis: Some(2),
+                })),
+                event(None),
+            ],
+            disconnects: Vec::new(),
+        };
+        assert_eq!(forward_live_data(&sender, data), 3);
+
+        let mut live_data = LiveDataState::default();
+        assert_eq!(live_data.history_capacity, LIVE_HISTORY_CAPACITY);
+        while let Ok(message) = receiver.try_recv() {
+            live_data.apply(message);
+        }
+        assert_eq!(live_data.history.len(), 3);
+        let kinds = live_data
+            .retained_messages()
+            .map(|message| match message {
+                LiveDataMessage::Event(event) => event.observation.as_ref().map(Observation::kind),
+                LiveDataMessage::Disconnected(_) => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            vec![
+                Some(ObservationKind::Metric),
+                Some(ObservationKind::Error),
+                None,
+            ]
+        );
+
+        let filter = LiveDataFilter {
+            query: "semantic".to_owned(),
+            ..LiveDataFilter::default()
+        };
+        assert_eq!(live_data.filtered_messages(&filter).count(), 3);
+        let LiveDataMessage::Event(error_event) = &live_data.history[1].message else {
+            panic!("semantic fixture must retain an event");
+        };
+        assert_eq!(
+            error_event.observation,
+            Some(Observation::Error {
+                message: "fixture error".to_owned(),
+                signature: None,
+                stack: vec!["frame one".to_owned()],
+                timestamp_millis: Some(2),
+            })
+        );
+
+        let mut view = LiveViewState::default();
+        view.reconcile(&live_data, &filter);
+        view.pause();
+        live_data.apply(LiveDataMessage::Event(event(Some(Observation::Log {
+            text: "fixture log".to_owned(),
+            severity: None,
+            timestamp_millis: Some(3),
+        }))));
+        view.reconcile(&live_data, &filter);
+        assert!(matches!(
+            view.selected_message(&live_data, &filter),
+            Some(LiveDataMessage::Event(AdapterEvent {
+                observation: None,
+                ..
+            }))
+        ));
+        view.follow(&live_data, &filter);
+        assert!(matches!(
+            view.selected_message(&live_data, &filter),
+            Some(LiveDataMessage::Event(AdapterEvent {
+                observation: Some(observation),
+                ..
+            })) if observation.kind() == ObservationKind::Log
+        ));
+        assert_eq!(
+            observation_label(Some(&Observation::Error {
+                message: "fixture error".to_owned(),
+                signature: None,
+                stack: Vec::new(),
+                timestamp_millis: None,
+            })),
+            "error"
+        );
+    }
+
+    #[test]
     fn live_data_worker_stops_and_joins_when_the_showcase_shuts_down() {
         let (started_sender, started) = mpsc::channel();
         let (receiver, mut worker) = live_data_worker(move || {
@@ -5613,6 +5752,7 @@ mod tests {
                     adapter_id: AdapterId::new("adapter-a").unwrap(),
                     stream: "opaque.stream".to_owned(),
                     kind: "updated".to_owned(),
+                    observation: None,
                     payload: r#"{"value":true}"#.parse().unwrap(),
                 }],
                 disconnects: Vec::new(),

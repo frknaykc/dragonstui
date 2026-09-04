@@ -41,6 +41,7 @@ fn response_error_and_event_keep_typed_envelope_fields() {
         protocol: PROTOCOL_VERSION,
         stream: "logs".to_owned(),
         kind: "entry".to_owned(),
+        observation: None,
         payload: json!({"line": "hello"}),
     });
 

@@ -12,7 +12,7 @@ use dragonstui_adapter_host::{
     AdapterController, AdapterId, AdapterManagementOutcome, ControllerClient, ControllerIpcCommand,
     ControllerIpcServer, ControllerIpcStatus, ControllerManagementClient,
     ControllerManagementClientError, ControllerManagementRequest, ControllerManagementResponse,
-    PROTOCOL_VERSION, local_controller_diagnostics,
+    ObservationKind, PROTOCOL_VERSION, local_controller_diagnostics,
 };
 
 static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -64,6 +64,19 @@ impl TempRoot {
         )
         .unwrap();
         Self { path }
+    }
+
+    fn semantic_events() -> Self {
+        let root = Self::new();
+        let bin = root.path.join("mock/bin");
+        fs::rename(bin.join("mock"), bin.join("mock-fixture")).unwrap();
+        fs::write(
+            bin.join("mock"),
+            "#!/bin/sh\nexec \"$(dirname \"$0\")/mock-fixture\" --mode semantic-events \"$@\"\n",
+        )
+        .unwrap();
+        make_executable(&bin.join("mock"));
+        root
     }
 }
 
@@ -188,6 +201,57 @@ fn controller_ipc_returns_live_diagnostics_only_to_authenticated_clients() {
     assert!(live_data.disconnects.is_empty());
 
     client.stop(&id).unwrap();
+    worker.join().unwrap().unwrap();
+}
+
+#[test]
+fn authenticated_controller_live_data_preserves_semantic_mock_observations() {
+    let root = TempRoot::semantic_events();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let controller = AdapterController::new(&root.path, Duration::from_millis(200), 8);
+    let server = ControllerIpcServer::new(listener, controller, "correct-token");
+    let worker = thread::spawn(move || server.serve_forever());
+    let id = AdapterId::new("mock").unwrap();
+    let client = ControllerClient::new(address, "correct-token");
+
+    client.start(&id).unwrap();
+    let mut events = Vec::new();
+    for _ in 0..8 {
+        thread::sleep(Duration::from_millis(20));
+        let snapshot = client.live_data().unwrap();
+        events.extend(snapshot.events);
+    }
+    assert_eq!(events.len(), 6);
+    assert!(events.iter().all(|event| {
+        event.adapter_id == id
+            && event.stream == "observations"
+            && event.kind == "fixture"
+            && event.payload == serde_json::json!({"sequence": 1})
+    }));
+    let kinds = events
+        .iter()
+        .map(|event| {
+            event
+                .observation
+                .as_ref()
+                .map(|observation| observation.kind())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kinds,
+        vec![
+            None,
+            Some(ObservationKind::Log),
+            Some(ObservationKind::Metric),
+            Some(ObservationKind::Status),
+            Some(ObservationKind::Event),
+            Some(ObservationKind::Error),
+        ]
+    );
+
+    client.stop(&id).unwrap();
+    client.shutdown().unwrap();
     worker.join().unwrap().unwrap();
 }
 
