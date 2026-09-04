@@ -25,9 +25,9 @@ use dragons_tui::{
     Alignment, Animation, BorderSet, Canvas, Cell, Color, CommandId, CommandPalette, Constraint,
     Event, FocusId, FocusState, Frame, Gauge, KeyCode, KeyEvent, KeyMap, KeyModifiers, Line, List,
     ListState, Modal, MouseEvent, MouseKind, PaletteCommand, Panel, Position, ProgressBar, Rect,
-    RichText, Runtime, Size, Span, Sparkline, Spinner, Style, Table, TableColumn, TableState, Text,
-    TextArea, TextInput, Theme, Tree, TreeNode, TreeState, Viewport, ViewportState, display_width,
-    is_quit_key, terminal_size,
+    RichText, Runtime, ShutdownSignal, Size, Span, Sparkline, Spinner, Style, Table, TableColumn,
+    TableState, Text, TextArea, TextInput, Theme, Tree, TreeNode, TreeState, Viewport,
+    ViewportState, display_width, is_quit_key, terminal_size,
 };
 use dragonstui_adapter_host::{
     AdapterClassification, AdapterId, AdapterManagement, AdapterManagementAction,
@@ -1575,10 +1575,11 @@ fn main() -> io::Result<()> {
         return Ok(());
     }
     let adapter_root = parse_showcase_args()?;
+    let shutdown = ShutdownSignal::install()?;
 
     let mut output = stdout();
     let mut terminal = TerminalGuard::enter(&mut output)?;
-    let result = run(&mut output, adapter_root);
+    let result = run(&mut output, adapter_root, &shutdown);
     let restore = terminal.restore(&mut output);
     result.and(restore)
 }
@@ -1639,7 +1640,7 @@ fn parse_showcase_args() -> io::Result<ShowcaseArgs> {
     })
 }
 
-fn run(output: &mut impl Write, args: ShowcaseArgs) -> io::Result<()> {
+fn run(output: &mut impl Write, args: ShowcaseArgs, shutdown: &ShutdownSignal) -> io::Result<()> {
     let mut runtime = Runtime::new(Some(TICK_INTERVAL));
     let mut showcase = Showcase::with_adapter_management(
         Instant::now(),
@@ -1648,11 +1649,18 @@ fn run(output: &mut impl Write, args: ShowcaseArgs) -> io::Result<()> {
         args.adapter_install_id,
     );
     loop {
+        if shutdown.requested() {
+            return Ok(());
+        }
         if runtime.needs_redraw() {
             let view = showcase_view(terminal_size()?, &mut showcase);
             runtime.render_with_cursor(output, view.frame, view.cursor)?;
         }
-        match runtime.next_event()? {
+        let event = runtime.next_event()?;
+        if shutdown.requested() {
+            return Ok(());
+        }
+        match event {
             Event::Key(key) => {
                 let outcome = showcase.handle_key(key);
                 if outcome.quit {

@@ -12,9 +12,10 @@ use crossterm::{
 use dragons_tui::{
     Alignment, Animation, BorderSet, Canvas, Cell, CommandId, CommandPalette, Constraint, Event,
     FocusId, FocusState, Frame, Gauge, KeyCode, KeyEvent, KeyMap, Layout, Line, Modal, MouseEvent,
-    MouseKind, PaletteCommand, Panel, Position, ProgressBar, Rect, RichText, Runtime, Size, Span,
-    Sparkline, Spinner, Style, Table, TableColumn, TableState, Text, TextArea, Theme, Tree,
-    TreeNode, TreeState, Viewport, ViewportState, is_quit_key, terminal_size,
+    MouseKind, PaletteCommand, Panel, Position, ProgressBar, Rect, RichText, Runtime,
+    ShutdownSignal, Size, Span, Sparkline, Spinner, Style, Table, TableColumn, TableState, Text,
+    TextArea, Theme, Tree, TreeNode, TreeState, Viewport, ViewportState, is_quit_key,
+    terminal_size,
 };
 
 use agent_process::AgentProcess;
@@ -25,25 +26,33 @@ const SPLASH_DURATION: Duration = Duration::from_millis(1_000);
 mod agent_process;
 
 fn main() -> io::Result<()> {
+    let shutdown = ShutdownSignal::install()?;
     let mut output = stdout();
     let mut terminal = TerminalGuard::enter(&mut output)?;
-    let run_result = run(&mut output);
+    let run_result = run(&mut output, &shutdown);
     let restore_result = terminal.restore(&mut output);
 
     run_result.and(restore_result)
 }
 
-fn run(output: &mut impl Write) -> io::Result<()> {
+fn run(output: &mut impl Write, shutdown: &ShutdownSignal) -> io::Result<()> {
     let mut runtime = Runtime::new(Some(TICK_INTERVAL));
     let mut app = App::new(Instant::now());
 
     loop {
+        if shutdown.requested() {
+            return Ok(());
+        }
         if runtime.needs_redraw() {
             let view = app_view(terminal_size()?, &mut app);
             runtime.render_with_cursor(output, view.frame, view.cursor)?;
         }
 
-        match runtime.next_event()? {
+        let event = runtime.next_event()?;
+        if shutdown.requested() {
+            return Ok(());
+        }
+        match event {
             Event::Key(key) => {
                 let outcome = app.handle_key(key);
                 if outcome.quit {

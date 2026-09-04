@@ -26,4 +26,5 @@ adapter-showcase = ["dep:dragonstui-adapter-host"]
 crossterm = "0.29.0"
 unicode-width = "0.2.2"
 unicode-segmentation = "1.13.3"
+signal-hook = "0.3.18"
 dragonstui-adapter-host = { path = "crates/dragonstui-adapter-host", optional = true }

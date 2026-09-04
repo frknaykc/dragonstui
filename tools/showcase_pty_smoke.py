@@ -389,7 +389,7 @@ def cleanup_m42_fixture(
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--exit", choices=("q", "ctrl-c"), default="q")
+    parser.add_argument("--exit", choices=("q", "ctrl-c", "sigterm", "sighup"), default="q")
     parser.add_argument("--skip-splash", action="store_true")
     parser.add_argument("--adapter-id", help="expect this discovered adapter in the M41 inspector")
     parser.add_argument("--m42-controller", type=Path, help="real dragonstui-adapter binary for M42 PTY acceptance")
@@ -601,7 +601,14 @@ def main() -> int:
             os.killpg(process.pid, signal.SIGWINCH)
             drain_for(master, output, 0.10)
 
-        send(master, output, b"q" if args.exit == "q" else b"\x03")
+        if args.exit == "q":
+            send(master, output, b"q")
+        elif args.exit == "ctrl-c":
+            send(master, output, b"\x03")
+        elif args.exit == "sigterm":
+            os.killpg(process.pid, signal.SIGTERM)
+        else:
+            os.killpg(process.pid, signal.SIGHUP)
         deadline = time.monotonic() + 8.0
         while process.poll() is None and time.monotonic() < deadline:
             read_available(master, output, 0.05)
@@ -630,7 +637,12 @@ def main() -> int:
         require(any("⠀" <= char <= "⣿" for char in rendered), "Braille canvas output missing")
         require(b"\x1b[?1049h" in output and b"\x1b[?1049l" in output, "alternate-screen lifecycle missing")
         require(b"\x1b[?25l" in output and b"\x1b[?25h" in output, "cursor lifecycle missing")
-        require(b"\x1b[?1003h" in output and b"\x1b[?1003l" in output, "mouse-capture lifecycle missing")
+        for mode in (1000, 1002, 1003, 1006, 1015):
+            require(
+                f"\x1b[?{mode}h".encode("ascii") in output
+                and f"\x1b[?{mode}l".encode("ascii") in output,
+                f"mouse reporting mode {mode} was not restored",
+            )
         require(
             (restored_mode[3] & (termios.ICANON | termios.ECHO))
             == (original_mode[3] & (termios.ICANON | termios.ECHO)),
