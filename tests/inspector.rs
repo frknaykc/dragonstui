@@ -1,4 +1,4 @@
-use dragons_tui::{InspectorLayout, Rect};
+use dragons_tui::{InspectorLayout, InspectorSplitState, Position, Rect};
 
 #[test]
 fn inspector_layout_resolves_a_horizontal_master_detail_split_with_a_divider() {
@@ -56,4 +56,37 @@ fn inspector_layout_recalculates_without_overflow_for_resizes_and_tiny_rectangle
             assert_eq!(areas.master.bottom(), areas.detail.y);
         }
     }
+}
+
+#[test]
+fn inspector_split_drag_only_starts_on_the_divider_and_preserves_unrelated_selection() {
+    let layout = InspectorLayout::new(60, 24, 32);
+    let area = Rect::new(10, 4, 100, 20);
+    let mut split = InspectorSplitState::new();
+
+    assert!(!split.start_drag(layout, area, Position { x: 20, y: 8 }));
+    assert!(!split.is_dragging());
+    assert!(split.start_drag(layout, area, Position { x: 70, y: 8 }));
+    assert!(split.is_dragging());
+}
+
+#[test]
+fn inspector_split_drag_clamps_and_revalidates_on_terminal_resize() {
+    let layout = InspectorLayout::new(60, 24, 32);
+    let area = Rect::new(0, 0, 100, 20);
+    let mut split = InspectorSplitState::new();
+    let divider = split.split(layout, area).divider.unwrap();
+
+    assert!(split.start_drag(layout, area, Position { x: divider.x, y: 1 }));
+    assert!(split.drag_to(layout, area, Position { x: 2, y: 1 }));
+    assert_eq!(split.split(layout, area).master.width, 24);
+    assert!(split.drag_to(layout, area, Position { x: 98, y: 1 }));
+    assert_eq!(split.split(layout, area).detail.width, 32);
+
+    let resized = split.split(layout, Rect::new(0, 0, 70, 20));
+    assert_eq!(resized.master.width, 37);
+    assert_eq!(resized.detail.width, 32);
+    assert!(split.stop_drag());
+    assert!(!split.is_dragging());
+    assert!(!split.drag_to(layout, area, Position { x: 50, y: 1 }));
 }

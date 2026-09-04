@@ -24,11 +24,12 @@ use crossterm::{
 };
 use dragons_tui::{
     Alignment, Animation, BorderSet, Canvas, Cell, Color, CommandId, CommandPalette, Constraint,
-    Event, FocusId, FocusState, Frame, Gauge, InspectorLayout, KeyCode, KeyEvent, KeyMap,
-    KeyModifiers, Line, List, ListState, Modal, MouseEvent, MouseKind, PaletteCommand, Panel,
-    Position, ProgressBar, Rect, RichText, Runtime, ShutdownSignal, Size, Span, Sparkline, Spinner,
-    Style, Table, TableColumn, TableState, Text, TextArea, TextInput, Theme, Tree, TreeNode,
-    TreeState, Viewport, ViewportState, display_width, is_quit_key, terminal_size,
+    Event, FocusId, FocusState, Frame, Gauge, InspectorLayout, InspectorSplitState, KeyCode,
+    KeyEvent, KeyMap, KeyModifiers, Line, List, ListState, Modal, MouseEvent, MouseKind,
+    PaletteCommand, Panel, Position, ProgressBar, Rect, RichText, Runtime, ShutdownSignal, Size,
+    Span, Sparkline, Spinner, Style, Table, TableColumn, TableState, Text, TextArea, TextInput,
+    Theme, Tree, TreeNode, TreeState, Viewport, ViewportState, display_width, is_quit_key,
+    terminal_size,
 };
 use dragonstui_adapter_host::{
     AdapterClassification, AdapterDisconnect, AdapterEvent, AdapterId, AdapterLiveData,
@@ -637,6 +638,7 @@ struct HitRegions {
     settings_rows: [Rect; 11],
     color_inputs: [Rect; 3],
     color_apply: Rect,
+    adapter_inspector: Rect,
 }
 
 /// A capability-agnostic handoff from the controller receiver to the UI thread.
@@ -947,6 +949,7 @@ struct Showcase {
     adapter_action_results: Option<Receiver<Result<String, String>>>,
     adapter_action_status: Option<String>,
     adapter_remove_confirmation: bool,
+    adapter_inspector_split: InspectorSplitState,
     palette: Option<CommandPalette>,
     modal_open: bool,
     focus_before_modal: Option<FocusId>,
@@ -1055,6 +1058,7 @@ impl Showcase {
             adapter_action_results,
             adapter_action_status: None,
             adapter_remove_confirmation: false,
+            adapter_inspector_split: InspectorSplitState::new(),
             palette: None,
             modal_open: false,
             focus_before_modal: None,
@@ -1591,6 +1595,30 @@ impl Showcase {
                 };
             }
             return Outcome::default();
+        }
+
+        if self.section == Section::Adapters
+            && self.adapter_browser_mode == AdapterBrowserMode::Adapters
+        {
+            let layout = InspectorLayout::new(60, 24, 32);
+            let redraw = match mouse.kind {
+                MouseKind::LeftDown => self.adapter_inspector_split.start_drag(
+                    layout,
+                    self.hits.adapter_inspector,
+                    point,
+                ),
+                MouseKind::Drag(dragons_tui::MouseButton::Left) => self
+                    .adapter_inspector_split
+                    .drag_to(layout, self.hits.adapter_inspector, point),
+                MouseKind::LeftUp => self.adapter_inspector_split.stop_drag(),
+                _ => false,
+            };
+            if redraw {
+                return Outcome {
+                    quit: false,
+                    redraw: true,
+                };
+            }
         }
 
         if mouse.kind == MouseKind::LeftDown {
@@ -3046,7 +3074,9 @@ fn render_adapters(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -> Op
 
 fn render_adapter_list(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -> Option<Position> {
     let theme = showcase.theme;
-    let panes = InspectorLayout::new(60, 24, 32).split(area);
+    let layout = InspectorLayout::new(60, 24, 32);
+    showcase.hits.adapter_inspector = area;
+    let panes = showcase.adapter_inspector_split.split(layout, area);
     let list_area = panes.master;
     if let Some(divider) = panes.divider {
         for offset in 0..divider.height {
@@ -4087,6 +4117,85 @@ mod tests {
                 (size.width, size.height)
             );
         }
+    }
+
+    #[test]
+    fn adapter_inspector_divider_drag_resizes_without_changing_table_focus_or_selection() {
+        let mut showcase = Showcase::new(Instant::now());
+        showcase.phase = Phase::Showcase;
+        showcase.section = Section::Adapters;
+        showcase.focus.set_focus(TABLE_FOCUS);
+        showcase.adapter_rows = vec![AdapterRow {
+            id: "mock".to_owned(),
+            name: "Inspector Mock".to_owned(),
+            version: "0.1.0".to_owned(),
+            state: AdapterViewState::Stopped,
+            protocol: "1".to_owned(),
+            executable: "adapter-bin".to_owned(),
+            last_error: None,
+        }];
+        showcase.table.set_selected(0);
+        let _ = showcase_view(Size::new(160, 55), &mut showcase);
+        let layout = InspectorLayout::new(60, 24, 32);
+        let area = showcase.hits.adapter_inspector;
+        let divider = showcase
+            .adapter_inspector_split
+            .split(layout, area)
+            .divider
+            .unwrap();
+
+        assert!(
+            !showcase
+                .handle_mouse(MouseEvent {
+                    x: area.x,
+                    y: area.y,
+                    kind: MouseKind::LeftDown,
+                    modifiers: KeyModifiers::default(),
+                })
+                .redraw
+        );
+        assert_eq!(showcase.focus.current(), Some(TABLE_FOCUS));
+        assert_eq!(showcase.table.selected_index(1), Some(0));
+
+        assert!(
+            showcase
+                .handle_mouse(MouseEvent {
+                    x: divider.x,
+                    y: divider.y,
+                    kind: MouseKind::LeftDown,
+                    modifiers: KeyModifiers::default(),
+                })
+                .redraw
+        );
+        assert!(showcase.adapter_inspector_split.is_dragging());
+        assert!(
+            showcase
+                .handle_mouse(MouseEvent {
+                    x: divider.x.saturating_add(12),
+                    y: divider.y,
+                    kind: MouseKind::Drag(dragons_tui::MouseButton::Left),
+                    modifiers: KeyModifiers::default(),
+                })
+                .redraw
+        );
+        let resized = showcase.adapter_inspector_split.split(layout, area);
+        assert_eq!(
+            resized.master.width,
+            divider.x.saturating_sub(area.x).saturating_add(12)
+        );
+        assert_eq!(showcase.focus.current(), Some(TABLE_FOCUS));
+        assert_eq!(showcase.table.selected_index(1), Some(0));
+        assert!(
+            showcase
+                .handle_mouse(MouseEvent {
+                    x: divider.x.saturating_add(12),
+                    y: divider.y,
+                    kind: MouseKind::LeftUp,
+                    modifiers: KeyModifiers::default(),
+                })
+                .redraw
+        );
+        assert!(!showcase.adapter_inspector_split.is_dragging());
     }
 
     #[test]
