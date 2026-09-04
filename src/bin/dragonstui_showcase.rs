@@ -651,6 +651,52 @@ struct LiveHistoryEntry {
     message: LiveDataMessage,
 }
 
+#[derive(Clone, Debug, Default)]
+struct LiveDataFilter {
+    query: String,
+    adapter_id: Option<String>,
+    stream: Option<String>,
+    kind: Option<String>,
+}
+
+impl LiveDataFilter {
+    fn matches(&self, message: &LiveDataMessage) -> bool {
+        let query = self.query.to_lowercase();
+        match message {
+            LiveDataMessage::Event(event) => {
+                self.adapter_id
+                    .as_deref()
+                    .is_none_or(|adapter_id| event.adapter_id.to_string() == adapter_id)
+                    && self
+                        .stream
+                        .as_deref()
+                        .is_none_or(|stream| event.stream == stream)
+                    && self.kind.as_deref().is_none_or(|kind| event.kind == kind)
+                    && (query.is_empty()
+                        || [
+                            event.adapter_id.to_string(),
+                            event.stream.clone(),
+                            event.kind.clone(),
+                            event.payload.to_string(),
+                        ]
+                        .iter()
+                        .any(|value| value.to_lowercase().contains(&query)))
+            }
+            LiveDataMessage::Disconnected(disconnect) => {
+                self.adapter_id
+                    .as_deref()
+                    .is_none_or(|adapter_id| disconnect.adapter_id.to_string() == adapter_id)
+                    && self.stream.is_none()
+                    && self.kind.is_none()
+                    && (query.is_empty()
+                        || [disconnect.adapter_id.to_string(), disconnect.reason.clone()]
+                            .iter()
+                            .any(|value| value.to_lowercase().contains(&query)))
+            }
+        }
+    }
+}
+
 /// Render-owned, globally ordered generic live history. Every entry retains its
 /// protocol provenance; one queue prevents unbounded partition-key growth.
 #[derive(Clone, Debug)]
@@ -681,6 +727,14 @@ impl LiveDataState {
 
     fn retained_messages(&self) -> impl Iterator<Item = &LiveDataMessage> {
         self.history.iter().map(|entry| &entry.message)
+    }
+
+    fn filtered_messages<'a>(
+        &'a self,
+        filter: &'a LiveDataFilter,
+    ) -> impl Iterator<Item = &'a LiveDataMessage> {
+        self.retained_messages()
+            .filter(move |message| filter.matches(message))
     }
 
     fn apply(&mut self, message: LiveDataMessage) {
@@ -824,6 +878,8 @@ struct Showcase {
     adapter_diagnostics_refresh_in_flight: bool,
     last_adapter_diagnostics_refresh: Instant,
     live_data: LiveDataState,
+    live_filter: LiveDataFilter,
+    live_search_input: Option<TextInput>,
     live_data_results: Option<Receiver<LiveDataMessage>>,
     live_data_worker: Option<LiveDataWorker>,
     adapter_action_sender: Option<Sender<AdapterManagementAction>>,
@@ -929,6 +985,8 @@ impl Showcase {
             adapter_diagnostics_refresh_in_flight: false,
             last_adapter_diagnostics_refresh: started,
             live_data: LiveDataState::default(),
+            live_filter: LiveDataFilter::default(),
+            live_search_input: None,
             live_data_results,
             live_data_worker,
             adapter_action_sender,
@@ -1160,7 +1218,24 @@ impl Showcase {
             return self.handle_palette_key(key);
         }
 
+        if self.live_search_input.is_some() {
+            return self.handle_live_search_key(key);
+        }
+
         if self.section == Section::Adapters {
+            if self.adapter_browser_mode == AdapterBrowserMode::Adapters
+                && matches!(key.code, KeyCode::Char('/'))
+            {
+                let mut input = TextInput::new();
+                for character in self.live_filter.query.chars() {
+                    input.insert(character);
+                }
+                self.live_search_input = Some(input);
+                return Outcome {
+                    quit: false,
+                    redraw: true,
+                };
+            }
             if self.adapter_browser_mode == AdapterBrowserMode::Capabilities {
                 if matches!(key.code, KeyCode::Char('c' | 'C') | KeyCode::Escape) {
                     self.adapter_browser_mode = AdapterBrowserMode::Adapters;
@@ -1334,6 +1409,26 @@ impl Showcase {
         Outcome {
             quit: false,
             redraw,
+        }
+    }
+
+    fn handle_live_search_key(&mut self, key: KeyEvent) -> Outcome {
+        match key.code {
+            KeyCode::Escape => self.live_search_input = None,
+            KeyCode::Enter => {
+                if let Some(input) = self.live_search_input.take() {
+                    self.live_filter.query = input.text().to_owned();
+                }
+            }
+            _ => {
+                if let Some(input) = self.live_search_input.as_mut() {
+                    input.handle_key(key);
+                }
+            }
+        }
+        Outcome {
+            quit: false,
+            redraw: true,
         }
     }
 
@@ -2937,7 +3032,18 @@ fn render_adapter_list(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -
     .rows(rows)
     .selected_style(Style::new().fg(theme.success).bg(theme.primary).bold())
     .render(frame, inner, &mut showcase.table);
-    let action_hint = if showcase.adapter_remove_confirmation {
+    let action_hint = if let Some(input) = &showcase.live_search_input {
+        format!(
+            "{}: {} · {}",
+            localized(showcase.language, "Live search", "Canlı arama"),
+            input.text(),
+            localized(
+                showcase.language,
+                "Enter applies · Esc cancels",
+                "Enter uygular · Esc iptal eder"
+            )
+        )
+    } else if showcase.adapter_remove_confirmation {
         localized(
             showcase.language,
             "Remove selected adapter? Enter confirms · Esc cancels",
@@ -2982,6 +3088,7 @@ fn render_adapter_list(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -
                 diagnostics,
                 controller_error: showcase.adapter_controller_error.as_deref(),
                 live_data: &showcase.live_data,
+                live_filter: &showcase.live_filter,
             },
             showcase.language,
             showcase.theme,
@@ -3136,6 +3243,7 @@ struct AdapterInspectorContext<'a> {
     diagnostics: Option<&'a ControllerIpcDiagnostics>,
     controller_error: Option<&'a str>,
     live_data: &'a LiveDataState,
+    live_filter: &'a LiveDataFilter,
 }
 
 fn render_adapter_inspector(
@@ -3149,6 +3257,7 @@ fn render_adapter_inspector(
     let diagnostics = context.diagnostics;
     let controller_error = context.controller_error;
     let live_data = context.live_data;
+    let live_filter = context.live_filter;
     let Some(row) = selected else {
         Text::new(localized(
             language,
@@ -3210,6 +3319,12 @@ fn render_adapter_inspector(
         live_data.retained_messages().count(),
         live_data.history_capacity
     );
+    let visible_live_history = live_data.filtered_messages(live_filter).count();
+    let live_query = if live_filter.query.is_empty() {
+        localized(language, "all", "tümü").to_owned()
+    } else {
+        live_filter.query.clone()
+    };
     let live_stream = live_data
         .latest_event
         .as_ref()
@@ -3276,6 +3391,11 @@ fn render_adapter_inspector(
                 localized(language, "Retained live history", "Tutulan canlı geçmiş")
             ),
         ),
+        (
+            localized(language, "Visible live history", "Görünen canlı geçmiş"),
+            visible_live_history.to_string(),
+        ),
+        (localized(language, "Live query", "Canlı sorgu"), live_query),
         (
             localized(language, "Last live adapter", "Son canlı adaptör"),
             live_adapter,
@@ -4435,6 +4555,84 @@ mod tests {
     }
 
     #[test]
+    fn live_filter_projects_case_insensitive_generic_text_without_mutating_history() {
+        let mut live_data = LiveDataState::with_history_capacity(4);
+        for (adapter, stream, kind, payload) in [
+            (
+                "adapter-a",
+                "alpha",
+                "notice",
+                r#"{"message":"Dragonfire"}"#,
+            ),
+            ("adapter-b", "beta", "notice", r#"{"message":"other"}"#),
+        ] {
+            live_data.apply(LiveDataMessage::Event(AdapterEvent {
+                adapter_id: AdapterId::new(adapter).unwrap(),
+                stream: stream.to_owned(),
+                kind: kind.to_owned(),
+                payload: payload.parse().unwrap(),
+            }));
+        }
+        let history_len_before = live_data.history.len();
+
+        let filter = LiveDataFilter {
+            query: "DRAGON".to_owned(),
+            ..LiveDataFilter::default()
+        };
+        let visible = live_data.filtered_messages(&filter).collect::<Vec<_>>();
+
+        assert_eq!(visible.len(), 1);
+        assert!(matches!(
+            visible[0],
+            LiveDataMessage::Event(AdapterEvent { adapter_id, stream, kind, .. })
+                if *adapter_id == AdapterId::new("adapter-a").unwrap()
+                    && stream == "alpha"
+                    && kind == "notice"
+        ));
+        assert_eq!(live_data.history.len(), history_len_before);
+        assert!(matches!(
+            &live_data.history[0].message,
+            LiveDataMessage::Event(AdapterEvent { payload, .. }) if payload["message"] == "Dragonfire"
+        ));
+    }
+
+    #[test]
+    fn adapter_live_search_uses_slash_and_renders_the_generic_visible_projection() {
+        let mut showcase = Showcase::new(Instant::now());
+        showcase.phase = Phase::Showcase;
+        showcase.select_section(Section::Adapters);
+        showcase.adapter_rows = vec![AdapterRow {
+            id: "adapter-a".to_owned(),
+            name: "Adapter A".to_owned(),
+            version: "1.0.0".to_owned(),
+            state: AdapterViewState::Stopped,
+            protocol: "1".to_owned(),
+            executable: "adapter-a".to_owned(),
+            last_error: None,
+        }];
+        for payload in [r#"{"message":"dragon"}"#, r#"{"message":"other"}"#] {
+            showcase
+                .live_data
+                .apply(LiveDataMessage::Event(AdapterEvent {
+                    adapter_id: AdapterId::new("adapter-a").unwrap(),
+                    stream: "alpha".to_owned(),
+                    kind: "notice".to_owned(),
+                    payload: payload.parse().unwrap(),
+                }));
+        }
+
+        assert!(showcase.handle_key(key(KeyCode::Char('/'))).redraw);
+        for character in "DRAGON".chars() {
+            assert!(showcase.handle_key(key(KeyCode::Char(character))).redraw);
+        }
+        assert!(showcase.handle_key(key(KeyCode::Enter)).redraw);
+        assert_eq!(showcase.live_filter.query, "DRAGON");
+        let view = showcase_view(Size::new(160, 55), &mut showcase);
+        assert!(frame_contains(&view.frame, "Visible live history: 1"));
+        assert!(frame_contains(&view.frame, "Live query: DRAGON"));
+    }
+
+    #[test]
     fn showcase_applies_live_data_on_tick_without_blocking_input() {
         let (sender, receiver) = mpsc::sync_channel(8);
         let mut showcase = Showcase::new(Instant::now());
@@ -4532,6 +4730,52 @@ mod tests {
 
         let view = showcase_view(Size::new(160, 55), &mut showcase);
         assert!(frame_contains(&view.frame, "Retained live history: 2/16"));
+    }
+
+    #[test]
+    fn live_filter_combines_identity_dimensions_and_never_keeps_evicted_entries() {
+        let mut live_data = LiveDataState::with_history_capacity(2);
+        let filter = LiveDataFilter {
+            adapter_id: Some("adapter-a".to_owned()),
+            stream: Some("telemetry".to_owned()),
+            kind: Some("sample".to_owned()),
+            query: "match".to_owned(),
+        };
+        let event = |adapter: &str, stream: &str, kind: &str, payload: &str| {
+            LiveDataMessage::Event(AdapterEvent {
+                adapter_id: AdapterId::new(adapter).unwrap(),
+                stream: stream.to_owned(),
+                kind: kind.to_owned(),
+                payload: format!(r#"{{"message":"{payload}"}}"#).parse().unwrap(),
+            })
+        };
+
+        live_data.apply(event("adapter-a", "telemetry", "sample", "match-old"));
+        live_data.apply(event(
+            "adapter-b",
+            "telemetry",
+            "sample",
+            "match-other-adapter",
+        ));
+        assert_eq!(live_data.filtered_messages(&filter).count(), 1);
+
+        live_data.apply(event("adapter-a", "other", "sample", "match-other-stream"));
+        assert_eq!(live_data.filtered_messages(&filter).count(), 0);
+
+        live_data.apply(event("adapter-a", "telemetry", "sample", "match-new"));
+        let visible = live_data.filtered_messages(&filter).collect::<Vec<_>>();
+        assert_eq!(visible.len(), 1);
+        assert!(matches!(
+            visible[0],
+            LiveDataMessage::Event(AdapterEvent { payload, .. })
+                if payload.to_string().contains("match-new")
+        ));
+
+        let no_match = LiveDataFilter {
+            query: "absent".to_owned(),
+            ..LiveDataFilter::default()
+        };
+        assert_eq!(live_data.filtered_messages(&no_match).count(), 0);
     }
 
     #[test]
