@@ -1,4 +1,4 @@
-use crate::{Frame, Rect, Style, ViewportState};
+use crate::{Frame, Rect, Scrollbar, ScrollbarGeometry, Style, ViewportState};
 
 /// Producer-supplied semantics for one unified-diff row.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -217,6 +217,31 @@ impl<'a> DiffViewer<'a> {
                 styles.line_style(line.kind),
             );
         }
+    }
+
+    /// Renders the document while reserving its final column for the shared vertical scrollbar.
+    pub fn render_with_scrollbar(
+        &self,
+        frame: &mut Frame,
+        rect: Rect,
+        viewport: &mut ViewportState,
+        styles: DiffStyles,
+        track_style: Style,
+        thumb_style: Style,
+    ) -> Option<ScrollbarGeometry> {
+        if rect.width == 0 {
+            self.render(frame, rect, viewport, styles);
+            return None;
+        }
+        let content = Rect::new(rect.x, rect.y, rect.width.saturating_sub(1), rect.height);
+        self.render(frame, content, viewport, styles);
+        let track = Rect::new(
+            rect.x.saturating_add(rect.width.saturating_sub(1)),
+            rect.y,
+            1,
+            rect.height,
+        );
+        Scrollbar::render(frame, viewport, track, track_style, thumb_style)
     }
 }
 

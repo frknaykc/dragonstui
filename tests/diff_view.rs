@@ -84,3 +84,29 @@ fn empty_and_malformed_diffs_remain_unambiguous_and_render_safely() {
         .collect::<String>();
     assert!(rendered.starts_with("(empty diff)"));
 }
+
+#[test]
+fn diff_viewer_reuses_the_scrollbar_for_overflowing_documents() {
+    let diff = DiffDocument::parse_unified("@@ -1,3 +1,3 @@\n one\n-two\n+two\n three\n");
+    let styles = DiffStyles {
+        header: Style::new(),
+        hunk: Style::new(),
+        context: Style::new(),
+        added: Style::new(),
+        deleted: Style::new(),
+        gutter: Style::new(),
+    };
+    let mut viewport = ViewportState::new();
+    let mut frame = Frame::new(12, 2);
+
+    let geometry = DiffViewer::new(&diff).render_with_scrollbar(
+        &mut frame,
+        Rect::new(0, 0, 12, 2),
+        &mut viewport,
+        styles,
+        Style::new(),
+        Style::new(),
+    );
+
+    assert_eq!(geometry.unwrap().track, Rect::new(11, 0, 1, 2));
+}
