@@ -23,6 +23,7 @@ mod event;
 mod focus;
 mod frame;
 mod geometry;
+mod inspector;
 mod keymap;
 mod layout;
 mod list;
@@ -53,6 +54,7 @@ pub use event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 pub use focus::{FocusId, FocusState};
 pub use frame::Frame;
 pub use geometry::{Position, Rect, Size, split_horizontal, split_vertical};
+pub use inspector::{InspectorAreas, InspectorLayout};
 pub use keymap::{CommandId, KeyBinding, KeyMap};
 pub use layout::{Constraint, Direction, Layout};
 pub use list::{List, ListState};

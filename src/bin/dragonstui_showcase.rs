@@ -24,11 +24,11 @@ use crossterm::{
 };
 use dragons_tui::{
     Alignment, Animation, BorderSet, Canvas, Cell, Color, CommandId, CommandPalette, Constraint,
-    Event, FocusId, FocusState, Frame, Gauge, KeyCode, KeyEvent, KeyMap, KeyModifiers, Line, List,
-    ListState, Modal, MouseEvent, MouseKind, PaletteCommand, Panel, Position, ProgressBar, Rect,
-    RichText, Runtime, ShutdownSignal, Size, Span, Sparkline, Spinner, Style, Table, TableColumn,
-    TableState, Text, TextArea, TextInput, Theme, Tree, TreeNode, TreeState, Viewport,
-    ViewportState, display_width, is_quit_key, terminal_size,
+    Event, FocusId, FocusState, Frame, Gauge, InspectorLayout, KeyCode, KeyEvent, KeyMap,
+    KeyModifiers, Line, List, ListState, Modal, MouseEvent, MouseKind, PaletteCommand, Panel,
+    Position, ProgressBar, Rect, RichText, Runtime, ShutdownSignal, Size, Span, Sparkline, Spinner,
+    Style, Table, TableColumn, TableState, Text, TextArea, TextInput, Theme, Tree, TreeNode,
+    TreeState, Viewport, ViewportState, display_width, is_quit_key, terminal_size,
 };
 use dragonstui_adapter_host::{
     AdapterClassification, AdapterDisconnect, AdapterEvent, AdapterId, AdapterLiveData,
@@ -3046,16 +3046,17 @@ fn render_adapters(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -> Op
 
 fn render_adapter_list(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -> Option<Position> {
     let theme = showcase.theme;
-    let panes = if area.width >= 100 && area.height >= 12 {
-        dragons_tui::Layout::horizontal(vec![Constraint::Fill(3), Constraint::Fill(2)])
-            .gap(1)
-            .split(area)
-    } else {
-        dragons_tui::Layout::vertical(vec![Constraint::Fill(1), Constraint::Fill(1)])
-            .gap(1)
-            .split(area)
-    };
-    let list_area = panes.first().copied()?;
+    let panes = InspectorLayout::new(60, 24, 32).split(area);
+    let list_area = panes.master;
+    if let Some(divider) = panes.divider {
+        for offset in 0..divider.height {
+            frame.set_cell(
+                divider.x,
+                divider.y.saturating_add(offset),
+                Cell::new('│', Style::new().fg(theme.muted).bg(theme.background)),
+            );
+        }
+    }
     let inner = panel(
         frame,
         list_area,
@@ -3150,35 +3151,33 @@ fn render_adapter_list(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -
             frame,
             Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
         );
-    if let Some(detail_area) = panes.get(1).copied() {
-        let detail = panel(
-            frame,
-            detail_area,
-            localized(showcase.language, "Adapter Inspector", "Adaptör İnceleyici"),
-            false,
-            theme,
-            BorderSet::rounded(),
-        );
-        let selected = showcase
-            .table
-            .selected_index(showcase.adapter_rows.len())
-            .and_then(|index| showcase.adapter_rows.get(index));
-        let diagnostics = selected.and_then(|row| showcase.adapter_diagnostics.get(&row.id));
-        render_adapter_inspector(
-            frame,
-            detail,
-            selected,
-            AdapterInspectorContext {
-                diagnostics,
-                controller_error: showcase.adapter_controller_error.as_deref(),
-                live_data: &showcase.live_data,
-                live_filter: &showcase.live_filter,
-                live_view: &showcase.live_view,
-            },
-            showcase.language,
-            showcase.theme,
-        );
-    }
+    let detail = panel(
+        frame,
+        panes.detail,
+        localized(showcase.language, "Adapter Inspector", "Adaptör İnceleyici"),
+        false,
+        theme,
+        BorderSet::rounded(),
+    );
+    let selected = showcase
+        .table
+        .selected_index(showcase.adapter_rows.len())
+        .and_then(|index| showcase.adapter_rows.get(index));
+    let diagnostics = selected.and_then(|row| showcase.adapter_diagnostics.get(&row.id));
+    render_adapter_inspector(
+        frame,
+        detail,
+        selected,
+        AdapterInspectorContext {
+            diagnostics,
+            controller_error: showcase.adapter_controller_error.as_deref(),
+            live_data: &showcase.live_data,
+            live_filter: &showcase.live_filter,
+            live_view: &showcase.live_view,
+        },
+        showcase.language,
+        showcase.theme,
+    );
     None
 }
 
