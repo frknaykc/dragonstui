@@ -565,6 +565,33 @@ def main() -> int:
             send(master, output, b"\x1b")
             wait_for_text(master, output, "Adapter Inspector", 1.0, "structured payload browser did not return")
 
+            # M53–M58: one authenticated semantic fixture is sufficient to prove
+            # that every contextual observability surface routes only its declared
+            # Observation variant through the real PTY. Edge ordering/grouping and
+            # eviction cases remain deterministic Rust regressions.
+            send(master, output, b"o")
+            wait_for_text(master, output, "Observability · Logs", 1.0, "log viewer did not open")
+            wait_for_text(master, output, "fixture log", 1.0, "semantic Log was not visible")
+            send(master, output, b"2")
+            wait_for_text(master, output, "Observability · Metrics", 1.0, "metric graph did not open")
+            wait_for_text(master, output, "fixture.value", 1.0, "semantic Metric series was not visible")
+            send(master, output, b"3")
+            wait_for_text(master, output, "Observability · Heatmap", 1.0, "heatmap did not open")
+            send(master, output, b"4")
+            wait_for_text(master, output, "Observability · Status", 1.0, "status matrix did not open")
+            wait_for_text(master, output, "fixture-entity", 1.0, "semantic Status was not visible")
+            send(master, output, b"5")
+            wait_for_text(master, output, "Observability · Timeline", 1.0, "timeline did not open")
+            wait_for_text(master, output, "fixture event", 1.0, "semantic Event was not visible")
+            send(master, output, b"6")
+            wait_for_text(master, output, "Observability · Errors", 1.0, "error viewer did not open")
+            wait_for_text(master, output, "fixture.error", 1.0, "semantic Error group was not visible")
+            wait_for_text(master, output, "frame one", 1.0, "semantic Error stack was not visible")
+            send(master, output, b"1")
+            wait_for_text(master, output, "fixture log", 1.0, "log viewer did not survive cross-view navigation")
+            send(master, output, b"o")
+            wait_for_text(master, output, "Adapter Inspector", 1.0, "log viewer did not return to adapters")
+
             # M45–M47: the existing stress fixture emits more than the bounded
             # UI handoff accepts. Two independently started streams plus the
             # initial semantic fixture fill the retained 16-entry history, evict the

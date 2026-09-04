@@ -39,7 +39,7 @@ An event's `kind` remains an opaque producer label used for generic routing and 
 
 Metric `value` is a `serde_json::Number`, so valid wire values are JSON numbers and `null`, strings, `NaN`, and infinities are rejected rather than coerced. `stack` is a vector of producer textual lines; the protocol does not parse language-specific frames. `signature` is optional producer context for a future grouping projection and does not perform grouping itself.
 
-There is no `heatmap` or `timeline` wire type. A future heatmap can project named numeric metric samples (or adapter-defined numeric context) into a grid, and a future timeline can order any typed observation by producer timestamp when available or by retained sequence otherwise. This keeps protocol semantics about observations rather than widgets.
+There is no `heatmap` or `timeline` wire type. The M53–M58 showcase projects named Metric samples into a bounded generic heatmap and projects explicit Event observations into its Timeline. Timeline orders timestamped Event observations by producer timestamp (stable retained sequence breaks ties); entries without a timestamp follow in retained arrival order. This keeps protocol semantics about observations rather than widgets.
 
 ### Compatibility and versioning
 
@@ -47,7 +47,7 @@ There is no `heatmap` or `timeline` wire type. A future heatmap can project name
 
 The current serde policy ignores unknown additive fields within a recognized observation, but rejects an unknown `observation.type` cleanly as malformed protocol input. Older v1 hosts use the same tolerant unknown-field behavior and therefore ignore the new optional `observation` field while retaining their existing event fields. No capability negotiation or new endpoint is required.
 
-The semantic contract enables future M53 Log, M54 metric graph, M55 heatmap-from-metrics, M56 status matrix, M57 chronological timeline, and M58 error/stack projections. Those views are not implemented by this protocol change.
+The semantic contract backs M53 Log, M54 metric graph, M55 heatmap-from-metrics, M56 status matrix, M57 chronological Timeline, and M58 error/stack projections. All are derived from the showcase's bounded retained history: Error grouping prefers `signature`, falls back to `message`, and its count/first/last values may decrease when retained source entries are evicted.
 
 ## Identifiers
 

@@ -31,6 +31,7 @@ There is no retained component tree, virtual DOM, automatic event bubbling, or f
 - Provider-neutral adapter registry metadata and SHA-256-verified, atomically staged installation.
 - Authenticated local controller daemon with typed management IPC for runtime start, stop, restart, and diagnostics.
 - An optional adapter-aware showcase that keeps core framework consumers free of adapter-management dependencies.
+- Generic semantic observability projections for producer-declared Logs, Metrics, Status, Events, and Errors.
 
 ## Screenshots
 
@@ -118,10 +119,10 @@ DragonsTUI is under active development and remains pre-1.0. The core framework a
 | Distribution and management | Complete (M35–M43) |
 | Generic live data | Complete (M44–M47) |
 | Generic inspector UX | Complete (M48–M52) |
-| Observability | In progress — semantic contract complete; M53 not started |
+| Observability | Complete (M53–M58) |
 | SDK and conformance tooling | Planned |
 
-Adapter distribution and management now includes registry/install/update/remove integrity boundaries, CLI and TUI management, typed authenticated controller IPC, per-adapter lifecycle conflict protection, real PTY acceptance, and M43 capability discovery. Generic live data transports adapter events away from the UI thread into bounded retained history, derives opaque text and identity filters, and supports pause/follow selection without stopping ingestion. Generic Inspector UX provides reusable layout, viewport, property, and structured-data primitives. The adapter protocol additionally accepts optional capability-neutral observation metadata for future log, metric, status, timeline, and error projections while preserving legacy opaque events. These are foundations only: M53–M58 observability views and M59 capability actions are not implemented.
+Adapter distribution and management includes registry/install/update/remove integrity boundaries, CLI and TUI management, typed authenticated controller IPC, per-adapter lifecycle conflict protection, real PTY acceptance, and M43 capability discovery. Generic live data transports adapter events away from the UI thread into bounded retained history, derives opaque text and identity filters, and supports pause/follow selection without stopping ingestion. Generic Inspector UX provides reusable layout, viewport, property, and structured-data primitives. The optional showcase projects only producer-declared `Observation` variants into a Log Viewer, time-series graph, heatmap, status matrix, Timeline, and Error/Stack Trace view; it never derives those classes from arbitrary payload JSON, stream, or `kind` text. Each projection is rebuilt from the retained 16-entry live history, so it does not create an unbounded telemetry store. M59 capability actions are not implemented.
 
 ## Development
 
