@@ -116,10 +116,10 @@ DragonsTUI is under active development and remains pre-1.0. The core framework a
 | Framework foundation | Complete |
 | Adapter host foundation | Complete |
 | Distribution and management | Complete (M35–M43) |
-| Live data and observability | Planned |
+| Generic live data | Complete (M44–M47) |
 | SDK and conformance tooling | Planned |
 
-Adapter distribution and management now includes registry/install/update/remove integrity boundaries, CLI and TUI management, typed authenticated controller IPC, per-adapter lifecycle conflict protection, real PTY acceptance, and M43 capability discovery. Capability browsing derives only from live daemon diagnostics: it answers which adapters currently report an opaque capability without claiming that stopped, declared-only, or unobserved adapters can provide it. The next phase is generic live data, beginning with M44.
+Adapter distribution and management now includes registry/install/update/remove integrity boundaries, CLI and TUI management, typed authenticated controller IPC, per-adapter lifecycle conflict protection, real PTY acceptance, and M43 capability discovery. Capability browsing derives only from live daemon diagnostics: it answers which adapters currently report an opaque capability without claiming that stopped, declared-only, or unobserved adapters can provide it. Generic live data now transports adapter events away from the UI thread into bounded retained history, derives opaque text and identity filters, and supports pause/follow selection without stopping ingestion. It is infrastructure only: there is no log, metric, graph, or domain-specific viewer. The next phase is Generic Inspector UX, beginning with M48 Inspector Layout.
 
 ## Development
 

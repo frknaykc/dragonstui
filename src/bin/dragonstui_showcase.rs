@@ -648,7 +648,55 @@ enum LiveDataMessage {
 
 #[derive(Clone, Debug)]
 struct LiveHistoryEntry {
+    sequence: u64,
     message: LiveDataMessage,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum LiveFollowMode {
+    #[default]
+    Follow,
+    Paused,
+}
+
+#[derive(Clone, Debug, Default)]
+struct LiveViewState {
+    mode: LiveFollowMode,
+    selected_sequence: Option<u64>,
+}
+
+impl LiveViewState {
+    fn pause(&mut self) {
+        self.mode = LiveFollowMode::Paused;
+    }
+
+    fn follow(&mut self, live_data: &LiveDataState, filter: &LiveDataFilter) {
+        self.mode = LiveFollowMode::Follow;
+        self.reconcile(live_data, filter);
+    }
+
+    fn reconcile(&mut self, live_data: &LiveDataState, filter: &LiveDataFilter) {
+        let visible = live_data.filtered_entries(filter).collect::<Vec<_>>();
+        if self.mode == LiveFollowMode::Follow
+            || !visible
+                .iter()
+                .any(|entry| Some(entry.sequence) == self.selected_sequence)
+        {
+            self.selected_sequence = visible.last().map(|entry| entry.sequence);
+        }
+    }
+
+    fn selected_message<'a>(
+        &self,
+        live_data: &'a LiveDataState,
+        filter: &'a LiveDataFilter,
+    ) -> Option<&'a LiveDataMessage> {
+        let selected_sequence = self.selected_sequence?;
+        live_data
+            .filtered_entries(filter)
+            .find(|entry| entry.sequence == selected_sequence)
+            .map(|entry| &entry.message)
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -702,6 +750,7 @@ impl LiveDataFilter {
 #[derive(Clone, Debug)]
 struct LiveDataState {
     received_count: usize,
+    next_sequence: u64,
     latest_event: Option<AdapterEvent>,
     latest_disconnect: Option<AdapterDisconnect>,
     history_capacity: usize,
@@ -718,6 +767,7 @@ impl LiveDataState {
     fn with_history_capacity(history_capacity: usize) -> Self {
         Self {
             received_count: 0,
+            next_sequence: 0,
             latest_event: None,
             latest_disconnect: None,
             history_capacity,
@@ -729,12 +779,20 @@ impl LiveDataState {
         self.history.iter().map(|entry| &entry.message)
     }
 
+    fn filtered_entries<'a>(
+        &'a self,
+        filter: &'a LiveDataFilter,
+    ) -> impl Iterator<Item = &'a LiveHistoryEntry> {
+        self.history
+            .iter()
+            .filter(move |entry| filter.matches(&entry.message))
+    }
+
     fn filtered_messages<'a>(
         &'a self,
         filter: &'a LiveDataFilter,
     ) -> impl Iterator<Item = &'a LiveDataMessage> {
-        self.retained_messages()
-            .filter(move |message| filter.matches(message))
+        self.filtered_entries(filter).map(|entry| &entry.message)
     }
 
     fn apply(&mut self, message: LiveDataMessage) {
@@ -744,9 +802,11 @@ impl LiveDataState {
                 self.history.pop_front();
             }
             self.history.push_back(LiveHistoryEntry {
+                sequence: self.next_sequence,
                 message: message.clone(),
             });
         }
+        self.next_sequence = self.next_sequence.saturating_add(1);
         match message {
             LiveDataMessage::Event(event) => self.latest_event = Some(event),
             LiveDataMessage::Disconnected(disconnect) => {
@@ -879,6 +939,7 @@ struct Showcase {
     last_adapter_diagnostics_refresh: Instant,
     live_data: LiveDataState,
     live_filter: LiveDataFilter,
+    live_view: LiveViewState,
     live_search_input: Option<TextInput>,
     live_data_results: Option<Receiver<LiveDataMessage>>,
     live_data_worker: Option<LiveDataWorker>,
@@ -986,6 +1047,7 @@ impl Showcase {
             last_adapter_diagnostics_refresh: started,
             live_data: LiveDataState::default(),
             live_filter: LiveDataFilter::default(),
+            live_view: LiveViewState::default(),
             live_search_input: None,
             live_data_results,
             live_data_worker,
@@ -1094,6 +1156,7 @@ impl Showcase {
         let mut changed = false;
         while let Ok(message) = results.try_recv() {
             self.live_data.apply(message);
+            self.live_view.reconcile(&self.live_data, &self.live_filter);
             changed = true;
         }
         changed
@@ -1235,6 +1298,26 @@ impl Showcase {
                     quit: false,
                     redraw: true,
                 };
+            }
+            if self.adapter_browser_mode == AdapterBrowserMode::Adapters {
+                match key.code {
+                    KeyCode::Char('p' | 'P') => {
+                        self.live_view.reconcile(&self.live_data, &self.live_filter);
+                        self.live_view.pause();
+                        return Outcome {
+                            quit: false,
+                            redraw: true,
+                        };
+                    }
+                    KeyCode::Char('f' | 'F') => {
+                        self.live_view.follow(&self.live_data, &self.live_filter);
+                        return Outcome {
+                            quit: false,
+                            redraw: true,
+                        };
+                    }
+                    _ => {}
+                }
             }
             if self.adapter_browser_mode == AdapterBrowserMode::Capabilities {
                 if matches!(key.code, KeyCode::Char('c' | 'C') | KeyCode::Escape) {
@@ -1418,6 +1501,7 @@ impl Showcase {
             KeyCode::Enter => {
                 if let Some(input) = self.live_search_input.take() {
                     self.live_filter.query = input.text().to_owned();
+                    self.live_view.reconcile(&self.live_data, &self.live_filter);
                 }
             }
             _ => {
@@ -3054,8 +3138,8 @@ fn render_adapter_list(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -
         showcase.adapter_action_status.clone().unwrap_or_else(|| {
             localized(
                 showcase.language,
-                "C capabilities · I install · S start · T stop · R restart · U update · X remove",
-                "C yetenekler · I kur · S başlat · T durdur · R yeniden başlat · U güncelle · X kaldır",
+                "C capabilities · I install · S start · T stop · R restart · U update · X remove · / search · P pause · F follow",
+                "C yetenekler · I kur · S başlat · T durdur · R yeniden başlat · U güncelle · X kaldır · / ara · P duraklat · F takip",
             )
             .to_owned()
         })
@@ -3089,6 +3173,7 @@ fn render_adapter_list(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -
                 controller_error: showcase.adapter_controller_error.as_deref(),
                 live_data: &showcase.live_data,
                 live_filter: &showcase.live_filter,
+                live_view: &showcase.live_view,
             },
             showcase.language,
             showcase.theme,
@@ -3244,6 +3329,7 @@ struct AdapterInspectorContext<'a> {
     controller_error: Option<&'a str>,
     live_data: &'a LiveDataState,
     live_filter: &'a LiveDataFilter,
+    live_view: &'a LiveViewState,
 }
 
 fn render_adapter_inspector(
@@ -3258,6 +3344,7 @@ fn render_adapter_inspector(
     let controller_error = context.controller_error;
     let live_data = context.live_data;
     let live_filter = context.live_filter;
+    let live_view = context.live_view;
     let Some(row) = selected else {
         Text::new(localized(
             language,
@@ -3325,6 +3412,25 @@ fn render_adapter_inspector(
     } else {
         live_filter.query.clone()
     };
+    let live_follow = match live_view.mode {
+        LiveFollowMode::Follow => localized(language, "FOLLOW", "TAKİP"),
+        LiveFollowMode::Paused => localized(language, "PAUSED", "DURAKLATILDI"),
+    }
+    .to_owned();
+    let selected_live = live_view
+        .selected_message(live_data, live_filter)
+        .map(|message| match message {
+            LiveDataMessage::Event(event) => {
+                format!(
+                    "{} · {} · {} · {}",
+                    event.adapter_id, event.stream, event.kind, event.payload
+                )
+            }
+            LiveDataMessage::Disconnected(disconnect) => {
+                format!("{} · {}", disconnect.adapter_id, disconnect.reason)
+            }
+        })
+        .unwrap_or_else(|| unavailable.clone());
     let live_stream = live_data
         .latest_event
         .as_ref()
@@ -3396,6 +3502,14 @@ fn render_adapter_inspector(
             visible_live_history.to_string(),
         ),
         (localized(language, "Live query", "Canlı sorgu"), live_query),
+        (
+            localized(language, "Live view", "Canlı görünüm"),
+            live_follow,
+        ),
+        (
+            localized(language, "Visible selection", "Görünen seçim"),
+            selected_live,
+        ),
         (
             localized(language, "Last live adapter", "Son canlı adaptör"),
             live_adapter,
@@ -4776,6 +4890,128 @@ mod tests {
             ..LiveDataFilter::default()
         };
         assert_eq!(live_data.filtered_messages(&no_match).count(), 0);
+    }
+
+    #[test]
+    fn live_view_follow_pause_and_resume_keep_ingestion_separate_from_selection() {
+        let mut live_data = LiveDataState::with_history_capacity(3);
+        let filter = LiveDataFilter::default();
+        let mut view = LiveViewState::default();
+        let event = |sequence| {
+            LiveDataMessage::Event(AdapterEvent {
+                adapter_id: AdapterId::new("adapter-a").unwrap(),
+                stream: "telemetry".to_owned(),
+                kind: "sample".to_owned(),
+                payload: format!(r#"{{"sequence":{sequence}}}"#).parse().unwrap(),
+            })
+        };
+
+        live_data.apply(event(1));
+        view.reconcile(&live_data, &filter);
+        assert_eq!(view.mode, LiveFollowMode::Follow);
+        assert!(view.selected_message(&live_data, &filter).is_some_and(|message| {
+            matches!(message, LiveDataMessage::Event(AdapterEvent { payload, .. }) if payload.to_string().contains('1'))
+        }));
+
+        view.pause();
+        live_data.apply(event(2));
+        view.reconcile(&live_data, &filter);
+        assert!(view.selected_message(&live_data, &filter).is_some_and(|message| {
+            matches!(message, LiveDataMessage::Event(AdapterEvent { payload, .. }) if payload.to_string().contains('1'))
+        }));
+        assert_eq!(live_data.retained_messages().count(), 2);
+
+        view.follow(&live_data, &filter);
+        assert!(view.selected_message(&live_data, &filter).is_some_and(|message| {
+            matches!(message, LiveDataMessage::Event(AdapterEvent { payload, .. }) if payload.to_string().contains('2'))
+        }));
+    }
+
+    #[test]
+    fn paused_live_view_recovers_safely_when_filters_or_eviction_remove_its_selection() {
+        let mut live_data = LiveDataState::with_history_capacity(2);
+        let mut filter = LiveDataFilter::default();
+        let mut view = LiveViewState::default();
+        let event = |sequence| {
+            LiveDataMessage::Event(AdapterEvent {
+                adapter_id: AdapterId::new("adapter-a").unwrap(),
+                stream: "telemetry".to_owned(),
+                kind: "sample".to_owned(),
+                payload: format!(r#"{{"sequence":{sequence}}}"#).parse().unwrap(),
+            })
+        };
+
+        live_data.apply(event(1));
+        view.reconcile(&live_data, &filter);
+        view.pause();
+        live_data.apply(event(2));
+        view.reconcile(&live_data, &filter);
+        live_data.apply(event(3));
+        view.reconcile(&live_data, &filter);
+        assert!(view.selected_message(&live_data, &filter).is_some_and(|message| {
+            matches!(message, LiveDataMessage::Event(AdapterEvent { payload, .. }) if payload.to_string().contains('3'))
+        }));
+
+        filter.query = "2".to_owned();
+        view.reconcile(&live_data, &filter);
+        assert!(view.selected_message(&live_data, &filter).is_some_and(|message| {
+            matches!(message, LiveDataMessage::Event(AdapterEvent { payload, .. }) if payload.to_string().contains('2'))
+        }));
+
+        filter.query = "absent".to_owned();
+        view.reconcile(&live_data, &filter);
+        assert!(view.selected_message(&live_data, &filter).is_none());
+    }
+
+    #[test]
+    fn adapter_live_view_keys_pause_and_follow_the_rendered_selection() {
+        let mut showcase = Showcase::new(Instant::now());
+        showcase.phase = Phase::Showcase;
+        showcase.select_section(Section::Adapters);
+        showcase.adapter_rows = vec![AdapterRow {
+            id: "adapter-a".to_owned(),
+            name: "Adapter A".to_owned(),
+            version: "1.0.0".to_owned(),
+            state: AdapterViewState::Stopped,
+            protocol: "1".to_owned(),
+            executable: "adapter-a".to_owned(),
+            last_error: None,
+        }];
+        let (sender, receiver) = mpsc::channel();
+        showcase.live_data_results = Some(receiver);
+        for sequence in 1..=2 {
+            sender
+                .send(LiveDataMessage::Event(AdapterEvent {
+                    adapter_id: AdapterId::new("adapter-a").unwrap(),
+                    stream: "telemetry".to_owned(),
+                    kind: "sample".to_owned(),
+                    payload: format!(r#"{{"sequence":{sequence}}}"#).parse().unwrap(),
+                }))
+                .unwrap();
+            assert!(showcase.advance(Instant::now()));
+            if sequence == 1 {
+                showcase.handle_key(key(KeyCode::Char('p')));
+            }
+        }
+        assert_eq!(showcase.live_view.mode, LiveFollowMode::Paused);
+        assert!(showcase
+            .live_view
+            .selected_message(&showcase.live_data, &showcase.live_filter)
+            .is_some_and(|message| {
+                matches!(message, LiveDataMessage::Event(AdapterEvent { payload, .. }) if payload.to_string().contains('1'))
+            }));
+        let paused = showcase_view(Size::new(160, 55), &mut showcase);
+        assert!(frame_contains(&paused.frame, "Live view: PAUSED"));
+
+        showcase.handle_key(key(KeyCode::Char('f')));
+        assert!(showcase
+            .live_view
+            .selected_message(&showcase.live_data, &showcase.live_filter)
+            .is_some_and(|message| {
+                matches!(message, LiveDataMessage::Event(AdapterEvent { payload, .. }) if payload.to_string().contains('2'))
+            }));
+        let follow = showcase_view(Size::new(160, 55), &mut showcase);
+        assert!(frame_contains(&follow.frame, "Live view: FOLLOW"));
     }
 
     #[test]

@@ -348,6 +348,8 @@ def setup_m42_fixture(controller_binary: Path, mock_binary: Path) -> tuple[tempf
     write_mock_adapter(root, mock_binary, "capability-a", "shared-capabilities")
     write_mock_adapter(root, mock_binary, "capability-b", "shared-capabilities")
     write_mock_adapter(root, mock_binary, "live-a", "live-events")
+    write_mock_adapter(root, mock_binary, "stress-a", "stress-events")
+    write_mock_adapter(root, mock_binary, "stress-b", "stress-events")
     daemon = subprocess.Popen(
         [str(controller_binary), "--root", str(root), "controller-daemon"],
         env={**os.environ, "DRAGONSTUI_CONTROLLER_TOKEN": secrets.token_hex(32)},
@@ -526,6 +528,33 @@ def main() -> int:
             wait_for_text(master, output, "Static benchmark context", 1.0, "input stalled while live worker was active")
             send(master, output, b"8")
             wait_for_text(master, output, "Adapter Inspector", 1.0, "adapter inspector did not remain responsive")
+
+            # M45–M47: the existing stress fixture emits more than the bounded
+            # UI handoff accepts. Two independently started streams plus the
+            # initial live event fill the retained 16-entry history, evict the
+            # oldest entry, and prove that pause affects only the selection.
+            send(master, output, b"\t" * 4)
+            send(master, output, b"\x1b[B")
+            wait_for_text(master, output, "Adapter ID: stress-a", 1.0, "table focus did not select stress-a")
+            send(master, output, b"s")
+            wait_for_text(master, output, "Live events received: 9", 3.0, "first stress burst did not fill bounded history")
+            wait_for_text(master, output, "Retained live history: 9/16", 1.0, "first stress burst did not update retained history")
+            send(master, output, b"p")
+            wait_for_text(master, output, "Live view: PAUSED", 1.0, "P did not pause generic live follow state")
+            wait_for_text(master, output, "Visible selection: stress-a", 1.0, "pause did not preserve the first stress selection")
+
+            send(master, output, b"\x1b[B")
+            wait_for_text(master, output, "Adapter ID: stress-b", 1.0, "table focus did not select stress-b")
+            send(master, output, b"s")
+            wait_for_text(master, output, "Live events received: 17", 3.0, "second stress burst did not continue ingestion while paused")
+            wait_for_text(master, output, "Retained live history: 16/16", 1.0, "retained history did not evict at capacity")
+            wait_for_text(master, output, "Visible selection: stress-a", 1.0, "paused view jumped to the new live tail")
+
+            send(master, output, b"/stress-b\r")
+            wait_for_text(master, output, "Live query: stress-b", 1.0, "slash search did not apply the generic query")
+            send(master, output, b"f")
+            wait_for_text(master, output, "Live view: FOLLOW", 1.0, "F did not resume generic live follow state")
+            wait_for_text(master, output, "Visible selection: stress-b", 3.0, "follow did not move to the newest matching tail")
 
         # Explicit visible header tabs: 1 Overview through 8 Adapters.
         for x, marker in (
