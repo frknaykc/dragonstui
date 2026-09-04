@@ -889,7 +889,7 @@ struct MetricSeries {
 
 /// A transient, source-bounded series view. Values are never inferred from payload JSON.
 fn metric_projection(live_data: &LiveDataState) -> Vec<MetricSeries> {
-    let mut series = BTreeMap::<MetricSeriesKey, Vec<(f64, Option<u64>)>>::new();
+    let mut series = BTreeMap::<MetricSeriesKey, Vec<(f64, Option<u64>, u64)>>::new();
     for entry in &live_data.history {
         if let LiveDataMessage::Event(AdapterEvent {
             adapter_id,
@@ -913,12 +913,28 @@ fn metric_projection(live_data: &LiveDataState) -> Vec<MetricSeries> {
             series.entry(key).or_default().push((
                 value.as_f64().expect("validated Observation::Metric"),
                 *timestamp_millis,
+                entry.sequence,
             ));
         }
     }
     series
         .into_iter()
-        .map(|(key, samples)| MetricSeries { key, samples })
+        .map(|(key, mut samples)| {
+            samples.sort_by_key(|(_, timestamp_millis, sequence)| {
+                (
+                    timestamp_millis.is_none(),
+                    timestamp_millis.unwrap_or_default(),
+                    *sequence,
+                )
+            });
+            MetricSeries {
+                key,
+                samples: samples
+                    .into_iter()
+                    .map(|(value, timestamp_millis, _)| (value, timestamp_millis))
+                    .collect(),
+            }
+        })
         .collect()
 }
 
@@ -6479,6 +6495,31 @@ mod tests {
         assert_eq!(series.len(), 1);
         assert_eq!(series[0].samples, vec![(-2.0, Some(10))]);
         assert_eq!(series[0].key.name, "load");
+    }
+
+    #[test]
+    fn metric_projection_orders_timestamped_samples_then_keeps_arrival_fallback_stable() {
+        let mut live = LiveDataState::with_history_capacity(4);
+        let metric = |value: i64, timestamp_millis: Option<u64>| AdapterEvent {
+            adapter_id: AdapterId::new("adapter-a").unwrap(),
+            stream: "semantic".to_owned(),
+            kind: "fixture".to_owned(),
+            observation: Some(Observation::Metric {
+                name: "load".to_owned(),
+                value: value.into(),
+                unit: None,
+                timestamp_millis,
+            }),
+            payload: "null".parse().unwrap(),
+        };
+        live.apply(LiveDataMessage::Event(metric(20, Some(20))));
+        live.apply(LiveDataMessage::Event(metric(10, Some(10))));
+        live.apply(LiveDataMessage::Event(metric(30, None)));
+
+        assert_eq!(
+            metric_projection(&live)[0].samples,
+            vec![(10.0, Some(10)), (20.0, Some(20)), (30.0, None)]
+        );
     }
 
     #[test]
