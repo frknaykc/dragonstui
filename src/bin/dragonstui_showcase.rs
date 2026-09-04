@@ -222,6 +222,7 @@ enum ObservabilityMode {
     Metrics,
     Heatmap,
     Status,
+    Timeline,
 }
 
 impl AdapterViewState {
@@ -1007,6 +1008,54 @@ fn status_matrix(live_data: &LiveDataState) -> StatusMatrix {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TimelineEntry {
+    sequence: u64,
+    timestamp_millis: Option<u64>,
+    adapter_id: String,
+    stream: String,
+    title: String,
+    detail: Option<String>,
+}
+
+/// A transient Event-only chronology. Timestamped entries sort by producer time;
+/// entries without a timestamp retain their bounded arrival order after that group.
+fn timeline_projection(live_data: &LiveDataState) -> Vec<TimelineEntry> {
+    let mut entries = live_data
+        .history
+        .iter()
+        .filter_map(|entry| match &entry.message {
+            LiveDataMessage::Event(AdapterEvent {
+                adapter_id,
+                stream,
+                observation:
+                    Some(Observation::Event {
+                        title,
+                        detail,
+                        timestamp_millis,
+                    }),
+                ..
+            }) => Some(TimelineEntry {
+                sequence: entry.sequence,
+                timestamp_millis: *timestamp_millis,
+                adapter_id: adapter_id.to_string(),
+                stream: stream.clone(),
+                title: title.clone(),
+                detail: detail.clone(),
+            }),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|entry| {
+        (
+            entry.timestamp_millis.is_none(),
+            entry.timestamp_millis.unwrap_or_default(),
+            entry.sequence,
+        )
+    });
+    entries
+}
+
 impl Default for LiveDataState {
     fn default() -> Self {
         Self::with_history_capacity(LIVE_HISTORY_CAPACITY)
@@ -1204,6 +1253,8 @@ struct Showcase {
     adapter_property_viewport: ViewportState,
     adapter_property_scrollbar: ScrollbarState,
     observability_viewport: ViewportState,
+    timeline_detail_viewport: ViewportState,
+    timeline_selected_sequence: Option<u64>,
     palette: Option<CommandPalette>,
     modal_open: bool,
     focus_before_modal: Option<FocusId>,
@@ -1319,6 +1370,8 @@ impl Showcase {
             adapter_property_viewport: ViewportState::new(),
             adapter_property_scrollbar: ScrollbarState::new(),
             observability_viewport: ViewportState::new(),
+            timeline_detail_viewport: ViewportState::new(),
+            timeline_selected_sequence: None,
             palette: None,
             modal_open: false,
             focus_before_modal: None,
@@ -1437,6 +1490,34 @@ impl Showcase {
         }
     }
 
+    fn reconcile_timeline_selection(&mut self) {
+        let entries = timeline_projection(&self.live_data);
+        if entries
+            .iter()
+            .any(|entry| Some(entry.sequence) == self.timeline_selected_sequence)
+        {
+            return;
+        }
+        self.timeline_selected_sequence = entries.first().map(|entry| entry.sequence);
+    }
+
+    fn move_timeline_selection(&mut self, direction: i8) {
+        self.reconcile_timeline_selection();
+        let entries = timeline_projection(&self.live_data);
+        let Some(index) = entries
+            .iter()
+            .position(|entry| Some(entry.sequence) == self.timeline_selected_sequence)
+        else {
+            return;
+        };
+        let next = match direction.cmp(&0) {
+            std::cmp::Ordering::Less => index.saturating_sub(1),
+            std::cmp::Ordering::Greater => (index + 1).min(entries.len().saturating_sub(1)),
+            std::cmp::Ordering::Equal => index,
+        };
+        self.timeline_selected_sequence = Some(entries[next].sequence);
+    }
+
     fn drain_live_data_results(&mut self) -> bool {
         let messages = self
             .live_data_results
@@ -1448,6 +1529,7 @@ impl Showcase {
             self.live_data.apply(message);
             self.live_view.reconcile(&self.live_data, &self.live_filter);
             self.reconcile_log_view();
+            self.reconcile_timeline_selection();
             changed = true;
         }
         changed
@@ -1670,6 +1752,23 @@ impl Showcase {
                     KeyCode::Char('4') => {
                         self.adapter_browser_mode =
                             AdapterBrowserMode::Observability(ObservabilityMode::Status);
+                    }
+                    KeyCode::Char('5') => {
+                        self.adapter_browser_mode =
+                            AdapterBrowserMode::Observability(ObservabilityMode::Timeline);
+                        self.reconcile_timeline_selection();
+                    }
+                    KeyCode::Up
+                        if self.adapter_browser_mode
+                            == AdapterBrowserMode::Observability(ObservabilityMode::Timeline) =>
+                    {
+                        self.move_timeline_selection(-1);
+                    }
+                    KeyCode::Down
+                        if self.adapter_browser_mode
+                            == AdapterBrowserMode::Observability(ObservabilityMode::Timeline) =>
+                    {
+                        self.move_timeline_selection(1);
                     }
                     _ => return Outcome::default(),
                 }
@@ -3618,7 +3717,122 @@ fn render_adapters(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -> Op
         AdapterBrowserMode::Observability(ObservabilityMode::Status) => {
             render_status_matrix(frame, area, showcase)
         }
+        AdapterBrowserMode::Observability(ObservabilityMode::Timeline) => {
+            render_timeline(frame, area, showcase)
+        }
     }
+}
+
+fn render_timeline(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -> Option<Position> {
+    let theme = showcase.theme;
+    let layout = InspectorLayout::new(45, 24, 28);
+    let panes = layout.split(area);
+    let master = panel(
+        frame,
+        panes.master,
+        "Observability · Timeline",
+        showcase.focus.current() == Some(VIEWPORT_FOCUS),
+        theme,
+        BorderSet::double(),
+    );
+    let detail = panel(
+        frame,
+        panes.detail,
+        "Event detail",
+        false,
+        theme,
+        BorderSet::double(),
+    );
+    showcase.reconcile_timeline_selection();
+    let entries = timeline_projection(&showcase.live_data);
+    let lines = entries
+        .iter()
+        .map(|entry| {
+            let ordering = entry
+                .timestamp_millis
+                .map(|timestamp| timestamp.to_string())
+                .unwrap_or_else(|| format!("#{}", entry.sequence));
+            format!(
+                "{} [{ordering}] {} · {}",
+                if Some(entry.sequence) == showcase.timeline_selected_sequence {
+                    '›'
+                } else {
+                    ' '
+                },
+                entry.adapter_id,
+                entry.title
+            )
+        })
+        .collect::<Vec<_>>();
+    let master_track = Rect::new(master.right().saturating_sub(1), master.y, 1, master.height);
+    let master_view = Rect::new(
+        master.x,
+        master.y,
+        master.width.saturating_sub(1),
+        master.height,
+    );
+    if lines.is_empty() {
+        Text::new("No Event observations in retained history.")
+            .style(Style::new().fg(theme.muted).bg(theme.background))
+            .render(frame, master_view);
+        showcase
+            .observability_viewport
+            .update_dimensions(0, master_view.height);
+    } else {
+        Viewport::new(&lines)
+            .style(Style::new().fg(theme.text).bg(theme.background))
+            .render(frame, master_view, &mut showcase.observability_viewport);
+    }
+    let _ = Scrollbar::render(
+        frame,
+        &showcase.observability_viewport,
+        master_track,
+        Style::new().fg(theme.muted).bg(theme.background).dim(),
+        Style::new().fg(theme.success).bg(theme.background).bold(),
+    );
+
+    let selected = entries
+        .iter()
+        .find(|entry| Some(entry.sequence) == showcase.timeline_selected_sequence);
+    if let Some(entry) = selected {
+        let timestamp = entry
+            .timestamp_millis
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| format!("arrival #{}", entry.sequence));
+        let properties = vec![
+            PropertyRow::new("title", &entry.title),
+            PropertyRow::new("timestamp", timestamp),
+            PropertyRow::new("adapter", &entry.adapter_id),
+            PropertyRow::new("stream", &entry.stream),
+        ];
+        let rows = dragons_tui::Layout::vertical(vec![Constraint::Length(4), Constraint::Fill(1)])
+            .split(detail);
+        if let Some(properties_area) = rows.first() {
+            PropertyView::new(&properties).render(
+                frame,
+                *properties_area,
+                &mut ViewportState::new(),
+                Style::new().fg(theme.warning).bg(theme.background),
+                Style::new().fg(theme.text).bg(theme.background),
+            );
+        }
+        if let Some(detail_area) = rows.get(1) {
+            let detail_lines = entry
+                .detail
+                .as_deref()
+                .map(str::lines)
+                .map(|lines| lines.map(str::to_owned).collect::<Vec<_>>())
+                .unwrap_or_else(|| vec!["No detail supplied.".to_owned()]);
+            Viewport::new(&detail_lines)
+                .style(Style::new().fg(theme.text).bg(theme.background))
+                .render(frame, *detail_area, &mut showcase.timeline_detail_viewport);
+        }
+    } else {
+        Text::new("Select an Event observation to inspect it.")
+            .style(Style::new().fg(theme.muted).bg(theme.background))
+            .render(frame, detail);
+    }
+    None
 }
 
 fn render_status_matrix(
@@ -6621,6 +6835,81 @@ mod tests {
             matrix.cells[&("alpha".to_owned(), "network".to_owned())],
             "error"
         );
+    }
+
+    #[test]
+    fn timeline_projects_only_events_in_timestamp_then_arrival_order() {
+        let mut live = LiveDataState::with_history_capacity(8);
+        let event = |observation| AdapterEvent {
+            adapter_id: AdapterId::new("adapter-a").unwrap(),
+            stream: "semantic".to_owned(),
+            kind: "fixture".to_owned(),
+            observation,
+            payload: "null".parse().unwrap(),
+        };
+        live.apply(LiveDataMessage::Event(event(Some(Observation::Event {
+            title: "later".to_owned(),
+            detail: None,
+            timestamp_millis: Some(20),
+        }))));
+        live.apply(LiveDataMessage::Event(event(None)));
+        live.apply(LiveDataMessage::Event(event(Some(Observation::Event {
+            title: "first".to_owned(),
+            detail: Some("İstanbul detail".to_owned()),
+            timestamp_millis: Some(10),
+        }))));
+        live.apply(LiveDataMessage::Event(event(Some(Observation::Log {
+            text: "not timeline".to_owned(),
+            severity: None,
+            timestamp_millis: Some(5),
+        }))));
+        live.apply(LiveDataMessage::Event(event(Some(Observation::Event {
+            title: "first-equal".to_owned(),
+            detail: None,
+            timestamp_millis: Some(10),
+        }))));
+        live.apply(LiveDataMessage::Event(event(Some(Observation::Event {
+            title: "arrival fallback".to_owned(),
+            detail: None,
+            timestamp_millis: None,
+        }))));
+
+        let timeline = timeline_projection(&live);
+        assert_eq!(
+            timeline
+                .iter()
+                .map(|entry| entry.title.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "first-equal", "later", "arrival fallback"]
+        );
+        assert_eq!(timeline[0].detail.as_deref(), Some("İstanbul detail"));
+    }
+
+    #[test]
+    fn timeline_selection_recovers_when_bounded_history_evicts_an_event() {
+        let mut showcase = Showcase::new(Instant::now());
+        showcase.live_data = LiveDataState::with_history_capacity(1);
+        let event = |title: &str| AdapterEvent {
+            adapter_id: AdapterId::new("adapter-a").unwrap(),
+            stream: "semantic".to_owned(),
+            kind: "fixture".to_owned(),
+            observation: Some(Observation::Event {
+                title: title.to_owned(),
+                detail: None,
+                timestamp_millis: None,
+            }),
+            payload: "null".parse().unwrap(),
+        };
+        showcase
+            .live_data
+            .apply(LiveDataMessage::Event(event("first")));
+        showcase.reconcile_timeline_selection();
+        assert_eq!(showcase.timeline_selected_sequence, Some(0));
+        showcase
+            .live_data
+            .apply(LiveDataMessage::Event(event("second")));
+        showcase.reconcile_timeline_selection();
+        assert_eq!(showcase.timeline_selected_sequence, Some(1));
     }
 
     #[test]
