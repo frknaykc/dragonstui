@@ -4,7 +4,7 @@
 //! network, agents, API keys, external processes, or framework-private hooks.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     io::{self, Write, stdout},
     path::{Path, PathBuf},
     sync::{
@@ -39,6 +39,7 @@ use dragonstui_adapter_host::{
 
 const TICK_INTERVAL: Duration = Duration::from_millis(50);
 const LIVE_DATA_CHANNEL_CAPACITY: usize = 8;
+const LIVE_HISTORY_CAPACITY: usize = 16;
 const LIVE_DATA_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const SPLASH_DURATION: Duration = Duration::from_secs(6);
 const LIST_FOCUS: FocusId = FocusId::new(1);
@@ -645,17 +646,53 @@ enum LiveDataMessage {
     Disconnected(AdapterDisconnect),
 }
 
-/// The small M44 proof state; this intentionally keeps no event history.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
+struct LiveHistoryEntry {
+    message: LiveDataMessage,
+}
+
+/// Render-owned, globally ordered generic live history. Every entry retains its
+/// protocol provenance; one queue prevents unbounded partition-key growth.
+#[derive(Clone, Debug)]
 struct LiveDataState {
     received_count: usize,
     latest_event: Option<AdapterEvent>,
     latest_disconnect: Option<AdapterDisconnect>,
+    history_capacity: usize,
+    history: VecDeque<LiveHistoryEntry>,
+}
+
+impl Default for LiveDataState {
+    fn default() -> Self {
+        Self::with_history_capacity(LIVE_HISTORY_CAPACITY)
+    }
 }
 
 impl LiveDataState {
+    fn with_history_capacity(history_capacity: usize) -> Self {
+        Self {
+            received_count: 0,
+            latest_event: None,
+            latest_disconnect: None,
+            history_capacity,
+            history: VecDeque::with_capacity(history_capacity),
+        }
+    }
+
+    fn retained_messages(&self) -> impl Iterator<Item = &LiveDataMessage> {
+        self.history.iter().map(|entry| &entry.message)
+    }
+
     fn apply(&mut self, message: LiveDataMessage) {
         self.received_count = self.received_count.saturating_add(1);
+        if self.history_capacity > 0 {
+            while self.history.len() >= self.history_capacity {
+                self.history.pop_front();
+            }
+            self.history.push_back(LiveHistoryEntry {
+                message: message.clone(),
+            });
+        }
         match message {
             LiveDataMessage::Event(event) => self.latest_event = Some(event),
             LiveDataMessage::Disconnected(disconnect) => {
@@ -3168,6 +3205,11 @@ fn render_adapter_inspector(
         .as_ref()
         .map(|event| event.adapter_id.to_string())
         .unwrap_or_else(|| unavailable.clone());
+    let live_history = format!(
+        "{}/{}",
+        live_data.retained_messages().count(),
+        live_data.history_capacity
+    );
     let live_stream = live_data
         .latest_event
         .as_ref()
@@ -3228,7 +3270,11 @@ fn render_adapter_inspector(
         ),
         (
             localized(language, "Live events received", "Alınan canlı olaylar"),
-            live_data.received_count.to_string(),
+            format!(
+                "{} · {}: {live_history}",
+                live_data.received_count,
+                localized(language, "Retained live history", "Tutulan canlı geçmiş")
+            ),
         ),
         (
             localized(language, "Last live adapter", "Son canlı adaptör"),
@@ -4304,6 +4350,91 @@ mod tests {
     }
 
     #[test]
+    fn live_history_evicts_the_oldest_event_without_losing_stream_provenance() {
+        let mut live_data = LiveDataState::with_history_capacity(2);
+        for (adapter, stream, kind, sequence) in [
+            ("adapter-a", "alpha", "first", 1),
+            ("adapter-b", "beta", "second", 2),
+            ("adapter-a", "alpha", "third", 3),
+        ] {
+            live_data.apply(LiveDataMessage::Event(AdapterEvent {
+                adapter_id: AdapterId::new(adapter).unwrap(),
+                stream: stream.to_owned(),
+                kind: kind.to_owned(),
+                payload: format!(r#"{{"sequence":{sequence}}}"#).parse().unwrap(),
+            }));
+        }
+
+        assert_eq!(live_data.history.len(), 2);
+        assert!(matches!(
+            &live_data.history[0].message,
+            LiveDataMessage::Event(AdapterEvent { adapter_id, stream, kind, payload })
+                if *adapter_id == AdapterId::new("adapter-b").unwrap()
+                    && stream == "beta"
+                    && kind == "second"
+                    && payload["sequence"] == 2
+        ));
+        assert!(matches!(
+            &live_data.history[1].message,
+            LiveDataMessage::Event(AdapterEvent { adapter_id, stream, kind, payload })
+                if *adapter_id == AdapterId::new("adapter-a").unwrap()
+                    && stream == "alpha"
+                    && kind == "third"
+                    && payload["sequence"] == 3
+        ));
+    }
+
+    #[test]
+    fn live_history_capacity_one_replaces_events_and_retains_disconnect_metadata() {
+        let mut live_data = LiveDataState::with_history_capacity(1);
+        live_data.apply(LiveDataMessage::Event(AdapterEvent {
+            adapter_id: AdapterId::new("adapter-a").unwrap(),
+            stream: "alpha".to_owned(),
+            kind: "first".to_owned(),
+            payload: r#"{"sequence":1}"#.parse().unwrap(),
+        }));
+        live_data.apply(LiveDataMessage::Disconnected(AdapterDisconnect {
+            adapter_id: AdapterId::new("adapter-a").unwrap(),
+            reason: "stream ended".to_owned(),
+        }));
+
+        assert_eq!(live_data.history.len(), 1);
+        assert!(matches!(
+            &live_data.history[0].message,
+            LiveDataMessage::Disconnected(AdapterDisconnect { adapter_id, reason })
+                if *adapter_id == AdapterId::new("adapter-a").unwrap() && reason == "stream ended"
+        ));
+        assert!(matches!(
+            live_data.latest_event,
+            Some(AdapterEvent { ref kind, .. }) if kind == "first"
+        ));
+    }
+
+    #[test]
+    fn sustained_live_history_input_never_exceeds_its_fixed_capacity() {
+        let mut live_data = LiveDataState::with_history_capacity(3);
+        for sequence in 0..64 {
+            live_data.apply(LiveDataMessage::Event(AdapterEvent {
+                adapter_id: AdapterId::new("adapter-a").unwrap(),
+                stream: "alpha".to_owned(),
+                kind: "sample".to_owned(),
+                payload: format!(r#"{{"sequence":{sequence}}}"#).parse().unwrap(),
+            }));
+            assert!(live_data.history.len() <= 3);
+        }
+
+        let sequences = live_data
+            .history
+            .iter()
+            .map(|entry| match &entry.message {
+                LiveDataMessage::Event(event) => event.payload["sequence"].as_u64().unwrap(),
+                LiveDataMessage::Disconnected(_) => unreachable!("only events were inserted"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(sequences, vec![61, 62, 63]);
+    }
+
+    #[test]
     fn showcase_applies_live_data_on_tick_without_blocking_input() {
         let (sender, receiver) = mpsc::sync_channel(8);
         let mut showcase = Showcase::new(Instant::now());
@@ -4372,6 +4503,35 @@ mod tests {
         ] {
             assert!(frame_contains(&view.frame, expected), "missing {expected}");
         }
+    }
+
+    #[test]
+    fn adapter_inspector_renders_bounded_live_history_usage() {
+        let mut showcase = Showcase::new(Instant::now());
+        showcase.phase = Phase::Showcase;
+        showcase.select_section(Section::Adapters);
+        showcase.adapter_rows = vec![AdapterRow {
+            id: "adapter-a".to_owned(),
+            name: "Adapter A".to_owned(),
+            version: "1.0.0".to_owned(),
+            state: AdapterViewState::Stopped,
+            protocol: "1".to_owned(),
+            executable: "adapter-a".to_owned(),
+            last_error: None,
+        }];
+        for sequence in 1..=2 {
+            showcase
+                .live_data
+                .apply(LiveDataMessage::Event(AdapterEvent {
+                    adapter_id: AdapterId::new("adapter-a").unwrap(),
+                    stream: "opaque.stream".to_owned(),
+                    kind: "updated".to_owned(),
+                    payload: format!(r#"{{"sequence":{sequence}}}"#).parse().unwrap(),
+                }));
+        }
+
+        let view = showcase_view(Size::new(160, 55), &mut showcase);
+        assert!(frame_contains(&view.frame, "Retained live history: 2/16"));
     }
 
     #[test]
