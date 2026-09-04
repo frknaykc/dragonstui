@@ -33,6 +33,7 @@ fn main() {
         }
         "duplicate-capabilities" => protocol_mode(MockBehavior::DuplicateCapabilities, &options.id),
         "empty-capabilities" => protocol_mode(MockBehavior::EmptyCapabilities, &options.id),
+        "shared-capabilities" => protocol_mode(MockBehavior::SharedCapabilities, &options.id),
         "events" => protocol_mode(MockBehavior::Events, &options.id),
         "stress-events" => protocol_mode(MockBehavior::StressEvents, &options.id),
         "out-of-order" => protocol_mode(MockBehavior::OutOfOrder, &options.id),
@@ -143,6 +144,11 @@ fn protocol_mode(behavior: MockBehavior, adapter_id: &str) {
             (PROTOCOL_VERSION, adapter_id, vec!["test.echo", "test.echo"])
         }
         MockBehavior::EmptyCapabilities => (PROTOCOL_VERSION, adapter_id, Vec::new()),
+        MockBehavior::SharedCapabilities => (
+            PROTOCOL_VERSION,
+            adapter_id,
+            vec!["cap.before", "cap.shared"],
+        ),
         MockBehavior::Normal
         | MockBehavior::Events
         | MockBehavior::StressEvents
@@ -293,6 +299,7 @@ enum MockBehavior {
     BadId,
     DuplicateCapabilities,
     EmptyCapabilities,
+    SharedCapabilities,
     Events,
     StressEvents,
     OutOfOrder,

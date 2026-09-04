@@ -345,6 +345,8 @@ def setup_m42_fixture(controller_binary: Path, mock_binary: Path) -> tuple[tempf
         ),
     )
     write_mock_adapter(root, mock_binary, "adapter-b", "timeout")
+    write_mock_adapter(root, mock_binary, "capability-a", "shared-capabilities")
+    write_mock_adapter(root, mock_binary, "capability-b", "shared-capabilities")
     daemon = subprocess.Popen(
         [str(controller_binary), "--root", str(root), "controller-daemon"],
         env={**os.environ, "DRAGONSTUI_CONTROLLER_TOKEN": secrets.token_hex(32)},
@@ -486,6 +488,27 @@ def main() -> int:
             send(master, output, b"\x1b[A")
             send(master, output, b"t")
             wait_for_text(master, output, "Completed: Stopped", 2.0, "TUI did not remain interactive after a management failure")
+
+            # M43: start two independent adapters whose live handshake snapshots
+            # advertise the same opaque contract, then browse it through real keys.
+            send(master, output, b"\x1b[B\x1b[B")
+            send(master, output, b"s")
+            wait_for_text(master, output, "State: running", 2.0, "first capability provider did not start")
+            send(master, output, b"\x1b[B")
+            send(master, output, b"s")
+            wait_for_text(master, output, "Capabilities: cap.before, cap.shared", 2.0, "second capability provider did not report live capabilities")
+
+            send(master, output, b"c")
+            wait_for_text(master, output, "Capabilities", 1.0, "capability browser did not open")
+            wait_for_text(master, output, "cap.shared", 1.0, "capability browser did not render the shared contract")
+            send(master, output, b"\x1b[B")
+            wait_for_text(master, output, "Capability: cap.shared", 1.0, "capability selection did not update provider detail")
+            visible = fully_reconstructed_visible_text(output)
+            require("capability-a · PTY capability-a · running" in visible, "first shared capability provider was not visible")
+            require("capability-b · PTY capability-b · running" in visible, "second shared capability provider was not visible")
+            send(master, output, b"\x1b")
+            visible = fully_reconstructed_visible_text(output)
+            require("Adapter Inspector" in visible, "capability browser did not return to the adapter inspector")
 
         # Explicit visible header tabs: 1 Overview through 8 Adapters.
         for x, marker in (
@@ -630,7 +653,7 @@ def main() -> int:
         "Showcase PTY passed: six-second splash/animation, pages, settings, focus, keyboard, mouse, palette, modal, "
         "Unicode, Braille, resize sequence, lifecycle restoration, and "
         f"{args.exit} exit"
-        + (", typed adapter lifecycle/diagnostics, conflict, and failure acceptance." if m42_root is not None else ".")
+        + (", typed adapter lifecycle/diagnostics, conflict, failure, and capability browser acceptance." if m42_root is not None else ".")
     )
     return 0
 

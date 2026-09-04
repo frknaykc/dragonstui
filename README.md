@@ -99,7 +99,7 @@ The controller daemon is the runtime lifecycle authority. The showcase uses the 
 
 `dragonstui-adapter-host` runs adapters as supervised external processes rather than in-process plugins. The child boundary isolates crashes, dependencies, and language runtimes from the framework and controller.
 
-Adapters describe generic capabilities through protocol v1. Names such as `containers.logs` are capability examples, not built-in integrations. DragonsTUI ships **no** Docker, Git, PostgreSQL, Kubernetes, process, port, log, or database adapter. The capability browser is planned work, not a completed UI feature.
+Adapters describe generic capabilities through protocol v1. Names such as `containers.logs` are capability examples, not built-in integrations. DragonsTUI ships **no** Docker, Git, PostgreSQL, Kubernetes, process, port, log, or database adapter. The Section 8 Capability Browser groups live controller diagnostics by opaque capability contract and lists the adapters currently reporting each contract; it does not invoke capabilities or consume their data.
 
 Read the details:
 
@@ -115,11 +115,11 @@ DragonsTUI is under active development and remains pre-1.0. The core framework a
 | --- | --- |
 | Framework foundation | Complete |
 | Adapter host foundation | Complete |
-| Distribution and management | In progress (M42) |
+| Distribution and management | Complete (M35–M43) |
 | Live data and observability | Planned |
 | SDK and conformance tooling | Planned |
 
-M42 currently includes transactional update, typed server IPC, a typed client facade, and TUI authority migration. Next is per-adapter conflict prevention, followed by PTY acceptance. M43 capability browsing has not started.
+Adapter distribution and management now includes registry/install/update/remove integrity boundaries, CLI and TUI management, typed authenticated controller IPC, per-adapter lifecycle conflict protection, real PTY acceptance, and M43 capability discovery. Capability browsing derives only from live daemon diagnostics: it answers which adapters currently report an opaque capability without claiming that stopped, declared-only, or unobserved adapters can provide it. The next phase is generic live data, beginning with M44.
 
 ## Development
 

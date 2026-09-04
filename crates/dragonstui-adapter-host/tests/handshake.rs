@@ -53,6 +53,20 @@ fn handshake_reaches_running_through_ordered_states_and_records_adapter_info() {
 }
 
 #[test]
+fn handshake_shared_capabilities_mock_reports_generic_capability_contracts() {
+    let runtime = AdapterRuntime::start(manifest("mock"), config("shared-capabilities")).unwrap();
+
+    assert_eq!(
+        runtime
+            .capabilities()
+            .iter()
+            .map(|capability| capability.as_str())
+            .collect::<Vec<_>>(),
+        vec!["cap.before", "cap.shared"]
+    );
+}
+
+#[test]
 fn handshake_rejects_incompatible_failed_crashed_and_timeout_adapters() {
     let cases = [
         ("bad-protocol", "incompatible"),

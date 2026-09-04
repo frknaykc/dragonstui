@@ -201,6 +201,13 @@ enum AdapterViewState {
     Incompatible,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum AdapterBrowserMode {
+    #[default]
+    Adapters,
+    Capabilities,
+}
+
 impl AdapterViewState {
     fn label(self, language: Language) -> &'static str {
         match self {
@@ -220,6 +227,44 @@ struct AdapterRow {
     protocol: String,
     executable: String,
     last_error: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CapabilityProvider {
+    id: String,
+    name: String,
+    state: String,
+}
+
+fn capability_provider_index(
+    adapter_rows: &[AdapterRow],
+    diagnostics: &BTreeMap<String, ControllerIpcDiagnostics>,
+) -> BTreeMap<String, Vec<CapabilityProvider>> {
+    let mut providers_by_capability =
+        BTreeMap::<String, BTreeMap<String, CapabilityProvider>>::new();
+    for row in adapter_rows {
+        let Some(snapshot) = diagnostics.get(&row.id) else {
+            continue;
+        };
+        if snapshot.adapter_id != row.id {
+            continue;
+        }
+        for capability in &snapshot.capabilities {
+            providers_by_capability
+                .entry(capability.clone())
+                .or_default()
+                .entry(row.id.clone())
+                .or_insert_with(|| CapabilityProvider {
+                    id: row.id.clone(),
+                    name: row.name.clone(),
+                    state: snapshot.state.clone(),
+                });
+        }
+    }
+    providers_by_capability
+        .into_iter()
+        .map(|(capability, providers)| (capability, providers.into_values().collect()))
+        .collect()
 }
 
 fn adapter_rows_from_root(root: &Path) -> Result<Vec<AdapterRow>, DiscoveryError> {
@@ -564,6 +609,7 @@ struct Showcase {
     adapter_registry_source: Option<String>,
     adapter_install_id: Option<AdapterId>,
     adapter_rows: Vec<AdapterRow>,
+    adapter_browser_mode: AdapterBrowserMode,
     adapter_discovery_error: Option<String>,
     adapter_diagnostics: BTreeMap<String, ControllerIpcDiagnostics>,
     adapter_controller_error: Option<String>,
@@ -654,6 +700,7 @@ impl Showcase {
             adapter_registry_source,
             adapter_install_id,
             adapter_rows,
+            adapter_browser_mode: AdapterBrowserMode::default(),
             adapter_discovery_error,
             adapter_diagnostics: BTreeMap::new(),
             adapter_controller_error: None,
@@ -734,6 +781,10 @@ impl Showcase {
             .selected_index(self.adapter_rows.len())
             .and_then(|index| self.adapter_rows.get(index))
             .and_then(|row| AdapterId::new(&row.id).ok())
+    }
+
+    fn capability_provider_index(&self) -> BTreeMap<String, Vec<CapabilityProvider>> {
+        capability_provider_index(&self.adapter_rows, &self.adapter_diagnostics)
     }
 
     fn queue_adapter_action(&mut self, action: AdapterManagementAction) {
@@ -844,6 +895,33 @@ impl Showcase {
         }
 
         if self.section == Section::Adapters {
+            if self.adapter_browser_mode == AdapterBrowserMode::Capabilities {
+                if matches!(key.code, KeyCode::Char('c' | 'C') | KeyCode::Escape) {
+                    self.adapter_browser_mode = AdapterBrowserMode::Adapters;
+                    self.table.set_selected(0);
+                    self.focus.set_focus(TABLE_FOCUS);
+                    return Outcome {
+                        quit: false,
+                        redraw: true,
+                    };
+                }
+                if matches!(
+                    key.code,
+                    KeyCode::Char(
+                        'i' | 'I' | 's' | 'S' | 't' | 'T' | 'r' | 'R' | 'u' | 'U' | 'x' | 'X'
+                    )
+                ) {
+                    return Outcome::default();
+                }
+            } else if matches!(key.code, KeyCode::Char('c' | 'C')) {
+                self.adapter_browser_mode = AdapterBrowserMode::Capabilities;
+                self.table.set_selected(0);
+                self.focus.set_focus(TABLE_FOCUS);
+                return Outcome {
+                    quit: false,
+                    redraw: true,
+                };
+            }
             if self.adapter_remove_confirmation {
                 match key.code {
                     KeyCode::Enter => {
@@ -1184,6 +1262,9 @@ impl Showcase {
 
     fn active_table_row_count(&self) -> usize {
         match self.section {
+            Section::Adapters if self.adapter_browser_mode == AdapterBrowserMode::Capabilities => {
+                self.capability_provider_index().len()
+            }
             Section::Adapters => self.adapter_rows.len(),
             _ => table_rows().len(),
         }
@@ -2045,6 +2126,18 @@ fn render_footer(frame: &mut Frame, rect: Rect, showcase: &Showcase) {
             "Tab focus · ↑↓ navigate · Enter tree · Ctrl+P commands · q quit",
             "Tab odağı · ↑↓ gezin · Enter ağaç · Ctrl+P komutlar · q çıkış",
         ),
+        Section::Adapters if showcase.adapter_browser_mode == AdapterBrowserMode::Capabilities => {
+            localized(
+                showcase.language,
+                "C/Esc adapters · ↑↓ capabilities · Ctrl+P commands · q quit",
+                "C/Esc adaptörler · ↑↓ yetenekler · Ctrl+P komutlar · q çıkış",
+            )
+        }
+        Section::Adapters => localized(
+            showcase.language,
+            "C capabilities · Tab focus · Ctrl+P commands · q quit",
+            "C yetenekler · Tab odağı · Ctrl+P komutlar · q çıkış",
+        ),
         _ => localized(
             showcase.language,
             "1–8 sections · Tab focus · Ctrl+P commands · m modal · q quit",
@@ -2484,6 +2577,13 @@ fn color_hex(color: Color) -> String {
 }
 
 fn render_adapters(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -> Option<Position> {
+    match showcase.adapter_browser_mode {
+        AdapterBrowserMode::Adapters => render_adapter_list(frame, area, showcase),
+        AdapterBrowserMode::Capabilities => render_capability_browser(frame, area, showcase),
+    }
+}
+
+fn render_adapter_list(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -> Option<Position> {
     let theme = showcase.theme;
     let panes = if area.width >= 100 && area.height >= 12 {
         dragons_tui::Layout::horizontal(vec![Constraint::Fill(3), Constraint::Fill(2)])
@@ -2566,8 +2666,8 @@ fn render_adapters(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -> Op
         showcase.adapter_action_status.clone().unwrap_or_else(|| {
             localized(
                 showcase.language,
-                "I install · S start · T stop · R restart · U update · X remove",
-                "I kur · S başlat · T durdur · R yeniden başlat · U güncelle · X kaldır",
+                "C capabilities · I install · S start · T stop · R restart · U update · X remove",
+                "C yetenekler · I kur · S başlat · T durdur · R yeniden başlat · U güncelle · X kaldır",
             )
             .to_owned()
         })
@@ -2601,6 +2701,148 @@ fn render_adapters(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -> Op
             showcase.language,
             theme,
         );
+    }
+    None
+}
+
+fn render_capability_browser(
+    frame: &mut Frame,
+    area: Rect,
+    showcase: &mut Showcase,
+) -> Option<Position> {
+    let theme = showcase.theme;
+    let panes = if area.width >= 100 && area.height >= 12 {
+        dragons_tui::Layout::horizontal(vec![Constraint::Fill(3), Constraint::Fill(2)])
+            .gap(1)
+            .split(area)
+    } else {
+        dragons_tui::Layout::vertical(vec![Constraint::Fill(1), Constraint::Fill(1)])
+            .gap(1)
+            .split(area)
+    };
+    let list_area = panes.first().copied()?;
+    let inner = panel(
+        frame,
+        list_area,
+        localized(showcase.language, "Capabilities", "Yetenekler"),
+        showcase.focus.current() == Some(TABLE_FOCUS),
+        theme,
+        BorderSet::double(),
+    );
+    showcase.hits.table = inner;
+    if let Some(error) = &showcase.adapter_discovery_error {
+        RichText::new([Line::new([
+            Span::styled(
+                localized(showcase.language, "Discovery failed: ", "Keşif başarısız: "),
+                Style::new().fg(theme.error).bold(),
+            ),
+            Span::styled(error, Style::new().fg(theme.text)),
+        ])])
+        .render(frame, inner);
+        return None;
+    }
+    if showcase.adapter_rows.is_empty() {
+        Text::new(localized(
+            showcase.language,
+            "No adapters available.",
+            "Kullanılabilir adaptör yok.",
+        ))
+        .style(Style::new().fg(theme.muted).bg(theme.background))
+        .render(frame, inner);
+        return None;
+    }
+    let index = showcase.capability_provider_index();
+    if index.is_empty() {
+        Text::new(localized(
+            showcase.language,
+            "No capabilities reported by live adapters.",
+            "Canlı adaptörler yetenek raporlamıyor.",
+        ))
+        .style(Style::new().fg(theme.muted).bg(theme.background))
+        .render(frame, inner);
+        return None;
+    }
+    let rows = index
+        .iter()
+        .map(|(capability, providers)| {
+            vec![
+                Line::new([Span::styled(capability, Style::new().bold())]),
+                Line::from(providers.len().to_string()),
+            ]
+        })
+        .collect::<Vec<_>>();
+    Table::new([
+        TableColumn::new(Constraint::Fill(4)),
+        TableColumn::new(Constraint::Length(10)),
+    ])
+    .header([
+        Line::from(localized(showcase.language, "CAPABILITY", "YETENEK")),
+        Line::from(localized(showcase.language, "PROVIDERS", "SAĞLAYICI")),
+    ])
+    .rows(rows)
+    .selected_style(Style::new().fg(theme.success).bg(theme.primary).bold())
+    .render(frame, inner, &mut showcase.table);
+    Text::new(localized(
+        showcase.language,
+        "C or Esc returns to adapters · ↑↓ selects a capability",
+        "C veya Esc adaptörlere döner · ↑↓ yetenek seçer",
+    ))
+    .style(Style::new().fg(theme.warning).bg(theme.background).dim())
+    .render(
+        frame,
+        Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
+    );
+    if let Some(detail_area) = panes.get(1).copied() {
+        let detail = panel(
+            frame,
+            detail_area,
+            localized(
+                showcase.language,
+                "Capability Providers",
+                "Yetenek Sağlayıcıları",
+            ),
+            false,
+            theme,
+            BorderSet::rounded(),
+        );
+        let selected = showcase
+            .table
+            .selected_index(index.len())
+            .and_then(|selected| index.iter().nth(selected));
+        let lines = selected.map_or_else(
+            || {
+                vec![Line::from(localized(
+                    showcase.language,
+                    "No capability selected",
+                    "Yetenek seçilmedi",
+                ))]
+            },
+            |(capability, providers)| {
+                let mut lines = vec![Line::new([
+                    Span::styled(
+                        format!(
+                            "{}: ",
+                            localized(showcase.language, "Capability", "Yetenek")
+                        ),
+                        Style::new().fg(theme.warning).bold(),
+                    ),
+                    Span::styled(capability, Style::new().fg(theme.text)),
+                ])];
+                lines.push(Line::from(localized(
+                    showcase.language,
+                    "Providers",
+                    "Sağlayıcılar",
+                )));
+                lines.extend(providers.iter().map(|provider| {
+                    Line::new([Span::styled(
+                        format!("{} · {} · {}", provider.id, provider.name, provider.state),
+                        Style::new().fg(theme.text),
+                    )])
+                }));
+                lines
+            },
+        );
+        RichText::new(lines).render(frame, detail);
     }
     None
 }
@@ -3310,6 +3552,315 @@ mod tests {
         }));
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn capability_provider_index_is_sorted_deduplicated_and_rebuilt_from_diagnostics() {
+        let rows = vec![
+            AdapterRow {
+                id: "adapter-b".to_owned(),
+                name: "Adapter B".to_owned(),
+                version: "1.0.0".to_owned(),
+                state: AdapterViewState::Stopped,
+                protocol: "1".to_owned(),
+                executable: "adapter-b".to_owned(),
+                last_error: None,
+            },
+            AdapterRow {
+                id: "adapter-a".to_owned(),
+                name: "Adapter A".to_owned(),
+                version: "1.0.0".to_owned(),
+                state: AdapterViewState::Stopped,
+                protocol: "1".to_owned(),
+                executable: "adapter-a".to_owned(),
+                last_error: None,
+            },
+            AdapterRow {
+                id: "adapter-empty".to_owned(),
+                name: "Adapter Empty".to_owned(),
+                version: "1.0.0".to_owned(),
+                state: AdapterViewState::Stopped,
+                protocol: "1".to_owned(),
+                executable: "adapter-empty".to_owned(),
+                last_error: None,
+            },
+        ];
+        let mut diagnostics = BTreeMap::new();
+        diagnostics.insert(
+            "adapter-b".to_owned(),
+            ControllerIpcDiagnostics {
+                adapter_id: "adapter-b".to_owned(),
+                version: Some("1.0.0".to_owned()),
+                protocol: Some(1),
+                state: "running".to_owned(),
+                pid: Some(2),
+                uptime_millis: Some(1),
+                capabilities: vec![
+                    "cap.shared".to_owned(),
+                    "cap.b".to_owned(),
+                    "cap.shared".to_owned(),
+                ],
+                last_error: None,
+                stderr_tail: String::new(),
+                stderr_dropped_line_count: 0,
+                dropped_event_count: 0,
+                pending_request_count: 0,
+                response_queue_capacity: 1,
+                response_queue_len: 0,
+                event_queue_capacity: 1,
+                event_queue_len: 0,
+            },
+        );
+        diagnostics.insert(
+            "adapter-a".to_owned(),
+            ControllerIpcDiagnostics {
+                adapter_id: "adapter-a".to_owned(),
+                version: Some("1.0.0".to_owned()),
+                protocol: Some(1),
+                state: "stopped".to_owned(),
+                pid: None,
+                uptime_millis: None,
+                capabilities: vec!["cap.shared".to_owned(), "cap.a".to_owned()],
+                last_error: None,
+                stderr_tail: String::new(),
+                stderr_dropped_line_count: 0,
+                dropped_event_count: 0,
+                pending_request_count: 0,
+                response_queue_capacity: 1,
+                response_queue_len: 0,
+                event_queue_capacity: 1,
+                event_queue_len: 0,
+            },
+        );
+
+        let index = capability_provider_index(&rows, &diagnostics);
+        assert_eq!(
+            index.keys().cloned().collect::<Vec<_>>(),
+            vec!["cap.a", "cap.b", "cap.shared"]
+        );
+        assert_eq!(
+            index["cap.shared"]
+                .iter()
+                .map(|provider| provider.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["adapter-a", "adapter-b"]
+        );
+        assert_eq!(index["cap.shared"][0].state, "stopped");
+        assert!(!index.values().any(|providers| {
+            providers
+                .iter()
+                .any(|provider| provider.id == "adapter-empty")
+        }));
+
+        diagnostics.clear();
+        diagnostics.insert(
+            "adapter-a".to_owned(),
+            ControllerIpcDiagnostics {
+                adapter_id: "adapter-a".to_owned(),
+                version: Some("1.0.0".to_owned()),
+                protocol: Some(1),
+                state: "running".to_owned(),
+                pid: Some(1),
+                uptime_millis: Some(2),
+                capabilities: vec!["cap.new".to_owned()],
+                last_error: None,
+                stderr_tail: String::new(),
+                stderr_dropped_line_count: 0,
+                dropped_event_count: 0,
+                pending_request_count: 0,
+                response_queue_capacity: 1,
+                response_queue_len: 0,
+                event_queue_capacity: 1,
+                event_queue_len: 0,
+            },
+        );
+        let refreshed = capability_provider_index(&rows, &diagnostics);
+        assert_eq!(
+            refreshed.keys().cloned().collect::<Vec<_>>(),
+            vec!["cap.new"]
+        );
+        assert_eq!(refreshed["cap.new"][0].id, "adapter-a");
+    }
+
+    #[test]
+    fn capability_browser_renders_selected_capability_and_its_runtime_providers() {
+        let mut showcase = Showcase::new(Instant::now());
+        showcase.phase = Phase::Showcase;
+        showcase.select_section(Section::Adapters);
+        showcase.adapter_rows = vec![
+            AdapterRow {
+                id: "adapter-a".to_owned(),
+                name: "Adapter A".to_owned(),
+                version: "1.0.0".to_owned(),
+                state: AdapterViewState::Stopped,
+                protocol: "1".to_owned(),
+                executable: "adapter-a".to_owned(),
+                last_error: None,
+            },
+            AdapterRow {
+                id: "adapter-b".to_owned(),
+                name: "Adapter B".to_owned(),
+                version: "1.0.0".to_owned(),
+                state: AdapterViewState::Stopped,
+                protocol: "1".to_owned(),
+                executable: "adapter-b".to_owned(),
+                last_error: None,
+            },
+        ];
+        for (id, name, state) in [
+            ("adapter-a", "Adapter A", "running"),
+            ("adapter-b", "Adapter B", "stopped"),
+        ] {
+            showcase.adapter_diagnostics.insert(
+                id.to_owned(),
+                ControllerIpcDiagnostics {
+                    adapter_id: id.to_owned(),
+                    version: Some("1.0.0".to_owned()),
+                    protocol: Some(1),
+                    state: state.to_owned(),
+                    pid: None,
+                    uptime_millis: None,
+                    capabilities: vec!["cap.shared".to_owned()],
+                    last_error: None,
+                    stderr_tail: name.to_owned(),
+                    stderr_dropped_line_count: 0,
+                    dropped_event_count: 0,
+                    pending_request_count: 0,
+                    response_queue_capacity: 1,
+                    response_queue_len: 0,
+                    event_queue_capacity: 1,
+                    event_queue_len: 0,
+                },
+            );
+        }
+
+        assert!(showcase.handle_key(key(KeyCode::Char('c'))).redraw);
+        let view = showcase_view(Size::new(160, 55), &mut showcase);
+        for expected in [
+            "Capabilities",
+            "cap.shared",
+            "2",
+            "Capability Providers",
+            "Adapter A",
+            "running",
+            "Adapter B",
+            "stopped",
+        ] {
+            assert!(frame_contains(&view.frame, expected), "missing {expected}");
+        }
+        assert!(showcase.handle_key(key(KeyCode::Escape)).redraw);
+        let adapters = showcase_view(Size::new(160, 55), &mut showcase);
+        assert!(frame_contains(&adapters.frame, "Adapter Inspector"));
+    }
+
+    #[test]
+    fn capability_browser_does_not_dispatch_adapter_management_actions() {
+        let mut showcase = Showcase::new(Instant::now());
+        showcase.phase = Phase::Showcase;
+        showcase.select_section(Section::Adapters);
+        showcase.adapter_rows = vec![AdapterRow {
+            id: "adapter-a".to_owned(),
+            name: "Adapter A".to_owned(),
+            version: "1.0.0".to_owned(),
+            state: AdapterViewState::Stopped,
+            protocol: "1".to_owned(),
+            executable: "adapter-a".to_owned(),
+            last_error: None,
+        }];
+        showcase.adapter_diagnostics.insert(
+            "adapter-a".to_owned(),
+            ControllerIpcDiagnostics {
+                adapter_id: "adapter-a".to_owned(),
+                version: Some("1.0.0".to_owned()),
+                protocol: Some(1),
+                state: "running".to_owned(),
+                pid: Some(1),
+                uptime_millis: Some(1),
+                capabilities: vec!["cap.shared".to_owned()],
+                last_error: None,
+                stderr_tail: String::new(),
+                stderr_dropped_line_count: 0,
+                dropped_event_count: 0,
+                pending_request_count: 0,
+                response_queue_capacity: 1,
+                response_queue_len: 0,
+                event_queue_capacity: 1,
+                event_queue_len: 0,
+            },
+        );
+        showcase.handle_key(key(KeyCode::Char('c')));
+
+        assert!(!showcase.handle_key(key(KeyCode::Char('s'))).redraw);
+        assert!(showcase.adapter_action_status.is_none());
+    }
+
+    #[test]
+    fn capability_browser_recovers_selection_and_empty_state_after_snapshot_refresh() {
+        let mut showcase = Showcase::new(Instant::now());
+        showcase.phase = Phase::Showcase;
+        showcase.select_section(Section::Adapters);
+        showcase.adapter_rows = vec![AdapterRow {
+            id: "adapter-a".to_owned(),
+            name: "Adapter A".to_owned(),
+            version: "1.0.0".to_owned(),
+            state: AdapterViewState::Stopped,
+            protocol: "1".to_owned(),
+            executable: "adapter-a".to_owned(),
+            last_error: None,
+        }];
+        let snapshot = |capabilities: Vec<&str>| ControllerIpcDiagnostics {
+            adapter_id: "adapter-a".to_owned(),
+            version: Some("1.0.0".to_owned()),
+            protocol: Some(1),
+            state: "running".to_owned(),
+            pid: Some(1),
+            uptime_millis: Some(1),
+            capabilities: capabilities.into_iter().map(ToOwned::to_owned).collect(),
+            last_error: None,
+            stderr_tail: String::new(),
+            stderr_dropped_line_count: 0,
+            dropped_event_count: 0,
+            pending_request_count: 0,
+            response_queue_capacity: 1,
+            response_queue_len: 0,
+            event_queue_capacity: 1,
+            event_queue_len: 0,
+        };
+        showcase.adapter_diagnostics.insert(
+            "adapter-a".to_owned(),
+            snapshot(vec!["cap.old", "cap.selected"]),
+        );
+        showcase.handle_key(key(KeyCode::Char('c')));
+        showcase.handle_key(key(KeyCode::Down));
+        let selected = showcase_view(Size::new(160, 55), &mut showcase);
+        assert!(frame_contains(&selected.frame, "cap.selected"));
+
+        showcase
+            .adapter_diagnostics
+            .insert("adapter-a".to_owned(), snapshot(vec!["cap.new"]));
+        let refreshed = showcase_view(Size::new(160, 55), &mut showcase);
+        assert!(frame_contains(&refreshed.frame, "cap.new"));
+        assert!(!frame_contains(&refreshed.frame, "cap.selected"));
+        assert_eq!(showcase.table.selected_index(1), Some(0));
+
+        showcase.adapter_diagnostics.clear();
+        let empty = showcase_view(Size::new(160, 55), &mut showcase);
+        assert!(frame_contains(
+            &empty.frame,
+            "No capabilities reported by live adapters."
+        ));
+        assert_eq!(showcase.table.selected_index(0), None);
+    }
+
+    #[test]
+    fn capability_browser_footer_exposes_return_navigation() {
+        let mut showcase = Showcase::new(Instant::now());
+        showcase.phase = Phase::Showcase;
+        showcase.select_section(Section::Adapters);
+        showcase.handle_key(key(KeyCode::Char('c')));
+
+        let view = showcase_view(Size::new(160, 55), &mut showcase);
+        assert!(buffer_row(&view.frame, 53).contains("C/Esc adapters"));
     }
 
     #[test]

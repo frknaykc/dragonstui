@@ -56,4 +56,6 @@ The responsive inspector presents selected adapter metadata: ID, name, installed
 
 The optional TUI section provides registry-backed install/update selection, explicit start/stop/restart actions, and confirmed remove actions. Runtime lifecycle and diagnostics use `ControllerManagementClient` over authenticated local controller IPC; the TUI does not create an in-process runtime authority. Install, update, and remove retain their existing host-side filesystem/transaction boundaries.
 
-Adapter distribution and management remain in progress. Per-adapter operation conflict prevention and PTY acceptance are pending. The M43 capability browser has not started.
+Section 8 also provides a Capability Browser. `C` switches between adapter and capability browsing; capability rows show an opaque runtime capability identifier and provider count, while the selected row shows provider ID, display name, and current diagnostics state. The browser rebuilds from the existing discovered-adapter rows and typed controller diagnostics snapshots, so it represents only adapters currently reporting capabilities at runtime. It does not merge manifest declarations with runtime data, add RPC calls or polling, invoke a capability, or implement live-data streaming.
+
+Adapter distribution and management is complete through M43. The next phase begins with M44 Background Tasks and Live Data Channels.
