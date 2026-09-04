@@ -263,6 +263,7 @@ version = "0.1.0"
 dependencies = [
  "crossterm",
  "dragonstui-adapter-host",
+ "serde_json",
  "signal-hook",
  "unicode-segmentation",
  "unicode-width",

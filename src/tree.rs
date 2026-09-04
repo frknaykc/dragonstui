@@ -93,6 +93,11 @@ impl TreeState {
     pub fn viewport(&self) -> &ViewportState {
         &self.viewport
     }
+
+    /// Returns the caller-owned viewport for composable scrollbar interaction.
+    pub fn viewport_mut(&mut self) -> &mut ViewportState {
+        &mut self.viewport
+    }
 }
 
 /// A collapsible tree rendered with explicit [`TreeState`].

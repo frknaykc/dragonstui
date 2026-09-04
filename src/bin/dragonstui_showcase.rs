@@ -27,9 +27,9 @@ use dragons_tui::{
     Event, FocusId, FocusState, Frame, Gauge, InspectorLayout, InspectorSplitState, KeyCode,
     KeyEvent, KeyMap, KeyModifiers, Line, List, ListState, Modal, MouseEvent, MouseKind,
     PaletteCommand, Panel, Position, ProgressBar, PropertyRow, PropertyView, Rect, RichText,
-    Runtime, Scrollbar, ScrollbarState, ShutdownSignal, Size, Span, Sparkline, Spinner, Style,
-    Table, TableColumn, TableState, Text, TextArea, TextInput, Theme, Tree, TreeNode, TreeState,
-    Viewport, ViewportState, display_width, is_quit_key, terminal_size,
+    Runtime, Scrollbar, ScrollbarState, ShutdownSignal, Size, Span, Sparkline, Spinner,
+    StructuredData, Style, Table, TableColumn, TableState, Text, TextArea, TextInput, Theme, Tree,
+    TreeNode, TreeState, Viewport, ViewportState, display_width, is_quit_key, terminal_size,
 };
 use dragonstui_adapter_host::{
     AdapterClassification, AdapterDisconnect, AdapterEvent, AdapterId, AdapterLiveData,
@@ -212,6 +212,7 @@ enum AdapterBrowserMode {
     #[default]
     Adapters,
     Capabilities,
+    StructuredPayload,
 }
 
 impl AdapterViewState {
@@ -925,6 +926,7 @@ struct Showcase {
     list: ListState,
     table: TableState,
     tree: TreeState,
+    structured_tree: TreeState,
     viewport: ViewportState,
     scrollbar: ScrollbarState,
     input: TextInput,
@@ -1037,6 +1039,7 @@ impl Showcase {
             list: ListState::new(),
             table: TableState::new(),
             tree,
+            structured_tree: TreeState::new(),
             viewport: ViewportState::new(),
             scrollbar: ScrollbarState::new(),
             input: seeded_input(),
@@ -1314,6 +1317,21 @@ impl Showcase {
             }
             if self.adapter_browser_mode == AdapterBrowserMode::Adapters {
                 match key.code {
+                    KeyCode::Char('j' | 'J') if self.live_data.latest_event.is_some() => {
+                        self.structured_tree = TreeState::new();
+                        let root_id = self.live_data.latest_event.as_ref().and_then(|event| {
+                            StructuredData::new(&event.payload).id_for_path("root")
+                        });
+                        if let Some(root_id) = root_id {
+                            self.structured_tree.set_selected(root_id);
+                        }
+                        self.adapter_browser_mode = AdapterBrowserMode::StructuredPayload;
+                        self.focus.set_focus(TREE_FOCUS);
+                        return Outcome {
+                            quit: false,
+                            redraw: true,
+                        };
+                    }
                     KeyCode::Char('p' | 'P') => {
                         self.live_view.reconcile(&self.live_data, &self.live_filter);
                         self.live_view.pause();
@@ -1332,7 +1350,24 @@ impl Showcase {
                     _ => {}
                 }
             }
-            if self.adapter_browser_mode == AdapterBrowserMode::Capabilities {
+            if self.adapter_browser_mode == AdapterBrowserMode::StructuredPayload {
+                if matches!(key.code, KeyCode::Char('j' | 'J') | KeyCode::Escape) {
+                    self.adapter_browser_mode = AdapterBrowserMode::Adapters;
+                    self.focus.set_focus(TABLE_FOCUS);
+                    return Outcome {
+                        quit: false,
+                        redraw: true,
+                    };
+                }
+                if matches!(
+                    key.code,
+                    KeyCode::Char(
+                        'i' | 'I' | 's' | 'S' | 't' | 'T' | 'r' | 'R' | 'u' | 'U' | 'x' | 'X'
+                    )
+                ) {
+                    return Outcome::default();
+                }
+            } else if self.adapter_browser_mode == AdapterBrowserMode::Capabilities {
                 if matches!(key.code, KeyCode::Char('c' | 'C') | KeyCode::Escape) {
                     self.adapter_browser_mode = AdapterBrowserMode::Adapters;
                     self.table.set_selected(0);
@@ -1481,6 +1516,23 @@ impl Showcase {
                 KeyCode::PageDown => self.table.page_down(),
                 _ => false,
             },
+            Some(TREE_FOCUS)
+                if self.section == Section::Adapters
+                    && self.adapter_browser_mode == AdapterBrowserMode::StructuredPayload =>
+            {
+                let Some(event) = self.live_data.latest_event.as_ref() else {
+                    return Outcome::default();
+                };
+                let inspector = StructuredData::new(&event.payload);
+                match key.code {
+                    KeyCode::Up => inspector.move_up(&mut self.structured_tree),
+                    KeyCode::Down => inspector.move_down(&mut self.structured_tree),
+                    KeyCode::Left => inspector.move_left(&mut self.structured_tree),
+                    KeyCode::Right => inspector.move_right(&mut self.structured_tree),
+                    KeyCode::Enter => inspector.toggle(&mut self.structured_tree),
+                    _ => false,
+                }
+            }
             Some(TREE_FOCUS) => match key.code {
                 KeyCode::Up => showcase_tree().move_up(&mut self.tree),
                 KeyCode::Down => showcase_tree().move_down(&mut self.tree),
@@ -3196,6 +3248,9 @@ fn render_adapters(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -> Op
     match showcase.adapter_browser_mode {
         AdapterBrowserMode::Adapters => render_adapter_list(frame, area, showcase),
         AdapterBrowserMode::Capabilities => render_capability_browser(frame, area, showcase),
+        AdapterBrowserMode::StructuredPayload => {
+            render_structured_payload_browser(frame, area, showcase)
+        }
     }
 }
 
@@ -3503,6 +3558,60 @@ fn render_capability_browser(
         );
         RichText::new(lines).render(frame, detail);
     }
+    None
+}
+
+fn render_structured_payload_browser(
+    frame: &mut Frame,
+    area: Rect,
+    showcase: &mut Showcase,
+) -> Option<Position> {
+    let theme = showcase.theme;
+    let inner = panel(
+        frame,
+        area,
+        localized(
+            showcase.language,
+            "Structured Payload",
+            "Yapılandırılmış Veri",
+        ),
+        showcase.focus.current() == Some(TREE_FOCUS),
+        theme,
+        BorderSet::rounded(),
+    );
+    let Some(event) = showcase.live_data.latest_event.as_ref() else {
+        Text::new(localized(
+            showcase.language,
+            "No live payload is available.",
+            "Canlı veri yükü yok.",
+        ))
+        .style(Style::new().fg(theme.muted).bg(theme.background))
+        .render(frame, inner);
+        return None;
+    };
+    let scrollbar_width = u16::from(inner.width > 1);
+    let content = Rect {
+        width: inner.width.saturating_sub(scrollbar_width),
+        ..inner
+    };
+    let track = Rect {
+        x: inner.x.saturating_add(content.width),
+        width: scrollbar_width,
+        ..inner
+    };
+    StructuredData::new(&event.payload).render(
+        frame,
+        content,
+        &mut showcase.structured_tree,
+        Style::new().fg(theme.text).bg(theme.background),
+    );
+    Scrollbar::render(
+        frame,
+        showcase.structured_tree.viewport(),
+        track,
+        Style::new().fg(theme.muted).bg(theme.background),
+        Style::new().fg(theme.primary).bg(theme.background),
+    );
     None
 }
 
@@ -4455,6 +4564,45 @@ mod tests {
             &second.frame,
             showcase.hits.adapter_property_viewport,
             "ALPHA"
+        ));
+    }
+
+    #[test]
+    fn adapter_structured_payload_browser_reuses_the_latest_generic_live_value() {
+        let mut showcase = Showcase::new(Instant::now());
+        showcase.phase = Phase::Showcase;
+        showcase.select_section(Section::Adapters);
+        showcase.adapter_rows = vec![AdapterRow {
+            id: "adapter-a".to_owned(),
+            name: "Adapter A".to_owned(),
+            version: "1.0.0".to_owned(),
+            state: AdapterViewState::Stopped,
+            protocol: "1".to_owned(),
+            executable: "adapter-a".to_owned(),
+            last_error: None,
+        }];
+        showcase
+            .live_data
+            .apply(LiveDataMessage::Event(AdapterEvent {
+                adapter_id: AdapterId::new("adapter-a").unwrap(),
+                stream: "opaque.stream".to_owned(),
+                kind: "updated".to_owned(),
+                payload: r#"{"user":{"name":"Ada","roles":["developer"]}}"#.parse().unwrap(),
+            }));
+
+        assert!(showcase.handle_key(key(KeyCode::Char('j'))).redraw);
+        let collapsed = showcase_view(Size::new(100, 20), &mut showcase);
+        assert!(frame_contains(&collapsed.frame, "Structured Payload"));
+        assert!(frame_contains(&collapsed.frame, "root"));
+        assert!(showcase.handle_key(key(KeyCode::Right)).redraw);
+        assert!(showcase.handle_key(key(KeyCode::Right)).redraw);
+        assert!(showcase.handle_key(key(KeyCode::Right)).redraw);
+        let expanded = showcase_view(Size::new(100, 20), &mut showcase);
+        assert!(frame_contains(&expanded.frame, "name: \"Ada\""));
+        assert!(showcase.handle_key(key(KeyCode::Escape)).redraw);
+        assert!(matches!(
+            showcase.adapter_browser_mode,
+            AdapterBrowserMode::Adapters
         ));
     }
 
