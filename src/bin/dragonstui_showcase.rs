@@ -219,6 +219,7 @@ enum AdapterBrowserMode {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ObservabilityMode {
     Logs,
+    Metrics,
 }
 
 impl AdapterViewState {
@@ -857,6 +858,55 @@ fn log_projection(live_data: &LiveDataState, filter: &LiveDataFilter) -> Vec<Log
         .collect()
 }
 
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct MetricSeriesKey {
+    adapter_id: String,
+    stream: String,
+    name: String,
+    unit: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct MetricSeries {
+    key: MetricSeriesKey,
+    samples: Vec<(f64, Option<u64>)>,
+}
+
+/// A transient, source-bounded series view. Values are never inferred from payload JSON.
+fn metric_projection(live_data: &LiveDataState) -> Vec<MetricSeries> {
+    let mut series = BTreeMap::<MetricSeriesKey, Vec<(f64, Option<u64>)>>::new();
+    for entry in &live_data.history {
+        if let LiveDataMessage::Event(AdapterEvent {
+            adapter_id,
+            stream,
+            observation:
+                Some(Observation::Metric {
+                    name,
+                    value,
+                    unit,
+                    timestamp_millis,
+                }),
+            ..
+        }) = &entry.message
+        {
+            let key = MetricSeriesKey {
+                adapter_id: adapter_id.to_string(),
+                stream: stream.clone(),
+                name: name.clone(),
+                unit: unit.clone(),
+            };
+            series.entry(key).or_default().push((
+                value.as_f64().expect("validated Observation::Metric"),
+                *timestamp_millis,
+            ));
+        }
+    }
+    series
+        .into_iter()
+        .map(|(key, samples)| MetricSeries { key, samples })
+        .collect()
+}
+
 impl Default for LiveDataState {
     fn default() -> Self {
         Self::with_history_capacity(LIVE_HISTORY_CAPACITY)
@@ -1448,9 +1498,10 @@ impl Showcase {
                     _ => {}
                 }
             }
-            if self.adapter_browser_mode
-                == AdapterBrowserMode::Observability(ObservabilityMode::Logs)
-            {
+            if matches!(
+                self.adapter_browser_mode,
+                AdapterBrowserMode::Observability(_)
+            ) {
                 match key.code {
                     KeyCode::Char('o' | 'O') | KeyCode::Escape => {
                         self.adapter_browser_mode = AdapterBrowserMode::Adapters;
@@ -1462,6 +1513,14 @@ impl Showcase {
                     }
                     KeyCode::Char('f' | 'F') => {
                         self.live_view.follow(&self.live_data, &self.live_filter);
+                    }
+                    KeyCode::Char('1') => {
+                        self.adapter_browser_mode =
+                            AdapterBrowserMode::Observability(ObservabilityMode::Logs);
+                    }
+                    KeyCode::Char('2') => {
+                        self.adapter_browser_mode =
+                            AdapterBrowserMode::Observability(ObservabilityMode::Metrics);
                     }
                     _ => return Outcome::default(),
                 }
@@ -3400,7 +3459,76 @@ fn render_adapters(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -> Op
         AdapterBrowserMode::Observability(ObservabilityMode::Logs) => {
             render_log_viewer(frame, area, showcase)
         }
+        AdapterBrowserMode::Observability(ObservabilityMode::Metrics) => {
+            render_metric_graph(frame, area, showcase)
+        }
     }
+}
+
+fn render_metric_graph(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -> Option<Position> {
+    let theme = showcase.theme;
+    let inner = panel(
+        frame,
+        area,
+        "Observability · Metrics",
+        false,
+        theme,
+        BorderSet::double(),
+    );
+    let series = metric_projection(&showcase.live_data);
+    if series.is_empty() {
+        Text::new("No Metric observations in retained history.")
+            .style(Style::new().fg(theme.muted).bg(theme.background))
+            .render(frame, inner);
+        return None;
+    }
+    let values = series
+        .iter()
+        .flat_map(|series| series.samples.iter().map(|(value, _)| *value));
+    let (mut min, mut max) = (f64::INFINITY, f64::NEG_INFINITY);
+    for value in values {
+        min = min.min(value);
+        max = max.max(value);
+    }
+    if min == max {
+        min -= 1.0;
+        max += 1.0;
+    }
+    let mut canvas = Canvas::new(inner.width, inner.height.saturating_sub(2));
+    let width = canvas.logical_width().saturating_sub(1) as f64;
+    let height = canvas.logical_height().saturating_sub(1) as f64;
+    for series in &series {
+        let count = series.samples.len().saturating_sub(1).max(1) as f64;
+        for (index, (value, _)) in series.samples.iter().enumerate() {
+            let x = ((index as f64 / count) * width).round().max(0.0) as u32;
+            let y = (height - ((*value - min) / (max - min) * height))
+                .round()
+                .max(0.0) as u32;
+            canvas.set_point(x, y);
+        }
+    }
+    canvas.render(
+        frame,
+        inner,
+        Style::new().fg(theme.secondary).bg(theme.background),
+    );
+    let label = series
+        .iter()
+        .map(|series| {
+            format!(
+                "{}/{}/{}",
+                series.key.adapter_id, series.key.stream, series.key.name
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" · ");
+    Text::new(format!("{label} · range {min}..{max}"))
+        .style(Style::new().fg(theme.muted).bg(theme.background))
+        .render(
+            frame,
+            Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
+        );
+    None
 }
 
 fn render_log_viewer(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -> Option<Position> {
@@ -6014,6 +6142,33 @@ mod tests {
             log_projection(&showcase.live_data, &showcase.live_filter).len(),
             1
         );
+    }
+
+    #[test]
+    fn metrics_project_only_explicit_metric_observations() {
+        let mut live = LiveDataState::with_history_capacity(4);
+        let event = |observation| AdapterEvent {
+            adapter_id: AdapterId::new("adapter-a").unwrap(),
+            stream: "semantic".to_owned(),
+            kind: "fixture".to_owned(),
+            observation,
+            payload: "null".parse().unwrap(),
+        };
+        live.apply(LiveDataMessage::Event(event(Some(Observation::Metric {
+            name: "load".to_owned(),
+            value: (-2).into(),
+            unit: Some("units".to_owned()),
+            timestamp_millis: Some(10),
+        }))));
+        live.apply(LiveDataMessage::Event(event(Some(Observation::Log {
+            text: "not metric".to_owned(),
+            severity: None,
+            timestamp_millis: None,
+        }))));
+        let series = metric_projection(&live);
+        assert_eq!(series.len(), 1);
+        assert_eq!(series[0].samples, vec![(-2.0, Some(10))]);
+        assert_eq!(series[0].key.name, "load");
     }
 
     #[test]
