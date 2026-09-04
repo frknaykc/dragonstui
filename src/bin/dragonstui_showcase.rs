@@ -3261,11 +3261,15 @@ fn render_adapter_list(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -
     let panes = showcase.adapter_inspector_split.split(layout, area);
     let list_area = panes.master;
     if let Some(divider) = panes.divider {
+        let grip_offset = divider.height / 2;
         for offset in 0..divider.height {
             frame.set_cell(
                 divider.x,
                 divider.y.saturating_add(offset),
-                Cell::new('│', Style::new().fg(theme.muted).bg(theme.background)),
+                Cell::new(
+                    if offset == grip_offset { '↔' } else { '║' },
+                    Style::new().fg(theme.warning).bg(theme.background).bold(),
+                ),
             );
         }
     }
@@ -3351,8 +3355,8 @@ fn render_adapter_list(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -
         showcase.adapter_action_status.clone().unwrap_or_else(|| {
             localized(
                 showcase.language,
-                "C capabilities · I install · S start · T stop · R restart · U update · X remove · / search · P pause · F follow",
-                "C yetenekler · I kur · S başlat · T durdur · R yeniden başlat · U güncelle · X kaldır · / ara · P duraklat · F takip",
+                "↔ drag divider · C capabilities · I install · S start · T stop · R restart · U update · X remove · / search · P pause · F follow",
+                "↔ ayırıcıyı sürükle · C yetenekler · I kur · S başlat · T durdur · R yeniden başlat · U güncelle · X kaldır · / ara · P duraklat · F takip",
             )
             .to_owned()
         })
@@ -4403,7 +4407,7 @@ mod tests {
             last_error: None,
         }];
         showcase.table.set_selected(0);
-        let _ = showcase_view(Size::new(160, 55), &mut showcase);
+        let initial = showcase_view(Size::new(160, 55), &mut showcase);
         let layout = InspectorLayout::new(60, 24, 32);
         let area = showcase.hits.adapter_inspector;
         let divider = showcase
@@ -4411,6 +4415,14 @@ mod tests {
             .split(layout, area)
             .divider
             .unwrap();
+        assert_eq!(
+            initial
+                .frame
+                .buffer()
+                .get(divider.x, divider.y.saturating_add(divider.height / 2))
+                .map(|cell| cell.character),
+            Some('↔')
+        );
 
         assert!(
             !showcase
