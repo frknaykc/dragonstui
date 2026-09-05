@@ -171,7 +171,7 @@ def establish_controlling_terminal() -> None:
 
 
 def read_available(fd: int, output: bytearray, timeout: float) -> None:
-    ready, _, _ = select.select([fd], [], [], timeout)
+    ready, _, _ = select.select([fd], [], [], max(0.0, timeout))
     if not ready:
         return
     try:
@@ -812,9 +812,14 @@ def main() -> int:
                 "confirmed action did not invoke exactly once",
                 master=master, output=output,
             )
-            wait_for_text(master, output, "Operation succeeded", 2.0, "confirmed operation did not succeed")
+            # The earlier Alpha notification is still in the transcript. Wait
+            # for this confirmed operation's actual rendered payload before the
+            # next invocation, not an old generic "Operation succeeded" string.
+            wait_for_current_text(master, output, '"outcome":"confirmed"', 2.0, "confirmed operation did not reach its current rendered success")
 
-            send(master, output, b"\x1b[B\r")
+            send(master, output, b"\x1b[B")
+            wait_for_current_text(master, output, "label: Delta", 1.0, "delayed action was not the current selection")
+            send(master, output, b"\r")
             wait_for_action_invocations(
                 control,
                 [

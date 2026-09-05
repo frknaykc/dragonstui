@@ -21,6 +21,19 @@ HARNESS = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(HARNESS)
 
 
+class ElapsedPollBudgetTests(unittest.TestCase):
+    def test_expired_poll_budget_is_nonblocking_not_select_value_error(self) -> None:
+        master, slave = pty.openpty()
+        os.set_blocking(master, False)
+        try:
+            output = bytearray()
+            HARNESS.read_available(master, output, -0.001)
+            self.assertEqual(output, bytearray())
+        finally:
+            os.close(master)
+            os.close(slave)
+
+
 class PropertyAssertionTests(unittest.TestCase):
     def test_property_match_does_not_accept_a_digit_from_another_value(self) -> None:
         line = "Live events received:   0 · Retained live history: 0/16"
@@ -28,6 +41,12 @@ class PropertyAssertionTests(unittest.TestCase):
         self.assertFalse(
             HARNESS.property_has_value(line, "Live events received:", "1")
         )
+
+    def test_exit_code_field_rejects_zero_and_numeric_prefix_matches(self) -> None:
+        label = "Interactive session exited with code"
+        for actual in ("0", "20", "21", "-2"):
+            self.assertFalse(HARNESS.property_has_value(f"{label} {actual}", label, "2"))
+        self.assertTrue(HARNESS.property_has_value(f"{label} 2 │", label, "2"))
 
     def test_property_match_accepts_the_value_cell_prefix(self) -> None:
         line = "Last live adapter:      live-a"

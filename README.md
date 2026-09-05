@@ -102,6 +102,8 @@ The controller daemon is the runtime lifecycle authority. The showcase uses the 
 
 Adapters describe generic capabilities through protocol v1. Names such as `containers.logs` are capability examples, not built-in integrations. DragonsTUI ships **no** Docker, Git, PostgreSQL, Kubernetes, process, port, log, or database adapter. The Section 8 Capability Browser groups live controller diagnostics by opaque capability contract and lists the adapters currently reporting each contract; it does not invoke capabilities or consume their data.
 
+The bundled **reference mock adapter** exercises RPC, observability, actions and interactive echo sessions without Docker, Git or external services. It is a fixture provider, not a real shell or domain adapter. See the [reference mock guide](docs/reference-mock-adapter.md) for isolated setup and end-to-end acceptance.
+
 Read the details:
 
 - [Adapter host architecture](docs/architecture/adapter-host.md)
@@ -110,7 +112,7 @@ Read the details:
 
 ## Project Status
 
-DragonsTUI is under active development and remains pre-1.0. The core framework and adapter-host foundations are implemented; adapter distribution and management are being finalized.
+DragonsTUI is under active development and remains pre-1.0. The core framework, adapter-host foundations, distribution, observability, actions and developer-tooling views are implemented. Phase 9 builds the reference adapter ecosystem before external conformance tooling and SDK stabilization.
 
 | Area | Status |
 | --- | --- |
@@ -120,8 +122,10 @@ DragonsTUI is under active development and remains pre-1.0. The core framework a
 | Generic live data | Complete (M44–M47) |
 | Generic inspector UX | Complete (M48–M52) |
 | Observability | Complete (M53–M58) |
-| Adapter actions | In progress (M59–M60 complete) |
-| SDK and conformance tooling | Planned |
+| Adapter actions | Complete (M59–M62) |
+| Developer tooling views | Complete (M63–M65) |
+| Reference mock adapter | Complete (M66; locally verified) |
+| SDK and conformance tooling | Planned (M67–M68) |
 
 Adapter distribution and management includes registry/install/update/remove integrity boundaries, CLI and TUI management, typed authenticated controller IPC, per-adapter lifecycle conflict protection, real PTY acceptance, and M43 capability discovery. Generic live data transports adapter events away from the UI thread into bounded retained history, derives opaque text and identity filters, and supports pause/follow selection without stopping ingestion. Generic Inspector UX provides reusable layout, viewport, property, and structured-data primitives. The optional showcase projects only producer-declared `Observation` variants into a Log Viewer, time-series graph, heatmap, status matrix, Timeline, and Error/Stack Trace view; it never derives those classes from arbitrary payload JSON, stream, or `kind` text. Each projection is rebuilt from the retained 16-entry live history, so it does not create an unbounded telemetry store. M59–M60 add producer-declared generic action metadata and confirmation policy through the authenticated controller path; confirmation is UI protection against accidental dispatch, not a permission system.
 

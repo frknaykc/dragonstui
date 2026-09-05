@@ -4,8 +4,10 @@ use std::{
     fs::{self, OpenOptions},
     io::{self, BufRead, Write},
     path::{Path, PathBuf},
-    process, thread,
-    time::Duration,
+    process,
+    sync::{Arc, Mutex, mpsc},
+    thread,
+    time::{Duration, Instant},
 };
 
 use dragonstui_adapter_host::{
@@ -16,160 +18,58 @@ use dragonstui_adapter_host::{
 };
 use serde_json::{Value, json};
 
+// Reference-only lifetime admission bound, not a host/protocol-wide limit.
+const REFERENCE_REQUEST_LIMIT: usize = 1024;
+
 fn main() {
     let options = parse_options();
-    match options.mode.as_str() {
-        "process" => process_mode(),
-        "normal" => protocol_mode(
-            MockBehavior::Normal,
-            &options.id,
-            options.action_marker.as_deref(),
-            options.session_marker.as_deref(),
-            options.event_release.as_deref(),
-        ),
-        "bad-protocol" => protocol_mode(
-            MockBehavior::BadProtocol,
-            &options.id,
-            options.action_marker.as_deref(),
-            options.session_marker.as_deref(),
-            options.event_release.as_deref(),
-        ),
-        "bad-id" => protocol_mode(
-            MockBehavior::BadId,
-            &options.id,
-            options.action_marker.as_deref(),
-            options.session_marker.as_deref(),
-            options.event_release.as_deref(),
-        ),
+    let behavior = match options.mode.as_str() {
+        "process" => return process_mode(),
+        "normal" => MockBehavior::Normal,
+        "reference" => MockBehavior::Reference,
+        "bad-protocol" => MockBehavior::BadProtocol,
+        "bad-id" => MockBehavior::BadId,
         "malformed" => {
             println!("{{not json}}");
             flush_stdout();
+            return;
         }
         "crash" => process::exit(23),
-        "timeout" => thread::sleep(Duration::from_secs(30)),
+        "timeout" => return thread::sleep(Duration::from_secs(30)),
         "hold" => {
             hold_before_handshake(&options);
-            protocol_mode(
-                MockBehavior::Normal,
-                &options.id,
-                options.action_marker.as_deref(),
-                options.session_marker.as_deref(),
-                options.event_release.as_deref(),
-            );
+            MockBehavior::Normal
         }
-        "duplicate-capabilities" => protocol_mode(
-            MockBehavior::DuplicateCapabilities,
-            &options.id,
-            options.action_marker.as_deref(),
-            options.session_marker.as_deref(),
-            options.event_release.as_deref(),
-        ),
-        "empty-capabilities" => protocol_mode(
-            MockBehavior::EmptyCapabilities,
-            &options.id,
-            options.action_marker.as_deref(),
-            options.session_marker.as_deref(),
-            options.event_release.as_deref(),
-        ),
-        "shared-capabilities" => protocol_mode(
-            MockBehavior::SharedCapabilities,
-            &options.id,
-            options.action_marker.as_deref(),
-            options.session_marker.as_deref(),
-            options.event_release.as_deref(),
-        ),
-        "events" => protocol_mode(
-            MockBehavior::Events,
-            &options.id,
-            options.action_marker.as_deref(),
-            options.session_marker.as_deref(),
-            options.event_release.as_deref(),
-        ),
-        "live-events" => protocol_mode(
-            MockBehavior::LiveEvents,
-            &options.id,
-            options.action_marker.as_deref(),
-            options.session_marker.as_deref(),
-            options.event_release.as_deref(),
-        ),
-        "semantic-events" => protocol_mode(
-            MockBehavior::SemanticEvents,
-            &options.id,
-            options.action_marker.as_deref(),
-            options.session_marker.as_deref(),
-            options.event_release.as_deref(),
-        ),
-        "observability-events" => protocol_mode(
-            MockBehavior::ObservabilityEvents,
-            &options.id,
-            options.action_marker.as_deref(),
-            options.session_marker.as_deref(),
-            options.event_release.as_deref(),
-        ),
-        "actions" => protocol_mode(
-            MockBehavior::Actions,
-            &options.id,
-            options.action_marker.as_deref(),
-            options.session_marker.as_deref(),
-            options.event_release.as_deref(),
-        ),
-        "sessions" => protocol_mode(
-            MockBehavior::Sessions,
-            &options.id,
-            options.action_marker.as_deref(),
-            options.session_marker.as_deref(),
-            options.event_release.as_deref(),
-        ),
-        "delayed-sessions" => protocol_mode(
-            MockBehavior::DelayedSessions,
-            &options.id,
-            options.action_marker.as_deref(),
-            options.session_marker.as_deref(),
-            options.event_release.as_deref(),
-        ),
-        "stress-events" => protocol_mode(
-            MockBehavior::StressEvents,
-            &options.id,
-            options.action_marker.as_deref(),
-            options.session_marker.as_deref(),
-            options.event_release.as_deref(),
-        ),
-        "out-of-order" => protocol_mode(
-            MockBehavior::OutOfOrder,
-            &options.id,
-            options.action_marker.as_deref(),
-            options.session_marker.as_deref(),
-            options.event_release.as_deref(),
-        ),
-        "unknown-response" => protocol_mode(
-            MockBehavior::UnknownResponse,
-            &options.id,
-            options.action_marker.as_deref(),
-            options.session_marker.as_deref(),
-            options.event_release.as_deref(),
-        ),
-        "crash-after-handshake" => protocol_mode(
-            MockBehavior::CrashAfterHandshake,
-            &options.id,
-            options.action_marker.as_deref(),
-            options.session_marker.as_deref(),
-            options.event_release.as_deref(),
-        ),
-        "crash-on-request" => protocol_mode(
-            MockBehavior::CrashOnRequest,
-            &options.id,
-            options.action_marker.as_deref(),
-            options.session_marker.as_deref(),
-            options.event_release.as_deref(),
-        ),
-        _ => protocol_mode(
-            MockBehavior::Normal,
-            &options.id,
-            options.action_marker.as_deref(),
-            options.session_marker.as_deref(),
-            options.event_release.as_deref(),
-        ),
-    }
+        "duplicate-capabilities" => MockBehavior::DuplicateCapabilities,
+        "empty-capabilities" => MockBehavior::EmptyCapabilities,
+        "shared-capabilities" => MockBehavior::SharedCapabilities,
+        "events" => MockBehavior::Events,
+        "live-events" => MockBehavior::LiveEvents,
+        "semantic-events" => MockBehavior::SemanticEvents,
+        "observability-events" => MockBehavior::ObservabilityEvents,
+        "actions" => MockBehavior::Actions,
+        "sessions" => MockBehavior::Sessions,
+        "delayed-sessions" => MockBehavior::DelayedSessions,
+        "stress-events" => MockBehavior::StressEvents,
+        "out-of-order" => MockBehavior::OutOfOrder,
+        "unknown-response" => MockBehavior::UnknownResponse,
+        "crash-after-handshake" => MockBehavior::CrashAfterHandshake,
+        "crash-on-request" => MockBehavior::CrashOnRequest,
+        _ => usage_error(&format!("unknown mode: {}", options.mode)),
+    };
+    protocol_mode(
+        behavior,
+        &options.id,
+        options.action_marker.as_deref(),
+        options.session_marker.as_deref(),
+        options.event_release.as_deref(),
+        options.action_release.as_deref(),
+    );
+}
+
+fn usage_error(message: &str) -> ! {
+    eprintln!("{message}; use --help for fixture options");
+    process::exit(64);
 }
 
 fn parse_options() -> MockOptions {
@@ -183,19 +83,81 @@ fn parse_options() -> MockOptions {
         action_marker: None,
         session_marker: None,
         event_release: None,
+        action_release: None,
     };
+    let mut seen = HashSet::new();
     while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--mode" => options.mode = args.next().unwrap_or_else(|| "normal".to_owned()),
-            "--id" => options.id = args.next().unwrap_or_else(|| "mock".to_owned()),
-            "--hold-ready" => options.hold_ready = args.next().map(PathBuf::from),
-            "--hold-release" => options.hold_release = args.next().map(PathBuf::from),
-            "--launch-marker" => options.launch_marker = args.next().map(PathBuf::from),
-            "--action-marker" => options.action_marker = args.next().map(PathBuf::from),
-            "--session-marker" => options.session_marker = args.next().map(PathBuf::from),
-            "--event-release" => options.event_release = args.next().map(PathBuf::from),
-            _ => {}
+        if arg == "--help" || arg == "-h" {
+            println!(
+                "dragonstui-adapter-host-mock [--mode MODE] [--id ID]\n\
+Modes: normal (default), reference, process, bad-protocol, bad-id, malformed,\n\
+crash, timeout, hold, duplicate-capabilities, empty-capabilities, shared-capabilities,\n\
+events, live-events, semantic-events, observability-events, actions, sessions,\n\
+delayed-sessions, stress-events, out-of-order, unknown-response,\n\
+crash-after-handshake, crash-on-request\n\
+Options: --action-marker PATH, --session-marker PATH, --event-release PATH,\n\
+--action-release PATH (reference only), --hold-ready PATH, --hold-release PATH,\n\
+--launch-marker PATH (hold mode)\n\
+Reference combines RPC, four declared actions, fixture.terminal and observations.\n\
+Startup: two synchronous observation batches; --event-release holds batch two\n\
+until PATH is a file. test.stream emits both batches plus a generic event and ack.\n\
+Delta: one pending action maximum; --action-release waits for a file without\n\
+blocking RPC/session/shutdown; otherwise completes after 150 ms. Excess delta\n\
+requests return fixture_action_busy. Markers are never consumed by the mock.\n\
+Reference remembers at most 1024 unique RPC IDs per process (including failures);\n\
+new IDs then receive fixture_request_limit. Duplicate IDs remain duplicate_request.\n\
+Sessions and shutdown remain available after this lifetime admission limit.\n\
+test.slow deliberately blocks requests for 30 seconds (timeout fixture, no reply);\n\
+test.crash exits 24. Sessions echo deterministic input; no shell is executed."
+            );
+            process::exit(0);
         }
+        if !seen.insert(arg.clone()) {
+            usage_error(&format!("duplicate option: {arg}"));
+        }
+        if !matches!(
+            arg.as_str(),
+            "--mode"
+                | "--id"
+                | "--hold-ready"
+                | "--hold-release"
+                | "--launch-marker"
+                | "--action-marker"
+                | "--session-marker"
+                | "--event-release"
+                | "--action-release"
+        ) {
+            usage_error(&format!("unknown option: {arg}"));
+        }
+        let value = args
+            .next()
+            .filter(|value| !value.is_empty() && !value.starts_with("--"))
+            .unwrap_or_else(|| usage_error(&format!("missing value for {arg}")));
+        match arg.as_str() {
+            "--mode" => options.mode = value,
+            "--id" => options.id = value,
+            "--hold-ready" => options.hold_ready = Some(value.into()),
+            "--hold-release" => options.hold_release = Some(value.into()),
+            "--launch-marker" => options.launch_marker = Some(value.into()),
+            "--action-marker" => options.action_marker = Some(value.into()),
+            "--session-marker" => options.session_marker = Some(value.into()),
+            "--event-release" => options.event_release = Some(value.into()),
+            "--action-release" => options.action_release = Some(value.into()),
+            _ => unreachable!(),
+        }
+    }
+    if AdapterId::new(&options.id).is_err() {
+        usage_error("invalid --id");
+    }
+    if options.action_release.is_some() && options.mode != "reference" {
+        usage_error("--action-release requires --mode reference");
+    }
+    if options.mode == "reference"
+        && (options.hold_ready.is_some()
+            || options.hold_release.is_some()
+            || options.launch_marker.is_some())
+    {
+        usage_error("hold options are not supported by reference mode");
     }
     options
 }
@@ -267,15 +229,25 @@ fn protocol_mode(
     action_marker: Option<&std::path::Path>,
     session_marker: Option<&std::path::Path>,
     event_release: Option<&std::path::Path>,
+    action_release: Option<&std::path::Path>,
 ) {
     let stdin = io::stdin();
     let mut lines = stdin.lock().lines();
     let Some(Ok(line)) = lines.next() else {
         return;
     };
-    let Ok(ProtocolMessage::Hello(_)) = serde_json::from_str::<ProtocolMessage>(&line) else {
+    let Ok(ProtocolMessage::Hello(hello)) = serde_json::from_str::<ProtocolMessage>(&line) else {
         return;
     };
+    if behavior == MockBehavior::Reference && hello.protocol != PROTOCOL_VERSION {
+        emit(&ProtocolMessage::Error(ErrorMessage {
+            protocol: PROTOCOL_VERSION,
+            id: None,
+            code: "unsupported_protocol".to_owned(),
+            message: "reference adapter requires protocol v1".to_owned(),
+        }));
+        return;
+    }
 
     let (protocol, id, capabilities) = match behavior {
         MockBehavior::BadProtocol => (PROTOCOL_VERSION + 1, adapter_id, vec!["test.echo"]),
@@ -292,6 +264,18 @@ fn protocol_mode(
         MockBehavior::Sessions | MockBehavior::DelayedSessions => {
             (PROTOCOL_VERSION, adapter_id, vec!["fixture.terminal"])
         }
+        MockBehavior::Reference => (
+            PROTOCOL_VERSION,
+            adapter_id,
+            vec![
+                "test.echo",
+                "test.stream",
+                "test.fail",
+                "test.slow",
+                "test.crash",
+                "fixture.terminal",
+            ],
+        ),
         MockBehavior::Normal
         | MockBehavior::Events
         | MockBehavior::LiveEvents
@@ -309,7 +293,7 @@ fn protocol_mode(
         ),
     };
 
-    let actions = if behavior == MockBehavior::Actions {
+    let actions = if matches!(behavior, MockBehavior::Actions | MockBehavior::Reference) {
         vec![
             AdapterAction {
                 id: ActionId::new("fixture.action.alpha").unwrap(),
@@ -432,21 +416,33 @@ fn protocol_mode(
             }));
         }
     }
-    if behavior == MockBehavior::ObservabilityEvents {
+    let mut reference_observations = None;
+    if matches!(
+        behavior,
+        MockBehavior::ObservabilityEvents | MockBehavior::Reference
+    ) {
         let (first_batch, second_batch) = observability_fixture_batches();
         emit_observations(first_batch);
         let release = event_release.map(std::path::Path::to_path_buf);
-        thread::spawn(move || {
-            if let Some(release) = release {
-                // PTY acceptance releases batch two only after observing batch one.
-                while !release.is_file() {
-                    thread::sleep(Duration::from_millis(5));
-                }
-            } else {
-                thread::sleep(Duration::from_millis(1_200));
-            }
+        if behavior == MockBehavior::Reference && release.is_none() {
+            // Reference startup is deterministic: no timer races with queued RPC/shutdown.
             emit_observations(second_batch);
-        });
+        } else if behavior == MockBehavior::Reference {
+            reference_observations =
+                Some(ReferenceObservations::new(release.unwrap(), second_batch));
+        } else {
+            thread::spawn(move || {
+                if let Some(release) = release {
+                    // PTY acceptance releases batch two only after observing batch one.
+                    while !release.is_file() {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                } else {
+                    thread::sleep(Duration::from_millis(1_200));
+                }
+                emit_observations(second_batch);
+            });
+        }
     }
     if behavior == MockBehavior::StressEvents {
         for index in 0..40 {
@@ -460,6 +456,8 @@ fn protocol_mode(
         }
     }
 
+    let mut reference_actions = (behavior == MockBehavior::Reference)
+        .then(|| ReferenceActions::new(action_release.map(Path::to_path_buf)));
     let mut seen_requests = HashSet::new();
     let mut delayed = Vec::new();
     let mut provider_sessions = MockSessionRegistry::new(session_marker);
@@ -476,8 +474,36 @@ fn protocol_mode(
             }));
             continue;
         };
+        if behavior == MockBehavior::Reference && message.protocol() != PROTOCOL_VERSION {
+            let id = match message {
+                ProtocolMessage::Request(request) => Some(request.id),
+                ProtocolMessage::SessionOpen(open) => Some(open.id),
+                _ => None,
+            };
+            emit(&ProtocolMessage::Error(ErrorMessage {
+                protocol: PROTOCOL_VERSION,
+                id,
+                code: "unsupported_protocol".to_owned(),
+                message: "reference adapter requires protocol v1".to_owned(),
+            }));
+            continue;
+        }
         match message {
             ProtocolMessage::SessionOpen(open) if behavior.supports_sessions() => {
+                if behavior == MockBehavior::Reference
+                    && (open.capability.as_str() != "fixture.terminal"
+                        || open.rows == 0
+                        || open.columns == 0)
+                {
+                    emit(&ProtocolMessage::Error(ErrorMessage {
+                        protocol: PROTOCOL_VERSION,
+                        id: Some(open.id),
+                        code: "invalid_session_open".to_owned(),
+                        message: "session requires fixture.terminal and nonzero dimensions"
+                            .to_owned(),
+                    }));
+                    continue;
+                }
                 let session_id = SessionId::new("fixture-session").unwrap();
                 match provider_sessions.record_session(session_id.clone()) {
                     Ok(true) => {}
@@ -610,6 +636,19 @@ fn protocol_mode(
                     }
                     continue;
                 }
+                if behavior == MockBehavior::Reference
+                    && seen_requests.len() >= REFERENCE_REQUEST_LIMIT
+                    && !seen_requests.contains(&request.id)
+                {
+                    emit(&ProtocolMessage::Error(ErrorMessage {
+                        protocol: PROTOCOL_VERSION,
+                        id: Some(request.id),
+                        code: "fixture_request_limit".to_owned(),
+                        message: "reference reached its 1024 unique RPC ID lifetime limit"
+                            .to_owned(),
+                    }));
+                    continue;
+                }
                 if !seen_requests.insert(request.id.clone()) {
                     emit(&ProtocolMessage::Error(ErrorMessage {
                         protocol: PROTOCOL_VERSION,
@@ -619,7 +658,39 @@ fn protocol_mode(
                     }));
                     continue;
                 }
-                if behavior == MockBehavior::Actions {
+                if behavior == MockBehavior::Reference
+                    && let Some(action) = request.action.as_ref()
+                {
+                    let declared = matches!(
+                        action.as_str(),
+                        "fixture.action.alpha"
+                            | "fixture.destroy.everything"
+                            | "fixture.inspect"
+                            | "fixture.action.delta"
+                    );
+                    let error = if !declared {
+                        Some(("unsupported_action", "undeclared action"))
+                    } else if request.operation.as_str() != "test.echo" {
+                        Some((
+                            "action_operation_mismatch",
+                            "declared action requires test.echo",
+                        ))
+                    } else {
+                        None
+                    };
+                    if let Some((code, message)) = error {
+                        emit(&ProtocolMessage::Error(ErrorMessage {
+                            protocol: PROTOCOL_VERSION,
+                            id: Some(request.id),
+                            code: code.to_owned(),
+                            message: message.to_owned(),
+                        }));
+                        continue;
+                    }
+                }
+                if behavior == MockBehavior::Actions
+                    || (behavior == MockBehavior::Reference && request.action.is_some())
+                {
                     if let (Some(marker), Some(action)) = (action_marker, request.action.as_ref()) {
                         record_action(marker, action);
                     }
@@ -644,6 +715,21 @@ fn protocol_mode(
                             id: request.id,
                             payload: json!({"outcome": "confirmed"}),
                         })),
+                        Some("fixture.action.delta") if behavior == MockBehavior::Reference => {
+                            if !reference_actions
+                                .as_ref()
+                                .unwrap()
+                                .submit(request.id.clone())
+                            {
+                                emit(&ProtocolMessage::Error(ErrorMessage {
+                                    protocol: PROTOCOL_VERSION,
+                                    id: Some(request.id),
+                                    code: "fixture_action_busy".to_owned(),
+                                    message: "fixture already has a pending delta action"
+                                        .to_owned(),
+                                }));
+                            }
+                        }
                         Some("fixture.action.delta") => {
                             thread::sleep(Duration::from_millis(150));
                             emit(&ProtocolMessage::Response(Response {
@@ -668,6 +754,11 @@ fn protocol_mode(
                         payload: request.payload,
                     })),
                     "test.stream" => {
+                        if behavior == MockBehavior::Reference {
+                            let (first, second) = observability_fixture_batches();
+                            emit_observations(first);
+                            emit_observations(second);
+                        }
                         emit(&ProtocolMessage::Event(Event {
                             protocol: PROTOCOL_VERSION,
                             stream: "test".to_owned(),
@@ -698,6 +789,12 @@ fn protocol_mode(
                 }
             }
             ProtocolMessage::Shutdown(_) => {
+                // Cancel a held delta before acknowledging; no late action completion.
+                drop(reference_observations.take());
+                drop(reference_actions.take());
+                if behavior == MockBehavior::Reference {
+                    let _ = provider_sessions.clear();
+                }
                 emit(&ProtocolMessage::ShutdownAck(ShutdownAck {
                     protocol: PROTOCOL_VERSION,
                 }));
@@ -706,12 +803,122 @@ fn protocol_mode(
             _ => {}
         }
     }
+    drop(reference_observations);
+    drop(reference_actions);
+    if behavior == MockBehavior::Reference {
+        let _ = provider_sessions.clear();
+    }
 }
 
 fn emit(message: &ProtocolMessage) {
-    serde_json::to_writer(io::stdout(), message).unwrap();
-    println!();
-    flush_stdout();
+    // JSON and its terminator must be one atomic frame across all producers.
+    let mut stdout = io::stdout().lock();
+    serde_json::to_writer(&mut stdout, message).unwrap();
+    stdout.write_all(b"\n").unwrap();
+    stdout.flush().unwrap();
+}
+
+/// Own the reference batch producer until it exits. Joining before ShutdownAck
+/// allows already-started output to finish but forbids any post-ack event frames.
+struct ReferenceObservations {
+    stop: mpsc::SyncSender<()>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+
+impl ReferenceObservations {
+    fn new(release: PathBuf, batch: Vec<Observation>) -> Self {
+        let (stop, stopped) = mpsc::sync_channel(1);
+        let worker = thread::spawn(move || {
+            while matches!(
+                stopped.recv_timeout(Duration::from_millis(5)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ) {
+                if release.is_file() {
+                    emit_observations(batch);
+                    break;
+                }
+            }
+        });
+        Self {
+            stop,
+            worker: Some(worker),
+        }
+    }
+}
+
+impl Drop for ReferenceObservations {
+    fn drop(&mut self) {
+        let _ = self.stop.send(());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+/// One worker and one pending slot, regardless of the number of delta requests.
+/// The request loop never waits for the release marker. Dropping the worker
+/// cancels pending work and wakes its bounded polling wait, including on EOF.
+struct ReferenceActions {
+    pending: Arc<Mutex<Option<(Response, Instant)>>>,
+    stop: mpsc::SyncSender<()>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+
+impl ReferenceActions {
+    fn new(release: Option<PathBuf>) -> Self {
+        let pending: Arc<Mutex<Option<(Response, Instant)>>> = Arc::new(Mutex::new(None));
+        let work = Arc::clone(&pending);
+        let (stop, stopped) = mpsc::sync_channel(1);
+        let worker = thread::spawn(move || {
+            while matches!(
+                stopped.recv_timeout(Duration::from_millis(5)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ) {
+                let mut pending = work.lock().unwrap();
+                let ready = pending.as_ref().is_some_and(|(_, deadline)| {
+                    release
+                        .as_ref()
+                        .map_or_else(|| Instant::now() >= *deadline, |path| path.is_file())
+                });
+                if ready {
+                    let (response, _) = pending.take().unwrap();
+                    // Keep the slot locked until the completion is on the wire:
+                    // an observer can immediately submit the next delta safely.
+                    emit(&ProtocolMessage::Response(response));
+                }
+            }
+        });
+        Self {
+            pending,
+            stop,
+            worker: Some(worker),
+        }
+    }
+
+    fn submit(&self, id: dragonstui_adapter_host::RequestId) -> bool {
+        let mut pending = self.pending.lock().unwrap();
+        if pending.is_some() {
+            return false;
+        }
+        *pending = Some((
+            Response {
+                protocol: PROTOCOL_VERSION,
+                id,
+                payload: json!({"outcome": "delayed"}),
+            },
+            Instant::now() + Duration::from_millis(150),
+        ));
+        true
+    }
+}
+
+impl Drop for ReferenceActions {
+    fn drop(&mut self) {
+        let _ = self.stop.send(());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
 }
 
 fn record_action(marker: &std::path::Path, action: &ActionId) {
@@ -843,6 +1050,7 @@ fn flush_stdout() {
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum MockBehavior {
     Normal,
+    Reference,
     BadProtocol,
     BadId,
     DuplicateCapabilities,
@@ -866,7 +1074,10 @@ impl MockBehavior {
     /// Declares whether this fixture mode exposes a session protocol surface.
     /// Provider-session liveness is tracked separately by `MockSessionRegistry`.
     fn supports_sessions(self) -> bool {
-        matches!(self, Self::Sessions | Self::DelayedSessions)
+        matches!(
+            self,
+            Self::Sessions | Self::DelayedSessions | Self::Reference
+        )
     }
 }
 
@@ -976,4 +1187,5 @@ struct MockOptions {
     action_marker: Option<PathBuf>,
     session_marker: Option<PathBuf>,
     event_release: Option<PathBuf>,
+    action_release: Option<PathBuf>,
 }
