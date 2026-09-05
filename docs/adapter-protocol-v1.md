@@ -42,6 +42,8 @@ Opening a declaration sends `session_open` with that exact capability and the di
 
 `session_output` streams text for the matching active session. `session_exit` is authoritative terminal state and may carry an optional provider exit code; there is no synthetic success response for close. A compliant host must keep session ownership tied to both adapter and session identity, reject input/resize after a close is pending, and bound retained output/events.
 
+Session IDs are scoped to their emitting adapter; independent providers may use the same ID. A late `session_opened` for an expired request must not acquire a UI claimant; the runtime requests provider cleanup unless that ID is already active in the same runtime. Output overflow must not erase authoritative terminal state. A successful close transport response is not proof of provider release: `session_exit`, controller inactivity, or provider-side fixture state supplies that evidence.
+
 `sessions` is optional and additive, so existing adapters decode with no declared session surfaces and retain their lifecycle, capability, RPC, action, and observability behavior. Session envelopes are sent only after an explicit host open request, so an adapter that does not declare a surface is never asked to implement one.
 
 ## Observability event semantics

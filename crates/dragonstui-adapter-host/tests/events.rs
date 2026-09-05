@@ -137,6 +137,50 @@ fn semantic_mock_events_survive_handshake_and_runtime_with_provenance_and_payloa
 }
 
 #[test]
+fn observability_fixture_release_gate_prevents_batch_coalescing() {
+    struct Control(PathBuf);
+    impl Drop for Control {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let control = Control(std::env::temp_dir().join(format!(
+        "dragonstui-event-gate-{}-{nonce}",
+        std::process::id()
+    )));
+    std::fs::create_dir(&control.0).unwrap();
+    let release = control.0.join("release");
+    let mut runtime = AdapterRuntime::start(
+        manifest(),
+        AdapterRuntimeConfig::new(executable())
+            .arg("--mode")
+            .arg("observability-events")
+            .arg("--event-release")
+            .arg(release.to_string_lossy().into_owned())
+            .event_queue_capacity(8),
+    )
+    .unwrap();
+    for _ in 0..8 {
+        assert!(runtime.pump(Duration::from_secs(1)).unwrap());
+    }
+    // This exceeds the old fixed batch delay, without allowing the second batch.
+    assert!(!runtime.pump(Duration::from_millis(1_400)).unwrap());
+    assert_eq!(std::iter::from_fn(|| runtime.pop_event()).count(), 8);
+    assert_eq!(runtime.dropped_event_count(), 0);
+    std::fs::write(release, "release\n").unwrap();
+    for _ in 0..8 {
+        assert!(runtime.pump(Duration::from_secs(1)).unwrap());
+    }
+    assert_eq!(std::iter::from_fn(|| runtime.pop_event()).count(), 8);
+    assert_eq!(runtime.dropped_event_count(), 0);
+    runtime.stop(Duration::from_millis(200)).unwrap();
+}
+
+#[test]
 fn observability_fixture_emits_two_bounded_batches_with_all_surface_samples() {
     let mut runtime = runtime("observability-events", 16);
 

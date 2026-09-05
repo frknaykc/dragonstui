@@ -6,8 +6,9 @@ use std::{
 };
 
 use dragonstui_adapter_host::{
-    ActionId, AdapterId, AdapterManager, AdapterOperation, AdapterRuntimeConfig, AdapterState,
-    Capability, LocalAdapterRoot, ManagerError, OperationState, PROTOCOL_VERSION, RpcOutcome,
+    ActionId, AdapterId, AdapterManager, AdapterOperation, AdapterRuntimeConfig,
+    AdapterSessionEvent, AdapterState, Capability, LocalAdapterRoot, ManagerError, OperationState,
+    PROTOCOL_VERSION, RpcOutcome,
 };
 use serde_json::json;
 
@@ -501,5 +502,89 @@ fn manager_rejects_duplicate_close_and_input_or_resize_while_close_is_pending() 
     assert!(matches!(
         manager.resize_session(&id, &session, 10, 40),
         Err(ManagerError::SessionClosing(actual)) if actual == session
+    ));
+}
+
+#[test]
+fn manager_scopes_provider_session_ids_by_adapter_identity() {
+    let root = TempRoot::new("session-id-scope");
+    root.adapter("mock-a");
+    root.adapter("mock-b");
+    let a = AdapterId::new("mock-a").unwrap();
+    let b = AdapterId::new("mock-b").unwrap();
+    let capability = Capability::new("fixture.terminal").unwrap();
+    let mut manager = AdapterManager::new(Duration::from_millis(200), 8);
+    manager.discover(LocalAdapterRoot::new(&root.path)).unwrap();
+    manager
+        .start_with_config(&a, config("mock-a", "sessions"))
+        .unwrap();
+    manager
+        .start_with_config(&b, config("mock-b", "sessions"))
+        .unwrap();
+
+    let first = manager
+        .open_session(&a, &capability, 24, 80, Duration::from_secs(1))
+        .unwrap();
+    let second = manager
+        .open_session(&b, &capability, 24, 80, Duration::from_secs(1))
+        .unwrap();
+
+    assert_eq!(
+        first, second,
+        "fixture providers intentionally reuse this ID"
+    );
+    manager
+        .input_session(&a, &first, "from-a".to_owned())
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let mut second_input_sent = false;
+    let mut events = Vec::new();
+    while events.len() < 2 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out collecting both provider/session identities"
+        );
+        manager.poll(Duration::from_millis(20));
+        events.extend(manager.take_session_events());
+        // Force valid split-poll delivery: B cannot emit until A was consumed.
+        if !second_input_sent && !events.is_empty() {
+            manager
+                .input_session(&b, &second, "from-b".to_owned())
+                .unwrap();
+            second_input_sent = true;
+        }
+    }
+    assert_eq!(events.len(), 2);
+    assert!(events.iter().any(|event| {
+        matches!(event, AdapterSessionEvent::Output { adapter_id, session_id, data }
+            if adapter_id == &a && session_id == &first && data == "echo:from-a")
+    }));
+    assert!(events.iter().any(|event| {
+        matches!(event, AdapterSessionEvent::Output { adapter_id, session_id, data }
+            if adapter_id == &b && session_id == &second && data == "echo:from-b")
+    }));
+}
+
+#[test]
+fn manager_notifies_owned_session_when_its_adapter_is_stopped() {
+    let root = TempRoot::new("session-stop-notification");
+    root.adapter("mock");
+    let id = AdapterId::new("mock").unwrap();
+    let capability = Capability::new("fixture.terminal").unwrap();
+    let mut manager = AdapterManager::new(Duration::from_millis(200), 8);
+    manager.discover(LocalAdapterRoot::new(&root.path)).unwrap();
+    manager
+        .start_with_config(&id, config("mock", "sessions"))
+        .unwrap();
+    let session = manager
+        .open_session(&id, &capability, 24, 80, Duration::from_secs(1))
+        .unwrap();
+
+    manager.stop(&id).unwrap();
+
+    assert!(matches!(
+        manager.take_session_events().as_slice(),
+        [AdapterSessionEvent::Disconnected { adapter_id, session_id, reason }]
+            if adapter_id == &id && session_id == &session && reason == "adapter stopped"
     ));
 }

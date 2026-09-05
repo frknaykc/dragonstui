@@ -162,6 +162,16 @@ impl AdapterController {
             .map_err(ControllerError::Manager)
     }
 
+    /// Returns controller-owned session liveness for bounded-event reconciliation.
+    pub fn session_active(
+        &mut self,
+        id: &AdapterId,
+        session_id: &SessionId,
+    ) -> Result<bool, ControllerError> {
+        self.ensure_discovered(id)?;
+        Ok(self.manager.session_active(id, session_id))
+    }
+
     /// Drains bounded typed session output without reusing observability data.
     pub fn take_session_events(&mut self) -> Vec<AdapterSessionEvent> {
         self.manager.take_session_events()

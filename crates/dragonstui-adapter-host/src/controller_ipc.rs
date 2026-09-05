@@ -75,6 +75,10 @@ pub enum ControllerIpcCommand {
         id: String,
         session_id: SessionId,
     },
+    SessionActive {
+        id: String,
+        session_id: SessionId,
+    },
     SessionEvents,
     StartOperation {
         id: String,
@@ -135,6 +139,7 @@ pub enum ControllerIpcStatus {
         adapter_id: AdapterId,
         session_id: SessionId,
     },
+    SessionActive(bool),
     SessionEvents(Vec<AdapterSessionEvent>),
     Operation(AdapterOperation),
     Operations(Vec<AdapterOperation>),
@@ -484,6 +489,14 @@ impl ControllerIpcServer {
                     .close_session(&adapter_id, &session_id)
                     .map_err(ControllerIpcError::Controller)?;
                 Ok((ControllerIpcStatus::Completed, false))
+            }
+            ControllerIpcCommand::SessionActive { id, session_id } => {
+                let adapter_id = adapter_id(&id)?;
+                let active = self
+                    .controller
+                    .session_active(&adapter_id, &session_id)
+                    .map_err(ControllerIpcError::Controller)?;
+                Ok((ControllerIpcStatus::SessionActive(active), false))
             }
             ControllerIpcCommand::SessionEvents => Ok((
                 ControllerIpcStatus::SessionEvents(self.controller.take_session_events()),
@@ -890,6 +903,22 @@ impl ControllerSessionClient {
             session_id: session_id.clone(),
         })? {
             ControllerIpcStatus::Completed => Ok(()),
+            status => Err(ControllerIpcError::UnexpectedStatus(format!("{status:?}"))),
+        }
+    }
+
+    /// Reads controller-owned liveness so a bounded output event queue cannot
+    /// leave a terminal host displayed after its session ends.
+    pub fn active(
+        &self,
+        id: &AdapterId,
+        session_id: &SessionId,
+    ) -> Result<bool, ControllerIpcError> {
+        match self.client.call(ControllerIpcCommand::SessionActive {
+            id: id.to_string(),
+            session_id: session_id.clone(),
+        })? {
+            ControllerIpcStatus::SessionActive(active) => Ok(active),
             status => Err(ControllerIpcError::UnexpectedStatus(format!("{status:?}"))),
         }
     }

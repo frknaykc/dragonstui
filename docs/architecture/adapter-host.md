@@ -81,6 +81,18 @@ Adapter-declared actions use the same controller-owned authority chain as generi
 
 Provider-declared interactive sessions use the same controller-owned authority chain: Showcase → authenticated typed controller IPC → `AdapterController` → `AdapterManager` → `AdapterRuntime`. `AdapterInfo.sessions` is optional v1 metadata; the manager validates an open capability against the selected provider declaration and owns the `(AdapterId, SessionId)` association. The showcase hosts at most one active session, forwards normalized input and rendered-host dimensions through bounded workers, and treats provider output, exit, and disconnect as typed lifecycle events. It neither parses command semantics nor acts as a terminal emulator. Close-pending suppresses additional input and resize requests; retained host output and event queues are bounded. See [Adapter Protocol v1](../adapter-protocol-v1.md#interactive-sessions).
 
+### Interactive-session lifecycle under pressure
+
+Periodic operation refresh has at most one outstanding request, so a slow controller cannot fill the bounded invocation channel with duplicate background polls. Essential discovery retains its own bounded retry state.
+
+Open requests carry an immutable UI token. Leaving the session browser invalidates its claimant; a late successful open is closed through the controller instead of replacing the active host. Unclaimed identities remain in a bounded cleanup queue until the close request succeeds or a typed controller query confirms inactivity. Transport uncertainty retains the identity and rotates retries so another session can still be cleaned up.
+
+Shutdown signals and joins the invocation worker while its result receiver remains alive, then drains completed opens for cleanup. It does not detach the worker or enlarge its capacity-one request/result channels. Pending discovery is retried in bounded slots and invalidated when its browser is abandoned, including section navigation.
+
+Runtime terminal records are separate from droppable output. The manager reconciles those records for the exact adapter/session pair; a session worker retains its terminal notification independently of ordinary output pressure. If a terminal notification was evicted from the controller event window, typed `SessionActive` IPC supplies authoritative inactivity rather than interpreting output text. This fallback reports inactivity, not an invented exit code.
+
+Standalone `AdapterRuntime` consumers share a configurable admission bound (`AdapterRuntimeConfig::session_capacity`, default 64) across pending opens, active sessions, undrained exits and unclaimed open acknowledgements. Full capacity rejects another open before provider dispatch; it never evicts terminal evidence. Consumers release completed state through public `take_session_exit` or typed `pop_session_exit` (session-ID order, not arrival order). The manager retains its existing eight-active-session limit.
+
 ## Backpressure and diagnostics
 
 Decoded stdout ingress uses a bounded synchronous queue. When it is full, the reader blocks and the child pipe applies backpressure; response envelopes are not silently discarded. Runtime and manager event queues are bounded and use **drop-oldest** overflow, exposing capacity, current length, and dropped-event counts. Stderr uses a bounded drop-oldest line tail. This bounds host memory while preserving process isolation and diagnostics.

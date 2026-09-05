@@ -741,7 +741,9 @@ fn authenticated_session_close_surfaces_provider_exit_through_controller() {
 
     legacy.start(&id).unwrap();
     let session = client.open(&id, &capability, 24, 80).unwrap();
+    assert!(client.active(&id, &session).unwrap());
     client.close(&id, &session).unwrap();
+    assert!(!client.active(&id, &session).unwrap());
     assert_eq!(
         client.events().unwrap(),
         vec![AdapterSessionEvent::Exited {

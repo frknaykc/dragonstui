@@ -1,9 +1,9 @@
 use std::{
-    collections::HashSet,
+    collections::{BTreeSet, HashSet},
     env,
     fs::{self, OpenOptions},
     io::{self, BufRead, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process, thread,
     time::Duration,
 };
@@ -24,16 +24,22 @@ fn main() {
             MockBehavior::Normal,
             &options.id,
             options.action_marker.as_deref(),
+            options.session_marker.as_deref(),
+            options.event_release.as_deref(),
         ),
         "bad-protocol" => protocol_mode(
             MockBehavior::BadProtocol,
             &options.id,
             options.action_marker.as_deref(),
+            options.session_marker.as_deref(),
+            options.event_release.as_deref(),
         ),
         "bad-id" => protocol_mode(
             MockBehavior::BadId,
             &options.id,
             options.action_marker.as_deref(),
+            options.session_marker.as_deref(),
+            options.event_release.as_deref(),
         ),
         "malformed" => {
             println!("{{not json}}");
@@ -47,82 +53,121 @@ fn main() {
                 MockBehavior::Normal,
                 &options.id,
                 options.action_marker.as_deref(),
+                options.session_marker.as_deref(),
+                options.event_release.as_deref(),
             );
         }
         "duplicate-capabilities" => protocol_mode(
             MockBehavior::DuplicateCapabilities,
             &options.id,
             options.action_marker.as_deref(),
+            options.session_marker.as_deref(),
+            options.event_release.as_deref(),
         ),
         "empty-capabilities" => protocol_mode(
             MockBehavior::EmptyCapabilities,
             &options.id,
             options.action_marker.as_deref(),
+            options.session_marker.as_deref(),
+            options.event_release.as_deref(),
         ),
         "shared-capabilities" => protocol_mode(
             MockBehavior::SharedCapabilities,
             &options.id,
             options.action_marker.as_deref(),
+            options.session_marker.as_deref(),
+            options.event_release.as_deref(),
         ),
         "events" => protocol_mode(
             MockBehavior::Events,
             &options.id,
             options.action_marker.as_deref(),
+            options.session_marker.as_deref(),
+            options.event_release.as_deref(),
         ),
         "live-events" => protocol_mode(
             MockBehavior::LiveEvents,
             &options.id,
             options.action_marker.as_deref(),
+            options.session_marker.as_deref(),
+            options.event_release.as_deref(),
         ),
         "semantic-events" => protocol_mode(
             MockBehavior::SemanticEvents,
             &options.id,
             options.action_marker.as_deref(),
+            options.session_marker.as_deref(),
+            options.event_release.as_deref(),
         ),
         "observability-events" => protocol_mode(
             MockBehavior::ObservabilityEvents,
             &options.id,
             options.action_marker.as_deref(),
+            options.session_marker.as_deref(),
+            options.event_release.as_deref(),
         ),
         "actions" => protocol_mode(
             MockBehavior::Actions,
             &options.id,
             options.action_marker.as_deref(),
+            options.session_marker.as_deref(),
+            options.event_release.as_deref(),
         ),
         "sessions" => protocol_mode(
             MockBehavior::Sessions,
             &options.id,
             options.action_marker.as_deref(),
+            options.session_marker.as_deref(),
+            options.event_release.as_deref(),
+        ),
+        "delayed-sessions" => protocol_mode(
+            MockBehavior::DelayedSessions,
+            &options.id,
+            options.action_marker.as_deref(),
+            options.session_marker.as_deref(),
+            options.event_release.as_deref(),
         ),
         "stress-events" => protocol_mode(
             MockBehavior::StressEvents,
             &options.id,
             options.action_marker.as_deref(),
+            options.session_marker.as_deref(),
+            options.event_release.as_deref(),
         ),
         "out-of-order" => protocol_mode(
             MockBehavior::OutOfOrder,
             &options.id,
             options.action_marker.as_deref(),
+            options.session_marker.as_deref(),
+            options.event_release.as_deref(),
         ),
         "unknown-response" => protocol_mode(
             MockBehavior::UnknownResponse,
             &options.id,
             options.action_marker.as_deref(),
+            options.session_marker.as_deref(),
+            options.event_release.as_deref(),
         ),
         "crash-after-handshake" => protocol_mode(
             MockBehavior::CrashAfterHandshake,
             &options.id,
             options.action_marker.as_deref(),
+            options.session_marker.as_deref(),
+            options.event_release.as_deref(),
         ),
         "crash-on-request" => protocol_mode(
             MockBehavior::CrashOnRequest,
             &options.id,
             options.action_marker.as_deref(),
+            options.session_marker.as_deref(),
+            options.event_release.as_deref(),
         ),
         _ => protocol_mode(
             MockBehavior::Normal,
             &options.id,
             options.action_marker.as_deref(),
+            options.session_marker.as_deref(),
+            options.event_release.as_deref(),
         ),
     }
 }
@@ -136,6 +181,8 @@ fn parse_options() -> MockOptions {
         hold_release: None,
         launch_marker: None,
         action_marker: None,
+        session_marker: None,
+        event_release: None,
     };
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -145,6 +192,8 @@ fn parse_options() -> MockOptions {
             "--hold-release" => options.hold_release = args.next().map(PathBuf::from),
             "--launch-marker" => options.launch_marker = args.next().map(PathBuf::from),
             "--action-marker" => options.action_marker = args.next().map(PathBuf::from),
+            "--session-marker" => options.session_marker = args.next().map(PathBuf::from),
+            "--event-release" => options.event_release = args.next().map(PathBuf::from),
             _ => {}
         }
     }
@@ -216,6 +265,8 @@ fn protocol_mode(
     behavior: MockBehavior,
     adapter_id: &str,
     action_marker: Option<&std::path::Path>,
+    session_marker: Option<&std::path::Path>,
+    event_release: Option<&std::path::Path>,
 ) {
     let stdin = io::stdin();
     let mut lines = stdin.lock().lines();
@@ -238,7 +289,9 @@ fn protocol_mode(
             adapter_id,
             vec!["cap.before", "cap.shared"],
         ),
-        MockBehavior::Sessions => (PROTOCOL_VERSION, adapter_id, vec!["fixture.terminal"]),
+        MockBehavior::Sessions | MockBehavior::DelayedSessions => {
+            (PROTOCOL_VERSION, adapter_id, vec!["fixture.terminal"])
+        }
         MockBehavior::Normal
         | MockBehavior::Events
         | MockBehavior::LiveEvents
@@ -290,7 +343,7 @@ fn protocol_mode(
     } else {
         Vec::new()
     };
-    let sessions = if behavior == MockBehavior::Sessions {
+    let sessions = if behavior.supports_sessions() {
         vec![AdapterSession {
             capability: Capability::new("fixture.terminal").unwrap(),
             label: "Interactive fixture".to_owned(),
@@ -382,8 +435,16 @@ fn protocol_mode(
     if behavior == MockBehavior::ObservabilityEvents {
         let (first_batch, second_batch) = observability_fixture_batches();
         emit_observations(first_batch);
+        let release = event_release.map(std::path::Path::to_path_buf);
         thread::spawn(move || {
-            thread::sleep(Duration::from_millis(1_200));
+            if let Some(release) = release {
+                // PTY acceptance releases batch two only after observing batch one.
+                while !release.is_file() {
+                    thread::sleep(Duration::from_millis(5));
+                }
+            } else {
+                thread::sleep(Duration::from_millis(1_200));
+            }
             emit_observations(second_batch);
         });
     }
@@ -401,6 +462,7 @@ fn protocol_mode(
 
     let mut seen_requests = HashSet::new();
     let mut delayed = Vec::new();
+    let mut provider_sessions = MockSessionRegistry::new(session_marker);
     for line in lines {
         let Ok(line) = line else {
             break;
@@ -415,17 +477,79 @@ fn protocol_mode(
             continue;
         };
         match message {
-            ProtocolMessage::SessionOpen(open) if behavior == MockBehavior::Sessions => {
+            ProtocolMessage::SessionOpen(open) if behavior.supports_sessions() => {
+                let session_id = SessionId::new("fixture-session").unwrap();
+                match provider_sessions.record_session(session_id.clone()) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        emit(&ProtocolMessage::Error(ErrorMessage {
+                            protocol: PROTOCOL_VERSION,
+                            id: Some(open.id),
+                            code: "fixture_session_busy".to_owned(),
+                            message: "fixture already has an active session".to_owned(),
+                        }));
+                        continue;
+                    }
+                    Err(error) => {
+                        emit(&ProtocolMessage::Error(ErrorMessage {
+                            protocol: PROTOCOL_VERSION,
+                            id: Some(open.id),
+                            code: "fixture_session_marker".to_owned(),
+                            message: error.to_string(),
+                        }));
+                        continue;
+                    }
+                }
+                if behavior == MockBehavior::DelayedSessions
+                    && let Err(message) =
+                        wait_for_delayed_session_release(session_marker, &session_id)
+                {
+                    let _ = provider_sessions.release_session(&session_id);
+                    emit(&ProtocolMessage::Error(ErrorMessage {
+                        protocol: PROTOCOL_VERSION,
+                        id: Some(open.id),
+                        code: "fixture_delayed_session".to_owned(),
+                        message,
+                    }));
+                    continue;
+                }
                 emit(&ProtocolMessage::SessionOpened(SessionOpened {
                     protocol: PROTOCOL_VERSION,
                     id: open.id,
-                    session_id: SessionId::new("fixture-session").unwrap(),
+                    session_id,
                 }));
             }
-            ProtocolMessage::SessionInput(input) if behavior == MockBehavior::Sessions => {
+            ProtocolMessage::SessionInput(input)
+                if behavior.supports_sessions()
+                    && provider_sessions.contains(&input.session_id) =>
+            {
                 if input.data == "fixture.crash-provider" {
-                    process::exit(26);
+                    let _ = provider_sessions.clear();
+                    process::exit(37);
+                } else if input.data == "\u{5}" {
+                    for sequence in 0..16 {
+                        emit(&ProtocolMessage::SessionOutput(SessionOutput {
+                            protocol: PROTOCOL_VERSION,
+                            session_id: input.session_id.clone(),
+                            data: format!("burst:{sequence}\n"),
+                        }));
+                    }
+                    let _ = provider_sessions.release_session(&input.session_id);
+                    emit(&ProtocolMessage::SessionExit(SessionExit {
+                        protocol: PROTOCOL_VERSION,
+                        session_id: input.session_id,
+                        exit_code: Some(2),
+                    }));
                 } else if input.data == "fixture.exit-nonzero" {
+                    if let Err(error) = provider_sessions.release_session(&input.session_id) {
+                        emit(&ProtocolMessage::Error(ErrorMessage {
+                            protocol: PROTOCOL_VERSION,
+                            id: None,
+                            code: "fixture_session_marker".to_owned(),
+                            message: error.to_string(),
+                        }));
+                        continue;
+                    }
                     emit(&ProtocolMessage::SessionExit(SessionExit {
                         protocol: PROTOCOL_VERSION,
                         session_id: input.session_id,
@@ -444,7 +568,7 @@ fn protocol_mode(
                 rows,
                 columns,
                 ..
-            }) if behavior == MockBehavior::Sessions => {
+            }) if behavior.supports_sessions() && provider_sessions.contains(&session_id) => {
                 emit(&ProtocolMessage::SessionOutput(SessionOutput {
                     protocol: PROTOCOL_VERSION,
                     session_id,
@@ -452,13 +576,22 @@ fn protocol_mode(
                 }));
             }
             ProtocolMessage::SessionClose(SessionClose { session_id, .. })
-                if behavior == MockBehavior::Sessions =>
+                if behavior.supports_sessions() =>
             {
-                emit(&ProtocolMessage::SessionExit(SessionExit {
-                    protocol: PROTOCOL_VERSION,
-                    session_id,
-                    exit_code: None,
-                }));
+                match provider_sessions.release_session(&session_id) {
+                    Ok(true) => emit(&ProtocolMessage::SessionExit(SessionExit {
+                        protocol: PROTOCOL_VERSION,
+                        session_id,
+                        exit_code: None,
+                    })),
+                    Ok(false) => {}
+                    Err(error) => emit(&ProtocolMessage::Error(ErrorMessage {
+                        protocol: PROTOCOL_VERSION,
+                        id: None,
+                        code: "fixture_session_marker".to_owned(),
+                        message: error.to_string(),
+                    })),
+                }
             }
             ProtocolMessage::Request(request) => {
                 if behavior == MockBehavior::CrashOnRequest {
@@ -721,11 +854,114 @@ enum MockBehavior {
     ObservabilityEvents,
     Actions,
     Sessions,
+    DelayedSessions,
     StressEvents,
     OutOfOrder,
     UnknownResponse,
     CrashAfterHandshake,
     CrashOnRequest,
+}
+
+impl MockBehavior {
+    /// Declares whether this fixture mode exposes a session protocol surface.
+    /// Provider-session liveness is tracked separately by `MockSessionRegistry`.
+    fn supports_sessions(self) -> bool {
+        matches!(self, Self::Sessions | Self::DelayedSessions)
+    }
+}
+
+/// Test-only provider session registry. The optional marker is a projection of
+/// current provider-owned sessions, not an append-only lifecycle history.
+struct MockSessionRegistry<'a> {
+    active: BTreeSet<SessionId>,
+    marker: Option<&'a Path>,
+}
+
+impl<'a> MockSessionRegistry<'a> {
+    fn new(marker: Option<&'a Path>) -> Self {
+        Self {
+            active: BTreeSet::new(),
+            marker,
+        }
+    }
+
+    fn has_sessions(&self) -> bool {
+        !self.active.is_empty()
+    }
+
+    fn contains(&self, session_id: &SessionId) -> bool {
+        self.active.contains(session_id)
+    }
+
+    fn record_session(&mut self, session_id: SessionId) -> io::Result<bool> {
+        if self.has_sessions() {
+            return Ok(false);
+        }
+        let mut next = self.active.clone();
+        next.insert(session_id);
+        self.sync_marker(&next)?;
+        self.active = next;
+        Ok(true)
+    }
+
+    fn release_session(&mut self, session_id: &SessionId) -> io::Result<bool> {
+        let mut next = self.active.clone();
+        let released = next.remove(session_id);
+        if released {
+            self.sync_marker(&next)?;
+            self.active = next;
+        }
+        Ok(released)
+    }
+
+    fn clear(&mut self) -> io::Result<()> {
+        if self.has_sessions() {
+            let next = BTreeSet::new();
+            self.sync_marker(&next)?;
+            self.active = next;
+        }
+        Ok(())
+    }
+
+    fn sync_marker(&self, active: &BTreeSet<SessionId>) -> io::Result<()> {
+        let Some(marker) = self.marker else {
+            return Ok(());
+        };
+        if let Some(parent) = marker.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut content = String::new();
+        for session_id in active {
+            content.push_str(session_id.as_str());
+            content.push('\n');
+        }
+        fs::write(marker, content)
+    }
+}
+
+fn delayed_session_ready_marker(marker: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.ready", marker.display()))
+}
+
+fn delayed_session_release_marker(marker: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.release", marker.display()))
+}
+
+fn wait_for_delayed_session_release(
+    marker: Option<&Path>,
+    session_id: &SessionId,
+) -> Result<(), String> {
+    let marker = marker.ok_or_else(|| "delayed-sessions requires --session-marker".to_owned())?;
+    let ready = delayed_session_ready_marker(marker);
+    let release = delayed_session_release_marker(marker);
+    if let Some(parent) = ready.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    fs::write(ready, format!("{session_id}\n")).map_err(|error| error.to_string())?;
+    while !release.is_file() {
+        thread::sleep(Duration::from_millis(5));
+    }
+    Ok(())
 }
 
 #[allow(dead_code)]
@@ -738,4 +974,6 @@ struct MockOptions {
     hold_release: Option<PathBuf>,
     launch_marker: Option<PathBuf>,
     action_marker: Option<PathBuf>,
+    session_marker: Option<PathBuf>,
+    event_release: Option<PathBuf>,
 }

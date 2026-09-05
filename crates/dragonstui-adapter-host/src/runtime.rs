@@ -9,8 +9,8 @@ use std::{
 use crate::{
     ActionId, AdapterAction, AdapterId, AdapterInfo, AdapterManifest, AdapterProcess,
     AdapterProcessConfig, Capability, Hello, PROTOCOL_VERSION, ProcessError, ProcessStatus,
-    ProtocolMessage, Request, RequestId, SessionClose, SessionId, SessionInput, SessionOpen,
-    SessionResize,
+    ProtocolMessage, Request, RequestId, SessionClose, SessionExit, SessionId, SessionInput,
+    SessionOpen, SessionResize,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -19,6 +19,7 @@ const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_EVENT_QUEUE_CAPACITY: usize = 128;
 const DEFAULT_RESPONSE_QUEUE_CAPACITY: usize = 128;
 const DEFAULT_SESSION_EVENT_QUEUE_CAPACITY: usize = 64;
+const DEFAULT_SESSION_CAPACITY: usize = 64;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AdapterRuntimeConfig {
@@ -26,6 +27,7 @@ pub struct AdapterRuntimeConfig {
     handshake_timeout: Duration,
     event_queue_capacity: usize,
     response_queue_capacity: usize,
+    session_capacity: usize,
 }
 
 impl AdapterRuntimeConfig {
@@ -35,6 +37,7 @@ impl AdapterRuntimeConfig {
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
             event_queue_capacity: DEFAULT_EVENT_QUEUE_CAPACITY,
             response_queue_capacity: DEFAULT_RESPONSE_QUEUE_CAPACITY,
+            session_capacity: DEFAULT_SESSION_CAPACITY,
         }
     }
 
@@ -78,6 +81,15 @@ impl AdapterRuntimeConfig {
         self.response_queue_capacity = value;
         self
     }
+
+    /// Bounds pending opens, active sessions and undrained terminal exits together
+    /// (default 64). Unclaimed open acknowledgements also retain their slot.
+    /// Full capacity rejects new opens with `RpcError::Backpressure`, without
+    /// evicting exits or blocking input, close, or protocol pumping. Zero disables opens.
+    pub fn session_capacity(mut self, value: usize) -> Self {
+        self.session_capacity = value;
+        self
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -106,6 +118,8 @@ pub struct AdapterRuntime {
     pending: BTreeMap<RequestId, PendingRequest>,
     session_opened: BTreeMap<RequestId, SessionId>,
     active_sessions: BTreeSet<SessionId>,
+    session_exits: BTreeMap<SessionId, Option<i32>>,
+    session_capacity: usize,
     outcomes: BTreeMap<RequestId, RpcOutcome>,
     request_failures: BTreeMap<RequestId, RpcError>,
     unknown_responses: usize,
@@ -166,6 +180,8 @@ impl AdapterRuntime {
             pending: BTreeMap::new(),
             session_opened: BTreeMap::new(),
             active_sessions: BTreeSet::new(),
+            session_exits: BTreeMap::new(),
+            session_capacity: config.session_capacity,
             outcomes: BTreeMap::new(),
             request_failures: BTreeMap::new(),
             unknown_responses: 0,
@@ -257,7 +273,9 @@ impl AdapterRuntime {
         )
     }
 
-    /// Sends an explicit typed session-open request.
+    /// Sends an explicit typed session-open request, reserving terminal retention.
+    /// Returns `RpcError::Backpressure` at the configured session capacity; drain
+    /// completed exits and claim open acknowledgements before retrying.
     pub fn open_session(
         &mut self,
         capability: Capability,
@@ -267,6 +285,9 @@ impl AdapterRuntime {
     ) -> Result<RequestId, RpcError> {
         if self.state != AdapterState::Running {
             return Err(RpcError::Crashed);
+        }
+        if self.session_slots_in_use() >= self.session_capacity {
+            return Err(RpcError::Backpressure);
         }
         let id = RequestId::new(format!("{}:{}", self.info.id, self.next_request))
             .map_err(|error| RpcError::Failed(error.to_string()))?;
@@ -287,6 +308,7 @@ impl AdapterRuntime {
             id.clone(),
             PendingRequest {
                 deadline: Instant::now() + timeout,
+                session_open: true,
             },
         );
         Ok(id)
@@ -417,6 +439,7 @@ impl AdapterRuntime {
             id.clone(),
             PendingRequest {
                 deadline: Instant::now() + timeout,
+                session_open: false,
             },
         );
         Ok(id)
@@ -505,6 +528,42 @@ impl AdapterRuntime {
         self.session_events.pop_front()
     }
 
+    /// Returns and clears a terminal exit that cannot be evicted by session output.
+    /// `Some(None)` is an exit without a provider code; `None` means no retained exit.
+    /// Frees admission capacity once the open acknowledgement has also been claimed.
+    pub fn take_session_exit(&mut self, session_id: &SessionId) -> Option<Option<i32>> {
+        self.session_exits.remove(session_id)
+    }
+
+    /// Drains one typed terminal record in session-ID order, not arrival order.
+    /// Like `take_session_exit`, this never depends on the lossy output queue.
+    pub fn pop_session_exit(&mut self) -> Option<SessionExit> {
+        self.session_exits
+            .pop_first()
+            .map(|(session_id, exit_code)| SessionExit {
+                protocol: PROTOCOL_VERSION,
+                session_id,
+                exit_code,
+            })
+    }
+
+    fn session_slots_in_use(&self) -> usize {
+        self.pending
+            .values()
+            .filter(|pending| pending.session_open)
+            .count()
+            + self.active_sessions.len()
+            + self.session_exits.len()
+            + self
+                .session_opened
+                .values()
+                .filter(|session_id| {
+                    !self.active_sessions.contains(*session_id)
+                        && !self.session_exits.contains_key(*session_id)
+                })
+                .count()
+    }
+
     pub fn event_queue_capacity(&self) -> usize {
         self.events.capacity()
     }
@@ -550,11 +609,50 @@ impl AdapterRuntime {
     fn handle_message(&mut self, message: ProtocolMessage) {
         match message {
             ProtocolMessage::SessionOpened(opened) => {
-                if self.pending.remove(&opened.id).is_some() {
+                if self
+                    .pending
+                    .get(&opened.id)
+                    .is_some_and(|pending| pending.session_open)
+                {
+                    self.pending.remove(&opened.id);
+                    if self.active_sessions.contains(&opened.session_id)
+                        || self.session_exits.contains_key(&opened.session_id)
+                        || self
+                            .session_opened
+                            .values()
+                            .any(|id| id == &opened.session_id)
+                    {
+                        self.request_failures.insert(
+                            opened.id,
+                            RpcError::Failed("session identity is still retained".to_owned()),
+                        );
+                        // Never overwrite an undrained exit or close an existing active owner.
+                        if !self.active_sessions.contains(&opened.session_id)
+                            && let Err(error) = self.process.write_message(
+                                &ProtocolMessage::SessionClose(SessionClose {
+                                    protocol: PROTOCOL_VERSION,
+                                    session_id: opened.session_id,
+                                }),
+                            )
+                        {
+                            self.mark_crashed(error.to_string());
+                        }
+                        return;
+                    }
                     self.active_sessions.insert(opened.session_id.clone());
                     self.session_opened.insert(opened.id, opened.session_id);
                 } else {
                     self.unknown_responses += 1;
+                    if !self.active_sessions.contains(&opened.session_id)
+                        && let Err(error) = self.process.write_message(
+                            &ProtocolMessage::SessionClose(SessionClose {
+                                protocol: PROTOCOL_VERSION,
+                                session_id: opened.session_id,
+                            }),
+                        )
+                    {
+                        self.mark_crashed(error.to_string());
+                    }
                 }
             }
             ProtocolMessage::SessionOutput(output) => {
@@ -569,10 +667,7 @@ impl AdapterRuntime {
             }
             ProtocolMessage::SessionExit(exit) => {
                 if self.active_sessions.remove(&exit.session_id) {
-                    self.session_events.push(RuntimeSessionEvent::Exited {
-                        session_id: exit.session_id,
-                        exit_code: exit.exit_code,
-                    });
+                    self.session_exits.insert(exit.session_id, exit.exit_code);
                 } else {
                     self.unknown_responses += 1;
                 }
@@ -658,7 +753,10 @@ impl fmt::Display for RpcError {
         match self {
             Self::Timeout => write!(formatter, "adapter request timed out"),
             Self::Crashed => write!(formatter, "adapter process crashed"),
-            Self::Backpressure => write!(formatter, "adapter response queue is full"),
+            Self::Backpressure => write!(
+                formatter,
+                "adapter response queue or session capacity is full"
+            ),
             Self::Failed(message) => write!(formatter, "adapter request failed: {message}"),
         }
     }
@@ -669,18 +767,12 @@ impl Error for RpcError {}
 #[derive(Clone, Debug)]
 struct PendingRequest {
     deadline: Instant,
+    session_open: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum RuntimeSessionEvent {
-    Output {
-        session_id: SessionId,
-        data: String,
-    },
-    Exited {
-        session_id: SessionId,
-        exit_code: Option<i32>,
-    },
+    Output { session_id: SessionId, data: String },
 }
 
 #[derive(Clone, Debug)]
@@ -781,4 +873,154 @@ fn validate_info(manifest: &AdapterManifest, info: &AdapterInfo) -> Result<(), A
         }
     }
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod session_retention_tests {
+    use super::*;
+    use crate::{SessionOpened, SessionOutput};
+
+    fn runtime(capacity: usize) -> AdapterRuntime {
+        let manifest = AdapterManifest::from_json(
+            r#"{"id":"fixture","name":"Fixture","version":"1.0.0","protocol_version":1,"executable":"fixture"}"#,
+        )
+        .unwrap();
+        // Only provide the handshake and consume writes. Lifecycle messages are
+        // injected below, so distinct IDs and interleavings require no mock mode.
+        AdapterRuntime::start(
+            manifest,
+            AdapterRuntimeConfig::new("/bin/sh")
+                .arg("-c")
+                .arg(r#"printf '%s\n' '{"type":"adapter_info","protocol":1,"id":"fixture","version":"1.0.0","capabilities":["fixture.terminal"]}'; exec cat >/dev/null"#)
+                .session_capacity(capacity),
+        )
+        .unwrap()
+    }
+
+    fn open(runtime: &mut AdapterRuntime) -> Result<RequestId, RpcError> {
+        runtime.open_session(
+            Capability::new("fixture.terminal").unwrap(),
+            24,
+            80,
+            Duration::from_secs(2),
+        )
+    }
+
+    fn acknowledge(runtime: &mut AdapterRuntime, request: &RequestId, session: &SessionId) {
+        runtime.handle_message(ProtocolMessage::SessionOpened(SessionOpened {
+            protocol: PROTOCOL_VERSION,
+            id: request.clone(),
+            session_id: session.clone(),
+        }));
+    }
+
+    fn exit(runtime: &mut AdapterRuntime, session: &SessionId, exit_code: Option<i32>) {
+        runtime.handle_message(ProtocolMessage::SessionExit(SessionExit {
+            protocol: PROTOCOL_VERSION,
+            session_id: session.clone(),
+            exit_code,
+        }));
+    }
+
+    #[test]
+    fn distinct_exits_share_admission_with_pending_and_active_sessions_without_eviction() {
+        let mut runtime = runtime(3);
+        let mut sessions = Vec::new();
+        for index in 0..3 {
+            let request = open(&mut runtime).unwrap();
+            let session = SessionId::new(format!("session-{index}")).unwrap();
+            if index == 2 {
+                assert_eq!(open(&mut runtime), Err(RpcError::Backpressure));
+            }
+            acknowledge(&mut runtime, &request, &session);
+            assert_eq!(
+                runtime.wait_session_open(&request, Duration::ZERO),
+                Ok(session.clone())
+            );
+            if index == 2 {
+                assert_eq!(open(&mut runtime), Err(RpcError::Backpressure));
+                for _ in 0..(DEFAULT_SESSION_EVENT_QUEUE_CAPACITY + 1) {
+                    runtime.handle_message(ProtocolMessage::SessionOutput(SessionOutput {
+                        protocol: PROTOCOL_VERSION,
+                        session_id: session.clone(),
+                        data: "bounded output".to_owned(),
+                    }));
+                }
+                assert_eq!(runtime.session_events.dropped(), 1);
+            }
+            exit(&mut runtime, &session, Some(index));
+            sessions.push(session);
+            assert_eq!(runtime.session_slots_in_use(), sessions.len());
+        }
+        assert_eq!(open(&mut runtime), Err(RpcError::Backpressure));
+        assert_eq!(runtime.session_exits.len(), 3);
+        for (index, session) in sessions.into_iter().enumerate() {
+            let terminal = runtime.pop_session_exit().unwrap();
+            assert_eq!(terminal.session_id, session);
+            assert_eq!(terminal.exit_code, Some(index as i32));
+        }
+        assert_eq!(runtime.session_slots_in_use(), 0);
+        assert!(runtime.pop_session_exit().is_none());
+        assert!(open(&mut runtime).is_ok());
+    }
+
+    #[test]
+    fn drained_exit_does_not_release_an_unclaimed_open_acknowledgement() {
+        let mut runtime = runtime(1);
+        for index in 0..3 {
+            let request = open(&mut runtime).unwrap();
+            let session = SessionId::new(format!("unclaimed-{index}")).unwrap();
+            acknowledge(&mut runtime, &request, &session);
+            exit(&mut runtime, &session, None);
+            assert_eq!(runtime.take_session_exit(&session), Some(None));
+            assert_eq!(open(&mut runtime), Err(RpcError::Backpressure));
+            assert_eq!(runtime.session_opened.len(), 1);
+            assert_eq!(
+                runtime.wait_session_open(&request, Duration::ZERO),
+                Ok(session)
+            );
+            assert_eq!(runtime.session_slots_in_use(), 0);
+        }
+    }
+
+    #[test]
+    fn reused_identity_cannot_overwrite_an_undrained_terminal_exit() {
+        let mut runtime = runtime(2);
+        let session = SessionId::new("reused").unwrap();
+        let first = open(&mut runtime).unwrap();
+        acknowledge(&mut runtime, &first, &session);
+        runtime.wait_session_open(&first, Duration::ZERO).unwrap();
+        exit(&mut runtime, &session, Some(7));
+        let second = open(&mut runtime).unwrap();
+        acknowledge(&mut runtime, &second, &session);
+        assert!(matches!(
+            runtime.wait_session_open(&second, Duration::ZERO),
+            Err(RpcError::Failed(_))
+        ));
+        exit(&mut runtime, &session, None);
+        assert_eq!(runtime.take_session_exit(&session), Some(Some(7)));
+        assert_eq!(runtime.unknown_response_count(), 1);
+        assert_eq!(runtime.session_slots_in_use(), 0);
+    }
+
+    #[test]
+    fn ordinary_rpc_acknowledgement_cannot_bypass_session_admission() {
+        let mut runtime = runtime(0);
+        let request = runtime
+            .send_request(
+                Capability::new("fixture.terminal").unwrap(),
+                Value::Null,
+                Duration::from_secs(2),
+            )
+            .unwrap();
+        acknowledge(
+            &mut runtime,
+            &request,
+            &SessionId::new("unsolicited").unwrap(),
+        );
+        assert_eq!(runtime.pending_count(), 1);
+        assert_eq!(runtime.session_slots_in_use(), 0);
+        assert!(runtime.active_sessions.is_empty());
+        assert_eq!(runtime.unknown_response_count(), 1);
+    }
 }

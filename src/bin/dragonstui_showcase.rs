@@ -473,6 +473,8 @@ fn adapter_action_worker_with_live_poll_pause(
 }
 
 const ACTION_REQUEST_CHANNEL_CAPACITY: usize = 1;
+/// Matches the controller's maximum simultaneously owned provider sessions.
+const UNCLAIMED_SESSION_CLOSE_CAPACITY: usize = 8;
 const OPERATION_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const OPERATION_PROJECTION_CAPACITY: usize = 16;
 
@@ -485,6 +487,7 @@ enum AdapterInvocation {
         adapter_id: AdapterId,
     },
     OpenSession {
+        open_token: u64,
         adapter_id: AdapterId,
         capability: dragonstui_adapter_host::Capability,
         rows: u16,
@@ -524,6 +527,7 @@ enum AdapterInvocationResult {
         sessions: Result<Vec<AdapterSession>, String>,
     },
     SessionOpened {
+        open_token: u64,
         adapter_id: AdapterId,
         session_id: Result<SessionId, String>,
     },
@@ -534,6 +538,8 @@ enum AdapterInvocationResult {
         result: Result<(), String>,
     },
     SessionCloseRequested {
+        adapter_id: AdapterId,
+        session_id: SessionId,
         result: Result<(), String>,
     },
     Started {
@@ -554,11 +560,13 @@ struct AdapterActionConfirmation {
 }
 
 struct AdapterInvocationWorker {
+    shutdown: SyncSender<()>,
     join: Option<thread::JoinHandle<()>>,
 }
 
 impl AdapterInvocationWorker {
     fn stop(&mut self, sender: &mut Option<SyncSender<AdapterInvocation>>) {
+        let _ = self.shutdown.try_send(());
         sender.take();
         if let Some(join) = self.join.take() {
             let _ = join.join();
@@ -575,9 +583,35 @@ fn adapter_invocation_worker(
 ) {
     let (requests, receiver) = mpsc::sync_channel(ACTION_REQUEST_CHANNEL_CAPACITY);
     let (results, result_receiver) = mpsc::sync_channel(ACTION_REQUEST_CHANNEL_CAPACITY);
+    let (shutdown, shutdown_receiver) = mpsc::sync_channel(1);
     let root = root.to_path_buf();
     let join = thread::spawn(move || {
-        while let Ok(request) = receiver.recv() {
+        let mut pending_result = None;
+        loop {
+            if shutdown_receiver.try_recv().is_ok() {
+                break;
+            }
+            if let Some(result) = pending_result.take() {
+                match results.try_send(result) {
+                    Ok(()) => continue,
+                    Err(TrySendError::Full(result)) => {
+                        pending_result = Some(result);
+                        match shutdown_receiver.recv_timeout(Duration::from_millis(10)) {
+                            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                        }
+                    }
+                    Err(TrySendError::Disconnected(result)) => {
+                        discard_adapter_invocation_result(&root, result);
+                        return;
+                    }
+                }
+            }
+            let request = match receiver.recv_timeout(Duration::from_millis(10)) {
+                Ok(request) => request,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            };
             let result = match request {
                 AdapterInvocation::Discover { adapter_id } => AdapterInvocationResult::Discovered {
                     actions: local_controller_action_client(&root)
@@ -608,11 +642,13 @@ fn adapter_invocation_worker(
                     }
                 }
                 AdapterInvocation::OpenSession {
+                    open_token,
                     adapter_id,
                     capability,
                     rows,
                     columns,
                 } => AdapterInvocationResult::SessionOpened {
+                    open_token,
                     session_id: local_controller_session_client(&root)
                         .map_err(|error| error.to_string())
                         .and_then(|client| {
@@ -668,10 +704,19 @@ fn adapter_invocation_worker(
                             client.ok_or_else(|| "controller daemon is unavailable".to_owned())
                         })
                         .and_then(|client| {
-                            client
-                                .close(&adapter_id, &session_id)
-                                .map_err(|error| error.to_string())
+                            reconcile_session_close(
+                                client
+                                    .close(&adapter_id, &session_id)
+                                    .map_err(|error| error.to_string()),
+                                || {
+                                    client
+                                        .active(&adapter_id, &session_id)
+                                        .map_err(|error| error.to_string())
+                                },
+                            )
                         }),
+                    adapter_id,
+                    session_id,
                 },
                 AdapterInvocation::Invoke {
                     adapter_id,
@@ -698,21 +743,66 @@ fn adapter_invocation_worker(
                         .and_then(|client| client.operations().map_err(|error| error.to_string())),
                 },
             };
-            if results.send(result).is_err() {
-                break;
-            }
+            pending_result = Some(result);
+        }
+        if let Some(result) = pending_result {
+            discard_adapter_invocation_result(&root, result);
         }
     });
     (
         requests,
         result_receiver,
-        AdapterInvocationWorker { join: Some(join) },
+        AdapterInvocationWorker {
+            shutdown,
+            join: Some(join),
+        },
     )
+}
+
+fn reconcile_session_close(
+    close: Result<(), String>,
+    active: impl FnOnce() -> Result<bool, String>,
+) -> Result<(), String> {
+    match close {
+        Ok(()) => Ok(()),
+        Err(error) => match active() {
+            Ok(false) => Ok(()),
+            Ok(true) => Err(error),
+            Err(active_error) => Err(format!(
+                "{error}; session state unavailable: {active_error}"
+            )),
+        },
+    }
+}
+
+fn discard_adapter_invocation_result(root: &Path, result: AdapterInvocationResult) {
+    let AdapterInvocationResult::SessionOpened {
+        adapter_id,
+        session_id: Ok(session_id),
+        ..
+    } = result
+    else {
+        return;
+    };
+    if let Ok(Some(client)) = local_controller_session_client(root) {
+        let _ = client.close(&adapter_id, &session_id);
+    }
 }
 
 enum SessionEventMessage {
     Event(AdapterSessionEvent),
+    Inactive {
+        adapter_id: AdapterId,
+        session_id: SessionId,
+    },
     PollError(String),
+}
+
+struct SessionEventPoll {
+    adapter_id: AdapterId,
+    session_id: SessionId,
+    events: Vec<AdapterSessionEvent>,
+    active: bool,
 }
 
 struct SessionEventWorker {
@@ -736,22 +826,61 @@ impl SessionEventWorker {
 
 fn session_event_worker<F>(mut poll: F) -> (Receiver<SessionEventMessage>, SessionEventWorker)
 where
-    F: FnMut() -> Result<Vec<AdapterSessionEvent>, String> + Send + 'static,
+    F: FnMut() -> Result<SessionEventPoll, String> + Send + 'static,
 {
     let (sender, receiver) = mpsc::sync_channel(SESSION_EVENT_CHANNEL_CAPACITY);
     let (shutdown, shutdown_receiver) = mpsc::sync_channel(1);
     let join = thread::spawn(move || {
+        let mut pending_terminal = None;
+        let mut terminal_delivered = false;
         loop {
             if shutdown_receiver.try_recv().is_ok() {
                 break;
             }
-            match poll() {
-                Ok(events) => {
-                    for event in events {
-                        match sender.try_send(SessionEventMessage::Event(event)) {
-                            Ok(()) | Err(TrySendError::Full(_)) => {}
-                            Err(TrySendError::Disconnected(_)) => return,
+            if let Some(message) = pending_terminal.take() {
+                match sender.try_send(message) {
+                    Ok(()) => {
+                        terminal_delivered = true;
+                        continue;
+                    }
+                    Err(TrySendError::Full(message)) => {
+                        pending_terminal = Some(message);
+                        match shutdown_receiver.recv_timeout(Duration::from_millis(10)) {
+                            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                            Err(mpsc::RecvTimeoutError::Timeout) => continue,
                         }
+                    }
+                    Err(TrySendError::Disconnected(_)) => return,
+                }
+            }
+            match poll() {
+                Ok(SessionEventPoll {
+                    adapter_id,
+                    session_id,
+                    events,
+                    active,
+                }) => {
+                    for event in events {
+                        if matches!(
+                            event,
+                            AdapterSessionEvent::Exited { .. }
+                                | AdapterSessionEvent::Disconnected { .. }
+                        ) {
+                            if !terminal_delivered && pending_terminal.is_none() {
+                                pending_terminal = Some(SessionEventMessage::Event(event));
+                            }
+                        } else {
+                            match sender.try_send(SessionEventMessage::Event(event)) {
+                                Ok(()) | Err(TrySendError::Full(_)) => {}
+                                Err(TrySendError::Disconnected(_)) => return,
+                            }
+                        }
+                    }
+                    if !active && !terminal_delivered && pending_terminal.is_none() {
+                        pending_terminal = Some(SessionEventMessage::Inactive {
+                            adapter_id,
+                            session_id,
+                        });
                     }
                 }
                 Err(error) => match sender.try_send(SessionEventMessage::PollError(error)) {
@@ -777,15 +906,49 @@ where
 fn local_session_event_worker(
     root: PathBuf,
     controller_io_lock: ControllerIoLock,
+    adapter_id: AdapterId,
+    session_id: SessionId,
 ) -> (Receiver<SessionEventMessage>, SessionEventWorker) {
     session_event_worker(move || {
         let _controller_io = controller_io_lock
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        local_controller_session_client(&root)
+        let client = local_controller_session_client(&root)
             .map_err(|error| error.to_string())
-            .and_then(|client| client.ok_or_else(|| "controller daemon is unavailable".to_owned()))
-            .and_then(|client| client.events().map_err(|error| error.to_string()))
+            .and_then(|client| {
+                client.ok_or_else(|| "controller daemon is unavailable".to_owned())
+            })?;
+        let events = client
+            .events()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .filter(|event| match event {
+                AdapterSessionEvent::Output {
+                    adapter_id: event_adapter_id,
+                    session_id: event_session_id,
+                    ..
+                }
+                | AdapterSessionEvent::Exited {
+                    adapter_id: event_adapter_id,
+                    session_id: event_session_id,
+                    ..
+                }
+                | AdapterSessionEvent::Disconnected {
+                    adapter_id: event_adapter_id,
+                    session_id: event_session_id,
+                    ..
+                } => event_adapter_id == &adapter_id && event_session_id == &session_id,
+            })
+            .collect();
+        let active = client
+            .active(&adapter_id, &session_id)
+            .map_err(|error| error.to_string())?;
+        Ok(SessionEventPoll {
+            adapter_id: adapter_id.clone(),
+            session_id: session_id.clone(),
+            events,
+            active,
+        })
     })
 }
 
@@ -1693,13 +1856,20 @@ struct Showcase {
     adapter_browser_mode: AdapterBrowserMode,
     adapter_actions: Vec<AdapterAction>,
     adapter_actions_adapter: Option<AdapterId>,
+    pending_action_discovery: Option<AdapterId>,
     adapter_sessions: Vec<AdapterSession>,
     adapter_sessions_adapter: Option<AdapterId>,
+    pending_session_discovery: Option<AdapterId>,
     active_session: Option<HostedSession>,
+    opening_session: Option<PendingSessionOpen>,
+    next_session_open_token: u64,
+    unclaimed_session_closes: VecDeque<SessionIdentity>,
+    unclaimed_session_close_in_flight: Option<SessionIdentity>,
     /// Bounded projection returned by the controller; it is never operation authority.
     adapter_operations: Vec<AdapterOperation>,
     notifications: NotificationState,
     last_operation_refresh: Instant,
+    operation_refresh_in_flight: bool,
     adapter_action_confirmation: Option<AdapterActionConfirmation>,
     adapter_invocation_sender: Option<SyncSender<AdapterInvocation>>,
     adapter_invocation_results: Option<Receiver<AdapterInvocationResult>>,
@@ -1748,6 +1918,18 @@ struct HostedSession {
     session_id: SessionId,
     host: SessionHost,
     close_pending: bool,
+}
+
+#[derive(Clone, Debug)]
+struct PendingSessionOpen {
+    open_token: u64,
+    adapter_id: AdapterId,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SessionIdentity {
+    adapter_id: AdapterId,
+    session_id: SessionId,
 }
 
 impl Showcase {
@@ -1841,12 +2023,19 @@ impl Showcase {
             adapter_browser_mode: AdapterBrowserMode::default(),
             adapter_actions: Vec::new(),
             adapter_actions_adapter: None,
+            pending_action_discovery: None,
             adapter_sessions: Vec::new(),
             adapter_sessions_adapter: None,
+            pending_session_discovery: None,
             active_session: None,
+            opening_session: None,
+            next_session_open_token: 1,
+            unclaimed_session_closes: VecDeque::with_capacity(UNCLAIMED_SESSION_CLOSE_CAPACITY),
+            unclaimed_session_close_in_flight: None,
             adapter_operations: Vec::new(),
             notifications: NotificationState::with_capacity(NOTIFICATION_CAPACITY),
             last_operation_refresh: started,
+            operation_refresh_in_flight: false,
             adapter_action_confirmation: None,
             adapter_invocation_sender,
             adapter_invocation_results,
@@ -1891,7 +2080,10 @@ impl Showcase {
         showcase
     }
 
-    fn host_session(&mut self, adapter_id: AdapterId, session_id: SessionId) {
+    fn host_session(&mut self, adapter_id: AdapterId, session_id: SessionId) -> bool {
+        if self.active_session.is_some() {
+            return false;
+        }
         let mut host = SessionHost::new(SESSION_SCROLLBACK_CAPACITY);
         host.mark_running();
         self.active_session = Some(HostedSession {
@@ -1900,6 +2092,7 @@ impl Showcase {
             host,
             close_pending: false,
         });
+        true
     }
 
     fn apply_session_event(&mut self, event: AdapterSessionEvent) -> bool {
@@ -1921,8 +2114,7 @@ impl Showcase {
                 exit_code,
             } if active.adapter_id == adapter_id && active.session_id == session_id => {
                 self.active_session = None;
-                self.adapter_browser_mode = AdapterBrowserMode::Sessions;
-                self.focus.set_focus(TABLE_FOCUS);
+                self.restore_session_browser_focus(&adapter_id);
                 self.adapter_action_status = Some(match exit_code {
                     Some(exit_code) => {
                         format!("Interactive session exited with code {exit_code}")
@@ -1937,13 +2129,36 @@ impl Showcase {
                 reason,
             } if active.adapter_id == adapter_id && active.session_id == session_id => {
                 self.active_session = None;
-                self.adapter_browser_mode = AdapterBrowserMode::Sessions;
-                self.focus.set_focus(TABLE_FOCUS);
+                self.restore_session_browser_focus(&adapter_id);
                 self.adapter_action_status =
                     Some(format!("Interactive session disconnected: {reason}"));
                 true
             }
             _ => false,
+        }
+    }
+
+    fn reconcile_inactive_session(&mut self, adapter_id: AdapterId, session_id: SessionId) -> bool {
+        let matches_active = self.active_session.as_ref().is_some_and(|active| {
+            active.adapter_id == adapter_id && active.session_id == session_id
+        });
+        if !matches_active {
+            return false;
+        }
+        self.active_session = None;
+        self.restore_session_browser_focus(&adapter_id);
+        self.adapter_action_status = Some("Interactive session is no longer active".to_owned());
+        true
+    }
+
+    fn restore_session_browser_focus(&mut self, adapter_id: &AdapterId) {
+        // A terminal notification owns session state, not the user's current
+        // section or a discovery context abandoned while the host was running.
+        if self.section == Section::Adapters
+            && self.adapter_browser_mode == AdapterBrowserMode::Sessions
+            && self.adapter_sessions_adapter.as_ref() == Some(adapter_id)
+        {
+            self.focus.set_focus(TABLE_FOCUS);
         }
     }
 
@@ -1957,6 +2172,10 @@ impl Showcase {
         for message in messages {
             match message {
                 SessionEventMessage::Event(event) => changed |= self.apply_session_event(event),
+                SessionEventMessage::Inactive {
+                    adapter_id,
+                    session_id,
+                } => changed |= self.reconcile_inactive_session(adapter_id, session_id),
                 SessionEventMessage::PollError(error) => {
                     self.adapter_action_status =
                         Some(format!("Session event poll failed: {error}"));
@@ -1968,29 +2187,52 @@ impl Showcase {
     }
 
     fn ensure_session_event_worker(&mut self) {
-        let active = self.active_session.as_ref().is_some_and(|session| {
+        let active_identity = self.active_session.as_ref().and_then(|session| {
             matches!(
                 session.host.state(),
                 SessionHostState::Opening | SessionHostState::Running
             )
+            .then_some((session.adapter_id.clone(), session.session_id.clone()))
         });
-        if !active {
+        let Some((adapter_id, session_id)) = active_identity else {
             if let Some(mut worker) = self.session_event_worker.take() {
                 worker.stop();
             }
             self.session_event_results = None;
             return;
-        }
+        };
         if self.session_event_worker.is_some() {
             return;
         }
         let Some(root) = self.adapter_root.clone() else {
             return;
         };
-        let (results, worker) =
-            local_session_event_worker(root, Arc::clone(&self.controller_io_lock));
+        let (results, worker) = local_session_event_worker(
+            root,
+            Arc::clone(&self.controller_io_lock),
+            adapter_id,
+            session_id,
+        );
         self.session_event_results = Some(results);
         self.session_event_worker = Some(worker);
+    }
+
+    fn shutdown_adapter_invocations(&mut self) {
+        self.operation_refresh_in_flight = false;
+        // Keep the receiver alive until no worker can publish another owned session.
+        if let Some(worker) = self.adapter_invocation_worker.as_mut() {
+            worker.stop(&mut self.adapter_invocation_sender);
+        }
+        let completed = self
+            .adapter_invocation_results
+            .take()
+            .map(|receiver| receiver.try_iter().collect::<Vec<_>>())
+            .unwrap_or_default();
+        if let Some(root) = self.adapter_root.as_deref() {
+            for result in completed {
+                discard_adapter_invocation_result(root, result);
+            }
+        }
     }
 
     fn shutdown_sessions(&mut self) {
@@ -1998,9 +2240,24 @@ impl Showcase {
             worker.stop();
         }
         self.session_event_results = None;
-        let Some(active) = self.active_session.take() else {
+        let mut sessions = self.unclaimed_session_closes.drain(..).collect::<Vec<_>>();
+        if let Some(session) = self.unclaimed_session_close_in_flight.take()
+            && !sessions.contains(&session)
+        {
+            sessions.push(session);
+        }
+        if let Some(active) = self.active_session.take() {
+            let session = SessionIdentity {
+                adapter_id: active.adapter_id,
+                session_id: active.session_id,
+            };
+            if !sessions.contains(&session) {
+                sessions.push(session);
+            }
+        }
+        if sessions.is_empty() {
             return;
-        };
+        }
         let Some(root) = self.adapter_root.as_deref() else {
             return;
         };
@@ -2009,7 +2266,9 @@ impl Showcase {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Ok(Some(client)) = local_controller_session_client(root) {
-            let _ = client.close(&active.adapter_id, &active.session_id);
+            for session in sessions {
+                let _ = client.close(&session.adapter_id, &session.session_id);
+            }
         }
     }
 
@@ -2224,20 +2483,24 @@ impl Showcase {
             .cloned()
     }
 
-    fn queue_adapter_invocation(&mut self, request: AdapterInvocation) {
+    fn queue_adapter_invocation(&mut self, request: AdapterInvocation) -> bool {
         let Some(sender) = &self.adapter_invocation_sender else {
             self.adapter_action_status = Some("Adapter root is required for actions".to_owned());
-            return;
+            return false;
         };
         match sender.try_send(request) {
             Ok(()) => {
-                self.adapter_action_status = Some("Adapter action request in progress…".to_owned())
+                self.adapter_action_status = Some("Adapter action request in progress…".to_owned());
+                true
             }
             Err(TrySendError::Full(_)) => {
-                self.adapter_action_status = Some("Adapter action request queue is full".to_owned())
+                self.adapter_action_status =
+                    Some("Adapter action request queue is full".to_owned());
+                false
             }
             Err(TrySendError::Disconnected(_)) => {
-                self.adapter_action_status = Some("Adapter action worker unavailable".to_owned())
+                self.adapter_action_status = Some("Adapter action worker unavailable".to_owned());
+                false
             }
         }
     }
@@ -2253,7 +2516,32 @@ impl Showcase {
         self.table.set_selected(0);
         self.adapter_browser_mode = AdapterBrowserMode::Actions;
         self.focus.set_focus(TABLE_FOCUS);
-        self.queue_adapter_invocation(AdapterInvocation::Discover { adapter_id });
+        self.pending_action_discovery = Some(adapter_id);
+        self.retry_pending_action_discovery();
+    }
+
+    fn retry_pending_action_discovery(&mut self) -> bool {
+        let Some(adapter_id) = self.pending_action_discovery.clone() else {
+            return false;
+        };
+        let Some(sender) = self.adapter_invocation_sender.as_ref() else {
+            self.pending_action_discovery = None;
+            self.adapter_action_status = Some("Adapter root is required for actions".to_owned());
+            return false;
+        };
+        match sender.try_send(AdapterInvocation::Discover { adapter_id }) {
+            Ok(()) => {
+                self.pending_action_discovery = None;
+                self.adapter_action_status = Some("Adapter action request in progress…".to_owned());
+                true
+            }
+            Err(TrySendError::Full(_)) => false,
+            Err(TrySendError::Disconnected(_)) => {
+                self.pending_action_discovery = None;
+                self.adapter_action_status = Some("Adapter action worker unavailable".to_owned());
+                false
+            }
+        }
     }
 
     fn open_adapter_sessions(&mut self) {
@@ -2267,10 +2555,45 @@ impl Showcase {
         self.table.set_selected(0);
         self.adapter_browser_mode = AdapterBrowserMode::Sessions;
         self.focus.set_focus(TABLE_FOCUS);
-        self.queue_adapter_invocation(AdapterInvocation::DiscoverSessions { adapter_id });
+        self.pending_session_discovery = Some(adapter_id);
+        self.retry_pending_session_discovery();
+    }
+
+    fn retry_pending_session_discovery(&mut self) -> bool {
+        let Some(adapter_id) = self.pending_session_discovery.clone() else {
+            return false;
+        };
+        let Some(sender) = self.adapter_invocation_sender.as_ref() else {
+            self.pending_session_discovery = None;
+            self.adapter_action_status = Some("Adapter root is required for actions".to_owned());
+            return false;
+        };
+        match sender.try_send(AdapterInvocation::DiscoverSessions { adapter_id }) {
+            Ok(()) => {
+                self.pending_session_discovery = None;
+                self.adapter_action_status = Some("Adapter action request in progress…".to_owned());
+                true
+            }
+            Err(TrySendError::Full(_)) => false,
+            Err(TrySendError::Disconnected(_)) => {
+                self.pending_session_discovery = None;
+                self.adapter_action_status = Some("Adapter action worker unavailable".to_owned());
+                false
+            }
+        }
     }
 
     fn open_selected_adapter_session(&mut self, size: Size) {
+        if self.active_session.is_some() || self.opening_session.is_some() {
+            self.adapter_action_status =
+                Some("An interactive session is already opening or active".to_owned());
+            return;
+        }
+        if self.unclaimed_session_closes.len() >= UNCLAIMED_SESSION_CLOSE_CAPACITY {
+            self.adapter_action_status =
+                Some("Pending interactive session cleanup capacity reached".to_owned());
+            return;
+        }
         let Some(adapter_id) = self.adapter_sessions_adapter.clone() else {
             self.adapter_action_status = Some("No session provider is selected".to_owned());
             return;
@@ -2283,12 +2606,83 @@ impl Showcase {
             self.adapter_action_status = Some("Interactive session host is too small".to_owned());
             return;
         };
-        self.queue_adapter_invocation(AdapterInvocation::OpenSession {
+        let open_token = self.next_session_open_token;
+        let Some(next_session_open_token) = open_token.checked_add(1) else {
+            self.adapter_action_status =
+                Some("Interactive session open token space exhausted".to_owned());
+            return;
+        };
+        let pending = PendingSessionOpen {
+            open_token,
+            adapter_id: adapter_id.clone(),
+        };
+        if self.queue_adapter_invocation(AdapterInvocation::OpenSession {
+            open_token,
             adapter_id,
             capability: session.capability,
             rows,
             columns,
-        });
+        }) {
+            self.next_session_open_token = next_session_open_token;
+            self.opening_session = Some(pending);
+            self.adapter_action_status = Some("Interactive session opening".to_owned());
+        }
+    }
+
+    fn cancel_pending_session_open(&mut self) -> bool {
+        if self.opening_session.take().is_none() {
+            return false;
+        }
+        self.adapter_action_status = Some("Interactive session opening canceled".to_owned());
+        true
+    }
+
+    fn queue_unclaimed_session_close(&mut self, adapter_id: AdapterId, session_id: SessionId) {
+        let session = SessionIdentity {
+            adapter_id,
+            session_id,
+        };
+        if self.unclaimed_session_close_in_flight.as_ref() == Some(&session)
+            || self.unclaimed_session_closes.contains(&session)
+        {
+            return;
+        }
+        if self.unclaimed_session_closes.len() >= UNCLAIMED_SESSION_CLOSE_CAPACITY {
+            self.adapter_action_status =
+                Some("Pending interactive session cleanup capacity reached".to_owned());
+            return;
+        }
+        self.unclaimed_session_closes.push_back(session);
+        self.retry_unclaimed_session_close();
+    }
+
+    fn retry_unclaimed_session_close(&mut self) -> bool {
+        if self.unclaimed_session_close_in_flight.is_some() {
+            return false;
+        }
+        let Some(session) = self.unclaimed_session_closes.front().cloned() else {
+            return false;
+        };
+        let Some(sender) = self.adapter_invocation_sender.as_ref() else {
+            return false;
+        };
+        let request = AdapterInvocation::CloseSession {
+            adapter_id: session.adapter_id.clone(),
+            session_id: session.session_id.clone(),
+        };
+        match sender.try_send(request) {
+            Ok(()) => {
+                self.unclaimed_session_close_in_flight = Some(session);
+                self.adapter_action_status =
+                    Some("Closing an unclaimed interactive session".to_owned());
+                true
+            }
+            Err(TrySendError::Full(_)) => false,
+            Err(TrySendError::Disconnected(_)) => {
+                self.adapter_action_status = Some("Session worker unavailable".to_owned());
+                false
+            }
+        }
     }
 
     fn forward_active_session_input(&mut self, key: KeyEvent) -> bool {
@@ -2470,18 +2864,33 @@ impl Showcase {
                 }
             }
             AdapterInvocationResult::SessionOpened {
+                open_token,
                 adapter_id,
                 session_id,
-            } => match session_id {
-                Ok(session_id) => {
-                    self.host_session(adapter_id, session_id);
-                    self.focus.set_focus(VIEWPORT_FOCUS);
-                    self.adapter_action_status = Some("Interactive session opened".to_owned());
+            } => {
+                let expected = self.opening_session.as_ref().is_some_and(|pending| {
+                    pending.open_token == open_token && pending.adapter_id == adapter_id
+                });
+                if expected {
+                    self.opening_session = None;
                 }
-                Err(error) => {
-                    self.adapter_action_status = Some(format!("Session open failed: {error}"));
+                match session_id {
+                    Ok(session_id)
+                        if expected
+                            && self.host_session(adapter_id.clone(), session_id.clone()) =>
+                    {
+                        self.focus.set_focus(VIEWPORT_FOCUS);
+                        self.adapter_action_status = Some("Interactive session opened".to_owned());
+                    }
+                    Ok(session_id) => {
+                        self.queue_unclaimed_session_close(adapter_id, session_id);
+                    }
+                    Err(error) if expected => {
+                        self.adapter_action_status = Some(format!("Session open failed: {error}"));
+                    }
+                    Err(_) => {}
                 }
-            },
+            }
             AdapterInvocationResult::SessionInputForwarded { result } => {
                 if let Err(error) = result {
                     self.adapter_action_status = Some(format!("Session input failed: {error}"));
@@ -2492,9 +2901,52 @@ impl Showcase {
                     self.adapter_action_status = Some(format!("Session resize failed: {error}"));
                 }
             }
-            AdapterInvocationResult::SessionCloseRequested { result } => {
-                if let Err(error) = result {
-                    if let Some(active) = self.active_session.as_mut() {
+            AdapterInvocationResult::SessionCloseRequested {
+                adapter_id,
+                session_id,
+                result,
+            } => {
+                let closes_unclaimed =
+                    self.unclaimed_session_close_in_flight
+                        .as_ref()
+                        .is_some_and(|session| {
+                            session.adapter_id == adapter_id && session.session_id == session_id
+                        });
+                if closes_unclaimed {
+                    let closed = self.unclaimed_session_close_in_flight.take();
+                    match result {
+                        Ok(()) => {
+                            if let Some(closed) = closed
+                                && let Some(index) = self
+                                    .unclaimed_session_closes
+                                    .iter()
+                                    .position(|session| session == &closed)
+                            {
+                                self.unclaimed_session_closes.remove(index);
+                            }
+                            self.adapter_action_status =
+                                Some("Unclaimed interactive session closed".to_owned());
+                        }
+                        Err(error) => {
+                            // Retain uncertain ownership, but do not starve other cleanup records.
+                            if let Some(failed) = closed
+                                && let Some(index) = self
+                                    .unclaimed_session_closes
+                                    .iter()
+                                    .position(|session| session == &failed)
+                            {
+                                self.unclaimed_session_closes.remove(index);
+                                self.unclaimed_session_closes.push_back(failed);
+                            }
+                            self.adapter_action_status =
+                                Some(format!("Unclaimed session close failed: {error}"));
+                        }
+                    }
+                } else if let Err(error) = result {
+                    if let Some(active) = self.active_session.as_mut()
+                        && active.adapter_id == adapter_id
+                        && active.session_id == session_id
+                    {
                         active.close_pending = false;
                     }
                     self.adapter_action_status = Some(format!("Session close failed: {error}"));
@@ -2515,12 +2967,16 @@ impl Showcase {
                     self.adapter_action_status = Some(format!("Operation request failed: {error}"));
                 }
             },
-            AdapterInvocationResult::Operations { operations } => match operations {
-                Ok(operations) => self.replace_adapter_operations(operations),
-                Err(error) => {
-                    self.adapter_action_status = Some(format!("Operation refresh failed: {error}"));
+            AdapterInvocationResult::Operations { operations } => {
+                self.operation_refresh_in_flight = false;
+                match operations {
+                    Ok(operations) => self.replace_adapter_operations(operations),
+                    Err(error) => {
+                        self.adapter_action_status =
+                            Some(format!("Operation refresh failed: {error}"));
+                    }
                 }
-            },
+            }
         }
         true
     }
@@ -2616,15 +3072,23 @@ impl Showcase {
                 changed |= self.drain_adapter_diagnostics_results();
                 changed |= self.drain_adapter_action_results();
                 changed |= self.drain_adapter_invocation_results();
+                changed |= self.retry_pending_action_discovery();
+                changed |= self.retry_pending_session_discovery();
+                changed |= self.retry_unclaimed_session_close();
                 changed |= self.drain_session_event_results();
                 self.ensure_session_event_worker();
                 if self.adapter_root.is_some()
+                    && !self.operation_refresh_in_flight
+                    && self.adapter_browser_mode != AdapterBrowserMode::Sessions
                     && now.saturating_duration_since(self.last_operation_refresh)
                         >= OPERATION_POLL_INTERVAL
                 {
                     self.last_operation_refresh = now;
                     if let Some(sender) = &self.adapter_invocation_sender {
-                        let _ = sender.try_send(AdapterInvocation::Operations);
+                        // Do not fill essential invocation capacity with duplicate
+                        // polls while a slow controller still owes the first result.
+                        self.operation_refresh_in_flight =
+                            sender.try_send(AdapterInvocation::Operations).is_ok();
                     }
                 }
                 changed |= self.animation_enabled && self.spinner.update(now);
@@ -2868,6 +3332,8 @@ impl Showcase {
             } else if self.adapter_browser_mode == AdapterBrowserMode::Actions {
                 match key.code {
                     KeyCode::Char('a' | 'A') | KeyCode::Escape => {
+                        self.pending_action_discovery = None;
+                        self.adapter_actions_adapter = None;
                         self.adapter_browser_mode = AdapterBrowserMode::Adapters;
                         self.focus.set_focus(TABLE_FOCUS);
                     }
@@ -2901,6 +3367,9 @@ impl Showcase {
             } else if self.adapter_browser_mode == AdapterBrowserMode::Sessions {
                 match key.code {
                     KeyCode::Char('h' | 'H') | KeyCode::Escape => {
+                        self.pending_session_discovery = None;
+                        self.adapter_sessions_adapter = None;
+                        self.cancel_pending_session_open();
                         self.adapter_browser_mode = AdapterBrowserMode::Adapters;
                         self.table.set_selected(0);
                         self.focus.set_focus(TABLE_FOCUS);
@@ -3454,6 +3923,19 @@ impl Showcase {
     }
 
     fn select_section(&mut self, section: Section) {
+        if section != Section::Adapters {
+            self.cancel_pending_session_open();
+            self.pending_action_discovery = None;
+            self.pending_session_discovery = None;
+            self.adapter_actions_adapter = None;
+            self.adapter_sessions_adapter = None;
+            if matches!(
+                self.adapter_browser_mode,
+                AdapterBrowserMode::Actions | AdapterBrowserMode::Sessions
+            ) {
+                self.adapter_browser_mode = AdapterBrowserMode::Adapters;
+            }
+        }
         self.section = section;
         if section == Section::Adapters {
             self.refresh_adapter_diagnostics();
@@ -3622,10 +4104,8 @@ impl Showcase {
 
 impl Drop for Showcase {
     fn drop(&mut self) {
+        self.shutdown_adapter_invocations();
         self.shutdown_sessions();
-        if let Some(worker) = self.adapter_invocation_worker.as_mut() {
-            worker.stop(&mut self.adapter_invocation_sender);
-        }
         if let Some(worker) = self.live_data_worker.as_mut() {
             worker.stop();
         }
@@ -6834,6 +7314,213 @@ mod tests {
     }
 
     #[test]
+    fn session_discovery_retries_after_a_low_priority_refresh_releases_the_bounded_channel() {
+        let mut showcase = Showcase::new(Instant::now());
+        showcase.phase = Phase::Showcase;
+        showcase.section = Section::Adapters;
+        showcase.adapter_rows = vec![AdapterRow {
+            id: "provider-a".to_owned(),
+            name: "Provider A".to_owned(),
+            version: "1.0.0".to_owned(),
+            state: AdapterViewState::Stopped,
+            protocol: "1".to_owned(),
+            executable: "provider-a".to_owned(),
+            last_error: None,
+        }];
+        let (sender, receiver) = mpsc::sync_channel(1);
+        sender.try_send(AdapterInvocation::Operations).unwrap();
+        showcase.adapter_invocation_sender = Some(sender);
+
+        assert!(showcase.handle_key(key(KeyCode::Char('h'))).redraw);
+        assert_eq!(showcase.adapter_browser_mode, AdapterBrowserMode::Sessions);
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(AdapterInvocation::Operations)
+        ));
+
+        showcase.advance(Instant::now());
+
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(AdapterInvocation::DiscoverSessions { adapter_id }) if adapter_id.as_str() == "provider-a"
+        ));
+    }
+
+    #[test]
+    fn background_operation_refresh_keeps_at_most_one_request_outstanding() {
+        for response in [Ok(Vec::new()), Err("fixture transport error".to_owned())] {
+            let started = Instant::now();
+            let mut showcase = Showcase::new(started);
+            showcase.phase = Phase::Showcase;
+            showcase.adapter_root = Some(PathBuf::from("unused-operation-refresh-fixture"));
+            let (sender, receiver) = mpsc::sync_channel(1);
+            showcase.adapter_invocation_sender = Some(sender);
+            showcase.advance(started + OPERATION_POLL_INTERVAL);
+            assert!(matches!(
+                receiver.try_recv(),
+                Ok(AdapterInvocation::Operations)
+            ));
+            // The worker has received the request but has not delivered its result.
+            showcase.advance(started + OPERATION_POLL_INTERVAL * 2);
+            assert!(matches!(
+                receiver.try_recv(),
+                Err(mpsc::TryRecvError::Empty)
+            ));
+            assert!(
+                showcase.queue_adapter_invocation(AdapterInvocation::Discover {
+                    adapter_id: AdapterId::new("provider-a").unwrap(),
+                })
+            );
+            assert!(matches!(
+                receiver.try_recv(),
+                Ok(AdapterInvocation::Discover { .. })
+            ));
+            let (results_sender, results_receiver) = mpsc::sync_channel(1);
+            showcase.adapter_invocation_results = Some(results_receiver);
+            results_sender
+                .send(AdapterInvocationResult::Operations {
+                    operations: response,
+                })
+                .unwrap();
+            showcase.advance(started + OPERATION_POLL_INTERVAL * 3);
+            assert!(matches!(
+                receiver.try_recv(),
+                Ok(AdapterInvocation::Operations)
+            ));
+        }
+    }
+
+    #[test]
+    fn failed_refresh_admission_does_not_disable_later_refreshes() {
+        let started = Instant::now();
+        let mut showcase = Showcase::new(started);
+        showcase.phase = Phase::Showcase;
+        showcase.adapter_root = Some(PathBuf::from("unused-operation-refresh-fixture"));
+        let (sender, receiver) = mpsc::sync_channel(1);
+        sender
+            .try_send(AdapterInvocation::Discover {
+                adapter_id: AdapterId::new("provider-a").unwrap(),
+            })
+            .unwrap();
+        showcase.adapter_invocation_sender = Some(sender);
+        showcase.advance(started + OPERATION_POLL_INTERVAL);
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(AdapterInvocation::Discover { .. })
+        ));
+        showcase.advance(started + OPERATION_POLL_INTERVAL * 2);
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(AdapterInvocation::Operations)
+        ));
+    }
+
+    #[test]
+    fn action_discovery_retries_after_a_low_priority_refresh_releases_the_bounded_channel() {
+        let mut showcase = Showcase::new(Instant::now());
+        showcase.phase = Phase::Showcase;
+        showcase.section = Section::Adapters;
+        showcase.adapter_rows = vec![AdapterRow {
+            id: "provider-a".to_owned(),
+            name: "Provider A".to_owned(),
+            version: "1.0.0".to_owned(),
+            state: AdapterViewState::Stopped,
+            protocol: "1".to_owned(),
+            executable: "provider-a".to_owned(),
+            last_error: None,
+        }];
+        let (sender, receiver) = mpsc::sync_channel(1);
+        sender.try_send(AdapterInvocation::Operations).unwrap();
+        showcase.adapter_invocation_sender = Some(sender);
+
+        assert!(showcase.handle_key(key(KeyCode::Char('a'))).redraw);
+        assert_eq!(showcase.adapter_browser_mode, AdapterBrowserMode::Actions);
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(AdapterInvocation::Operations)
+        ));
+        showcase.advance(Instant::now());
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(AdapterInvocation::Discover { adapter_id }) if adapter_id.as_str() == "provider-a"
+        ));
+    }
+
+    #[test]
+    fn abandoned_discovery_does_not_retry_or_apply_late_results() {
+        for (sessions, leave_section) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let mut showcase = Showcase::new(Instant::now());
+            showcase.phase = Phase::Showcase;
+            showcase.section = Section::Adapters;
+            let adapter_id = AdapterId::new("provider-a").unwrap();
+            showcase.adapter_browser_mode = if sessions {
+                showcase.pending_session_discovery = Some(adapter_id.clone());
+                showcase.adapter_sessions_adapter = Some(adapter_id.clone());
+                AdapterBrowserMode::Sessions
+            } else {
+                showcase.pending_action_discovery = Some(adapter_id.clone());
+                showcase.adapter_actions_adapter = Some(adapter_id.clone());
+                AdapterBrowserMode::Actions
+            };
+            let (sender, requests) = mpsc::sync_channel(1);
+            sender.try_send(AdapterInvocation::Operations).unwrap();
+            showcase.adapter_invocation_sender = Some(sender);
+            if leave_section {
+                showcase.select_section(Section::Data);
+            } else {
+                assert!(showcase.handle_key(key(KeyCode::Escape)).redraw);
+            }
+            assert!(matches!(
+                requests.try_recv(),
+                Ok(AdapterInvocation::Operations)
+            ));
+            showcase.advance(Instant::now());
+            assert!(requests.try_recv().is_err());
+            assert!(showcase.pending_action_discovery.is_none());
+            assert!(showcase.pending_session_discovery.is_none());
+
+            let (results, receiver) = mpsc::sync_channel(1);
+            showcase.adapter_invocation_results = Some(receiver);
+            let late = if sessions {
+                AdapterInvocationResult::SessionsDiscovered {
+                    adapter_id,
+                    sessions: Ok(Vec::new()),
+                }
+            } else {
+                AdapterInvocationResult::Discovered {
+                    adapter_id,
+                    actions: Ok(Vec::new()),
+                }
+            };
+            showcase.table.set_selected(3);
+            results.send(late).unwrap();
+            showcase.drain_adapter_invocation_results();
+            assert_eq!(showcase.table.selected_index(4), Some(3));
+        }
+    }
+
+    #[test]
+    fn discovery_retry_clears_when_worker_is_disconnected() {
+        let mut showcase = Showcase::new(Instant::now());
+        let (sender, receiver) = mpsc::sync_channel(1);
+        showcase.adapter_invocation_sender = Some(sender);
+        drop(receiver);
+        let adapter_id = AdapterId::new("provider-a").unwrap();
+        showcase.pending_action_discovery = Some(adapter_id.clone());
+        showcase.pending_session_discovery = Some(adapter_id);
+        assert!(!showcase.retry_pending_action_discovery());
+        assert!(!showcase.retry_pending_session_discovery());
+        assert!(showcase.pending_action_discovery.is_none());
+        assert!(showcase.pending_session_discovery.is_none());
+        assert_eq!(
+            showcase.adapter_action_status.as_deref(),
+            Some("Adapter action worker unavailable")
+        );
+    }
+
+    #[test]
     fn selected_session_opens_through_the_bounded_worker_with_explicit_dimensions() {
         let mut showcase = Showcase::new(Instant::now());
         showcase.adapter_sessions_adapter = Some(AdapterId::new("provider-a").unwrap());
@@ -6854,8 +7541,320 @@ mod tests {
                 capability,
                 rows: 16,
                 columns: 77,
+                ..
             }) if adapter_id.as_str() == "provider-a" && capability.as_str() == "opaque.session.surface"
         ));
+    }
+
+    #[test]
+    fn opening_session_rejects_a_second_open_until_the_first_result_arrives() {
+        let mut showcase = Showcase::new(Instant::now());
+        showcase.adapter_sessions_adapter = Some(AdapterId::new("provider-a").unwrap());
+        showcase.adapter_sessions = vec![AdapterSession {
+            capability: Capability::new("opaque.session.surface").unwrap(),
+            label: "Interactive session".to_owned(),
+            description: None,
+        }];
+        let (sender, receiver) = mpsc::sync_channel(2);
+        showcase.adapter_invocation_sender = Some(sender);
+
+        showcase.open_selected_adapter_session(Size::new(80, 24));
+        showcase.open_selected_adapter_session(Size::new(80, 24));
+
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(AdapterInvocation::OpenSession { .. })
+        ));
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn stale_session_open_result_cannot_replace_the_active_host() {
+        let mut showcase = Showcase::new(Instant::now());
+        let expected_adapter = AdapterId::new("provider-a").unwrap();
+        showcase.adapter_sessions_adapter = Some(expected_adapter.clone());
+        showcase.adapter_sessions = vec![AdapterSession {
+            capability: Capability::new("opaque.session.surface").unwrap(),
+            label: "Interactive session".to_owned(),
+            description: None,
+        }];
+        let (sender, requests) = mpsc::sync_channel(2);
+        let (results, receiver) = mpsc::sync_channel(2);
+        showcase.adapter_invocation_sender = Some(sender);
+        showcase.adapter_invocation_results = Some(receiver);
+        showcase.open_selected_adapter_session(Size::new(80, 24));
+        let open_token = match requests.try_recv() {
+            Ok(AdapterInvocation::OpenSession { open_token, .. }) => open_token,
+            request => panic!("expected session open request, got {request:?}"),
+        };
+        let expected_session = SessionId::new("expected-session").unwrap();
+        results
+            .send(AdapterInvocationResult::SessionOpened {
+                open_token,
+                adapter_id: expected_adapter.clone(),
+                session_id: Ok(expected_session.clone()),
+            })
+            .unwrap();
+        assert!(showcase.drain_adapter_invocation_results());
+
+        results
+            .send(AdapterInvocationResult::SessionOpened {
+                open_token,
+                adapter_id: AdapterId::new("provider-b").unwrap(),
+                session_id: Ok(SessionId::new("stale-session").unwrap()),
+            })
+            .unwrap();
+        assert!(showcase.drain_adapter_invocation_results());
+
+        let active = showcase.active_session.as_ref().unwrap();
+        assert_eq!(active.adapter_id, expected_adapter);
+        assert_eq!(active.session_id, expected_session);
+        assert!(matches!(
+            requests.try_recv(),
+            Ok(AdapterInvocation::CloseSession {
+                adapter_id,
+                session_id,
+            }) if adapter_id.as_str() == "provider-b" && session_id.as_str() == "stale-session"
+        ));
+    }
+
+    #[test]
+    fn leaving_session_browser_makes_pending_open_unclaimed_and_queues_cleanup() {
+        let mut showcase = Showcase::new(Instant::now());
+        showcase.phase = Phase::Showcase;
+        showcase.section = Section::Adapters;
+        showcase.adapter_browser_mode = AdapterBrowserMode::Sessions;
+        let adapter_id = AdapterId::new("provider-a").unwrap();
+        showcase.adapter_sessions_adapter = Some(adapter_id.clone());
+        showcase.adapter_sessions = vec![AdapterSession {
+            capability: Capability::new("opaque.session.surface").unwrap(),
+            label: "Interactive session".to_owned(),
+            description: None,
+        }];
+        let (sender, requests) = mpsc::sync_channel(2);
+        let (results, receiver) = mpsc::sync_channel(1);
+        showcase.adapter_invocation_sender = Some(sender);
+        showcase.adapter_invocation_results = Some(receiver);
+        showcase.open_selected_adapter_session(Size::new(80, 24));
+        let open_token = match requests.try_recv() {
+            Ok(AdapterInvocation::OpenSession { open_token, .. }) => open_token,
+            request => panic!("expected session open request, got {request:?}"),
+        };
+
+        assert!(showcase.handle_key(key(KeyCode::Escape)).redraw);
+        assert!(showcase.opening_session.is_none());
+        assert_eq!(showcase.adapter_browser_mode, AdapterBrowserMode::Adapters);
+
+        results
+            .send(AdapterInvocationResult::SessionOpened {
+                open_token,
+                adapter_id: adapter_id.clone(),
+                session_id: Ok(SessionId::new("stale-session").unwrap()),
+            })
+            .unwrap();
+        assert!(showcase.drain_adapter_invocation_results());
+
+        assert!(showcase.active_session.is_none());
+        assert!(matches!(
+            requests.try_recv(),
+            Ok(AdapterInvocation::CloseSession {
+                adapter_id: actual_adapter,
+                session_id,
+            }) if actual_adapter == adapter_id && session_id.as_str() == "stale-session"
+        ));
+    }
+
+    #[test]
+    fn stale_same_adapter_open_result_cannot_claim_a_new_pending_open() {
+        let mut showcase = Showcase::new(Instant::now());
+        let adapter_id = AdapterId::new("provider-a").unwrap();
+        showcase.adapter_sessions_adapter = Some(adapter_id.clone());
+        showcase.adapter_sessions = vec![AdapterSession {
+            capability: Capability::new("opaque.session.surface").unwrap(),
+            label: "Interactive session".to_owned(),
+            description: None,
+        }];
+        let (sender, requests) = mpsc::sync_channel(3);
+        let (results, receiver) = mpsc::sync_channel(2);
+        showcase.adapter_invocation_sender = Some(sender);
+        showcase.adapter_invocation_results = Some(receiver);
+
+        showcase.open_selected_adapter_session(Size::new(80, 24));
+        let first_token = match requests.try_recv() {
+            Ok(AdapterInvocation::OpenSession { open_token, .. }) => open_token,
+            request => panic!("expected first session open request, got {request:?}"),
+        };
+        assert!(showcase.cancel_pending_session_open());
+        showcase.open_selected_adapter_session(Size::new(80, 24));
+        let second_token = match requests.try_recv() {
+            Ok(AdapterInvocation::OpenSession { open_token, .. }) => open_token,
+            request => panic!("expected second session open request, got {request:?}"),
+        };
+        assert_ne!(first_token, second_token);
+
+        results
+            .send(AdapterInvocationResult::SessionOpened {
+                open_token: first_token,
+                adapter_id: adapter_id.clone(),
+                session_id: Ok(SessionId::new("stale-session").unwrap()),
+            })
+            .unwrap();
+        assert!(showcase.drain_adapter_invocation_results());
+        assert!(showcase.active_session.is_none());
+        assert_eq!(
+            showcase
+                .opening_session
+                .as_ref()
+                .map(|pending| pending.open_token),
+            Some(second_token)
+        );
+        assert!(matches!(
+            requests.try_recv(),
+            Ok(AdapterInvocation::CloseSession {
+                adapter_id: actual_adapter,
+                session_id,
+            }) if actual_adapter == adapter_id && session_id.as_str() == "stale-session"
+        ));
+
+        let expected_session = SessionId::new("expected-session").unwrap();
+        results
+            .send(AdapterInvocationResult::SessionOpened {
+                open_token: second_token,
+                adapter_id: adapter_id.clone(),
+                session_id: Ok(expected_session.clone()),
+            })
+            .unwrap();
+        assert!(showcase.drain_adapter_invocation_results());
+        let active = showcase.active_session.as_ref().unwrap();
+        assert_eq!(active.adapter_id, adapter_id);
+        assert_eq!(active.session_id, expected_session);
+    }
+
+    #[test]
+    fn session_close_reconciliation_requires_authoritative_inactivity() {
+        assert!(
+            reconcile_session_close(Ok(()), || panic!("successful close needs no query")).is_ok()
+        );
+        assert!(reconcile_session_close(Err("unknown session".to_owned()), || Ok(false)).is_ok());
+        assert!(reconcile_session_close(Err("close failed".to_owned()), || Ok(true)).is_err());
+        assert!(
+            reconcile_session_close(Err("close failed".to_owned()), || Err("offline".to_owned()))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn inactive_or_unreachable_cleanup_record_does_not_starve_the_next_session() {
+        for inactive in [true, false] {
+            let mut showcase = Showcase::new(Instant::now());
+            let adapter_id = AdapterId::new("provider-a").unwrap();
+            let first = SessionId::new("first").unwrap();
+            let second = SessionId::new("second").unwrap();
+            let (sender, requests) = mpsc::sync_channel(1);
+            let (results, receiver) = mpsc::sync_channel(1);
+            showcase.adapter_invocation_sender = Some(sender);
+            showcase.adapter_invocation_results = Some(receiver);
+            showcase.queue_unclaimed_session_close(adapter_id.clone(), first.clone());
+            showcase.queue_unclaimed_session_close(adapter_id.clone(), second.clone());
+            assert!(
+                matches!(requests.try_recv(), Ok(AdapterInvocation::CloseSession { session_id, .. }) if session_id == first)
+            );
+            let result = reconcile_session_close(Err("close failed".to_owned()), || {
+                if inactive {
+                    Ok(false)
+                } else {
+                    Err("transport unavailable".to_owned())
+                }
+            });
+            results
+                .send(AdapterInvocationResult::SessionCloseRequested {
+                    adapter_id: adapter_id.clone(),
+                    session_id: first.clone(),
+                    result,
+                })
+                .unwrap();
+            showcase.drain_adapter_invocation_results();
+            assert!(showcase.retry_unclaimed_session_close());
+            assert!(
+                matches!(requests.try_recv(), Ok(AdapterInvocation::CloseSession { session_id, .. }) if session_id == second)
+            );
+            assert_eq!(
+                showcase.unclaimed_session_closes.len(),
+                if inactive { 1 } else { 2 }
+            );
+            results
+                .send(AdapterInvocationResult::SessionCloseRequested {
+                    adapter_id,
+                    session_id: second,
+                    result: Ok(()),
+                })
+                .unwrap();
+            showcase.drain_adapter_invocation_results();
+            if inactive {
+                assert!(showcase.unclaimed_session_closes.is_empty());
+            } else {
+                assert_eq!(
+                    showcase
+                        .unclaimed_session_closes
+                        .front()
+                        .unwrap()
+                        .session_id,
+                    first
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unclaimed_session_cleanup_queue_retains_each_session_until_close_result() {
+        let mut showcase = Showcase::new(Instant::now());
+        let adapter_id = AdapterId::new("provider-a").unwrap();
+        let first_session = SessionId::new("stale-one").unwrap();
+        let second_session = SessionId::new("stale-two").unwrap();
+        let (sender, requests) = mpsc::sync_channel(2);
+        let (results, receiver) = mpsc::sync_channel(2);
+        showcase.adapter_invocation_sender = Some(sender);
+        showcase.adapter_invocation_results = Some(receiver);
+
+        showcase.queue_unclaimed_session_close(adapter_id.clone(), first_session.clone());
+        showcase.queue_unclaimed_session_close(adapter_id.clone(), second_session.clone());
+        assert_eq!(showcase.unclaimed_session_closes.len(), 2);
+        assert!(matches!(
+            requests.try_recv(),
+            Ok(AdapterInvocation::CloseSession {
+                adapter_id: actual_adapter,
+                session_id,
+            }) if actual_adapter == adapter_id && session_id == first_session
+        ));
+
+        results
+            .send(AdapterInvocationResult::SessionCloseRequested {
+                adapter_id: adapter_id.clone(),
+                session_id: first_session,
+                result: Ok(()),
+            })
+            .unwrap();
+        assert!(showcase.drain_adapter_invocation_results());
+        assert_eq!(showcase.unclaimed_session_closes.len(), 1);
+        assert!(showcase.retry_unclaimed_session_close());
+        assert!(matches!(
+            requests.try_recv(),
+            Ok(AdapterInvocation::CloseSession {
+                adapter_id: actual_adapter,
+                session_id,
+            }) if actual_adapter == adapter_id && session_id == second_session
+        ));
+
+        results
+            .send(AdapterInvocationResult::SessionCloseRequested {
+                adapter_id,
+                session_id: second_session,
+                result: Ok(()),
+            })
+            .unwrap();
+        assert!(showcase.drain_adapter_invocation_results());
+        assert!(showcase.unclaimed_session_closes.is_empty());
+        assert!(showcase.unclaimed_session_close_in_flight.is_none());
     }
 
     #[test]
@@ -7036,6 +8035,58 @@ mod tests {
     }
 
     #[test]
+    fn terminal_session_results_preserve_abandoned_browser_context_and_other_section_focus() {
+        for section in [Section::Data, Section::Input] {
+            for return_before_result in [false, true] {
+                for terminal in 0..3 {
+                    let mut showcase = Showcase::new(Instant::now());
+                    showcase.phase = Phase::Showcase;
+                    showcase.section = Section::Adapters;
+                    showcase.adapter_browser_mode = AdapterBrowserMode::Sessions;
+                    let adapter_id = AdapterId::new("adapter-a").unwrap();
+                    let session_id = SessionId::new("session-a").unwrap();
+                    showcase.adapter_sessions_adapter = Some(adapter_id.clone());
+                    showcase.adapter_sessions = vec![AdapterSession {
+                        capability: Capability::new("fixture.terminal").unwrap(),
+                        label: "Fixture terminal".to_owned(),
+                        description: None,
+                    }];
+                    showcase.host_session(adapter_id.clone(), session_id.clone());
+                    showcase.select_section(section);
+                    if return_before_result {
+                        showcase.select_section(Section::Adapters);
+                    }
+                    let focus = showcase.focus.current();
+                    let applied = match terminal {
+                        0 => showcase.apply_session_event(AdapterSessionEvent::Exited {
+                            adapter_id,
+                            session_id,
+                            exit_code: Some(0),
+                        }),
+                        1 => showcase.apply_session_event(AdapterSessionEvent::Disconnected {
+                            adapter_id,
+                            session_id,
+                            reason: "fixture stopped".to_owned(),
+                        }),
+                        _ => showcase.reconcile_inactive_session(adapter_id, session_id),
+                    };
+                    assert!(applied);
+                    assert!(showcase.active_session.is_none());
+                    assert_eq!(
+                        showcase.focus.current(),
+                        focus,
+                        "terminal result changed current focus"
+                    );
+                    assert_eq!(showcase.adapter_browser_mode, AdapterBrowserMode::Adapters);
+                    assert!(showcase.adapter_sessions_adapter.is_none());
+                    showcase.select_section(Section::Adapters);
+                    assert_eq!(showcase.adapter_browser_mode, AdapterBrowserMode::Adapters);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn typed_session_exit_returns_to_the_declared_session_browser() {
         let mut showcase = Showcase::new(Instant::now());
         showcase.phase = Phase::Showcase;
@@ -7090,11 +8141,167 @@ mod tests {
     }
 
     #[test]
+    fn inactive_session_reconciliation_returns_to_the_session_browser() {
+        let mut showcase = Showcase::new(Instant::now());
+        showcase.adapter_sessions_adapter = Some(AdapterId::new("adapter-a").unwrap());
+        showcase.phase = Phase::Showcase;
+        showcase.section = Section::Adapters;
+        showcase.adapter_browser_mode = AdapterBrowserMode::Sessions;
+        let adapter_id = AdapterId::new("adapter-a").unwrap();
+        let session_id = SessionId::new("session-a").unwrap();
+        showcase.host_session(adapter_id.clone(), session_id.clone());
+        let (sender, receiver) = mpsc::sync_channel(1);
+        showcase.session_event_results = Some(receiver);
+        sender
+            .send(SessionEventMessage::Inactive {
+                adapter_id,
+                session_id,
+            })
+            .unwrap();
+
+        assert!(showcase.drain_session_event_results());
+        assert!(showcase.active_session.is_none());
+        assert_eq!(showcase.adapter_browser_mode, AdapterBrowserMode::Sessions);
+        assert_eq!(showcase.focus.current(), Some(TABLE_FOCUS));
+        assert_eq!(
+            showcase.adapter_action_status.as_deref(),
+            Some("Interactive session is no longer active")
+        );
+    }
+
+    #[test]
+    fn invocation_shutdown_retains_receiver_until_worker_has_joined() {
+        let mut showcase = Showcase::new(Instant::now());
+        let (shutdown, shutdown_receiver) = mpsc::sync_channel(1);
+        let (results, receiver) = mpsc::sync_channel(1);
+        let delivered = Arc::new(AtomicUsize::new(0));
+        let worker_delivered = Arc::clone(&delivered);
+        showcase.adapter_invocation_results = Some(receiver);
+        showcase.adapter_invocation_worker = Some(AdapterInvocationWorker {
+            shutdown,
+            join: Some(thread::spawn(move || {
+                shutdown_receiver
+                    .recv_timeout(Duration::from_secs(1))
+                    .unwrap();
+                let result = AdapterInvocationResult::SessionOpened {
+                    open_token: 1,
+                    adapter_id: AdapterId::new("provider-a").unwrap(),
+                    session_id: Ok(SessionId::new("late-session").unwrap()),
+                };
+                worker_delivered.store(
+                    usize::from(results.try_send(result).is_ok()),
+                    Ordering::Release,
+                );
+            })),
+        });
+        showcase.shutdown_adapter_invocations();
+        assert_eq!(delivered.load(Ordering::Acquire), 1);
+        assert!(showcase.adapter_invocation_results.is_none());
+    }
+
+    #[test]
+    fn invocation_worker_shutdown_does_not_wait_for_a_full_result_receiver() {
+        let root = Path::new("/tmp/dragonstui-m65-no-controller");
+        let (sender, results, mut worker) = adapter_invocation_worker(root);
+        let adapter_id = AdapterId::new("adapter-a").unwrap();
+        sender
+            .send(AdapterInvocation::Discover {
+                adapter_id: adapter_id.clone(),
+            })
+            .unwrap();
+        thread::sleep(Duration::from_millis(50));
+        sender
+            .send(AdapterInvocation::Discover { adapter_id })
+            .unwrap();
+        thread::sleep(Duration::from_millis(50));
+
+        let mut sender = Some(sender);
+        let (stopped, stopped_receiver) = mpsc::channel();
+        let stopper = thread::spawn(move || {
+            worker.stop(&mut sender);
+            let _ = stopped.send(());
+        });
+        let completed_before_result_receiver_dropped = stopped_receiver
+            .recv_timeout(Duration::from_millis(250))
+            .is_ok();
+        drop(results);
+        stopper.join().unwrap();
+
+        assert!(completed_before_result_receiver_dropped);
+    }
+
+    #[test]
+    fn session_event_worker_preserves_terminal_event_when_output_channel_is_full() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+
+        let adapter_id = AdapterId::new("adapter-a").unwrap();
+        let session_id = SessionId::new("session-a").unwrap();
+        let first_poll = Arc::new(AtomicBool::new(true));
+        let poll_adapter_id = adapter_id.clone();
+        let poll_session_id = session_id.clone();
+        let poll_first = Arc::clone(&first_poll);
+        let (results, mut worker) = session_event_worker(move || {
+            let events = if poll_first.swap(false, Ordering::SeqCst) {
+                let mut events = (0..=SESSION_EVENT_CHANNEL_CAPACITY)
+                    .map(|index| AdapterSessionEvent::Output {
+                        adapter_id: poll_adapter_id.clone(),
+                        session_id: poll_session_id.clone(),
+                        data: format!("output-{index}"),
+                    })
+                    .collect::<Vec<_>>();
+                events.push(AdapterSessionEvent::Exited {
+                    adapter_id: poll_adapter_id.clone(),
+                    session_id: poll_session_id.clone(),
+                    exit_code: Some(0),
+                });
+                events
+            } else {
+                Vec::new()
+            };
+            Ok(SessionEventPoll {
+                adapter_id: poll_adapter_id.clone(),
+                session_id: poll_session_id.clone(),
+                events,
+                active: false,
+            })
+        });
+
+        let mut terminal_seen = false;
+        for _ in 0..=SESSION_EVENT_CHANNEL_CAPACITY + 1 {
+            match results.recv_timeout(Duration::from_secs(1)).unwrap() {
+                SessionEventMessage::Event(AdapterSessionEvent::Exited {
+                    adapter_id: actual_adapter,
+                    session_id: actual_session,
+                    exit_code: Some(0),
+                }) if actual_adapter == adapter_id && actual_session == session_id => {
+                    terminal_seen = true;
+                    break;
+                }
+                SessionEventMessage::Event(_) | SessionEventMessage::Inactive { .. } => {}
+                SessionEventMessage::PollError(error) => panic!("unexpected poll error: {error}"),
+            }
+        }
+        worker.stop();
+
+        assert!(terminal_seen);
+    }
+
+    #[test]
     fn session_event_worker_stops_and_joins() {
+        let adapter_id = AdapterId::new("adapter-a").unwrap();
+        let session_id = SessionId::new("session-a").unwrap();
         let (started, started_receiver) = mpsc::sync_channel(1);
         let (_results, mut worker) = session_event_worker(move || {
             let _ = started.try_send(());
-            Ok(Vec::new())
+            Ok(SessionEventPoll {
+                adapter_id: adapter_id.clone(),
+                session_id: session_id.clone(),
+                events: Vec::new(),
+                active: true,
+            })
         });
 
         started_receiver
@@ -7112,10 +8319,17 @@ mod tests {
             AdapterId::new("adapter-a").unwrap(),
             SessionId::new("session-a").unwrap(),
         );
+        let poll_adapter_id = AdapterId::new("adapter-a").unwrap();
+        let poll_session_id = SessionId::new("session-a").unwrap();
         let (started, started_receiver) = mpsc::sync_channel(1);
         let (results, worker) = session_event_worker(move || {
             let _ = started.try_send(());
-            Ok(Vec::new())
+            Ok(SessionEventPoll {
+                adapter_id: poll_adapter_id.clone(),
+                session_id: poll_session_id.clone(),
+                events: Vec::new(),
+                active: true,
+            })
         });
         showcase.session_event_results = Some(results);
         showcase.session_event_worker = Some(worker);
@@ -9796,6 +11010,9 @@ mod tests {
             }
         });
         let mut showcase = Showcase::with_adapter_root(Instant::now(), Some(&root));
+        // This fake daemon models management only. Keep unrelated periodic
+        // operation refreshes from making its request sequence scheduler-dependent.
+        showcase.shutdown_adapter_invocations();
         showcase.handle_key(key(KeyCode::Enter));
         showcase.queue_adapter_action(AdapterManagementAction::Start {
             id: AdapterId::new("adapter-a").unwrap(),
@@ -9909,6 +11126,9 @@ mod tests {
             operations
         });
         let mut showcase = Showcase::with_adapter_root(Instant::now(), Some(&root));
+        // This fake daemon models management only. Keep unrelated periodic
+        // operation refreshes from making its request sequence scheduler-dependent.
+        showcase.shutdown_adapter_invocations();
         showcase.handle_key(key(KeyCode::Enter));
         for _ in 0..100 {
             showcase.advance(Instant::now());

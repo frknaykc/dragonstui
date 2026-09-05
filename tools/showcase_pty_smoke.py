@@ -26,6 +26,8 @@ from pathlib import Path
 RESIZE_SEQUENCE = ((160, 55), (120, 40), (80, 24), (40, 15), (20, 8), (5, 3), (1, 1), (80, 24))
 ANSI_SEQUENCE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|[@-_][0-?]*[ -/]*[@-~])")
 SESSION_HOST_READY_MARKER = "(session output pending)"
+SESSION_BROWSER_MARKER = "Interactive fixture"
+ACTIVE_SESSION_TITLE_MARKER = "Interactive Session ·"
 
 
 class PtyScreen:
@@ -243,6 +245,26 @@ def wait_for_session_host(fd: int, output: bytearray, timeout: float, message: s
     raise RuntimeError(f"{message}; rendered screen tail: {visible[-1200:]!r}")
 
 
+def session_browser_is_ready(text: str) -> bool:
+    return (
+        "Interactive Sessions" in text
+        and SESSION_BROWSER_MARKER in text
+        and ACTIVE_SESSION_TITLE_MARKER not in text
+    )
+
+
+def wait_for_session_browser(fd: int, output: bytearray, timeout: float, message: str) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if session_browser_is_ready(visible_text(output)):
+            return
+        read_available(fd, output, min(0.05, deadline - time.monotonic()))
+    visible = fully_reconstructed_visible_text(output)
+    if session_browser_is_ready(visible):
+        return
+    raise RuntimeError(f"{message}; rendered screen tail: {visible[-1200:]!r}")
+
+
 def property_has_value(line: str, label: str, value: str) -> bool:
     if label not in line:
         return False
@@ -324,12 +346,27 @@ def wait_for_controller_endpoint(root: Path, timeout: float) -> tuple[dict[str, 
     raise RuntimeError("controller daemon did not publish an endpoint")
 
 
-def wait_for_file(path: Path, timeout: float, message: str) -> None:
+def _wait_for_marker_progress(
+    master: int | None, output: bytearray | None, deadline: float
+) -> None:
+    timeout = min(0.01, max(0.0, deadline - time.monotonic()))
+    if master is not None and output is not None:
+        # A full PTY can stall the UI before it processes the request/cleanup
+        # that publishes the marker. Preserve these bytes for screen assertions.
+        read_available(master, output, timeout)
+    else:
+        time.sleep(timeout)
+
+
+def wait_for_file(
+    path: Path, timeout: float, message: str,
+    *, master: int | None = None, output: bytearray | None = None,
+) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if path.is_file():
             return
-        time.sleep(0.01)
+        _wait_for_marker_progress(master, output, deadline)
     raise RuntimeError(message)
 
 
@@ -350,13 +387,51 @@ def action_invocations(control: Path) -> list[str]:
     return marker.read_text(encoding="utf-8").splitlines()
 
 
-def wait_for_action_invocations(control: Path, expected: list[str], timeout: float, message: str) -> None:
+def wait_for_action_invocations(
+    control: Path, expected: list[str], timeout: float, message: str,
+    *, master: int | None = None, output: bytearray | None = None,
+) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if action_invocations(control) == expected:
             return
-        time.sleep(0.01)
+        _wait_for_marker_progress(master, output, deadline)
     raise RuntimeError(f"{message}; got {action_invocations(control)!r}, expected {expected!r}")
+
+
+def session_marker(control: Path) -> Path:
+    return control / "sessions"
+
+
+def session_marker_entries(control: Path) -> list[str]:
+    marker = session_marker(control)
+    if not marker.is_file():
+        return []
+    return [entry for entry in marker.read_text(encoding="utf-8").splitlines() if entry]
+
+
+def reset_session_markers(control: Path) -> None:
+    marker = session_marker(control)
+    for path in (marker, Path(f"{marker}.ready"), Path(f"{marker}.release")):
+        path.unlink(missing_ok=True)
+
+
+def wait_for_session_marker_entries(
+    control: Path, expected: list[str], timeout: float, message: str,
+    *, master: int | None = None, output: bytearray | None = None,
+) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if session_marker_entries(control) == expected:
+            return
+        _wait_for_marker_progress(master, output, deadline)
+    raise RuntimeError(
+        f"{message}; got {session_marker_entries(control)!r}, expected {expected!r}"
+    )
+
+
+def release_delayed_session(control: Path) -> None:
+    Path(f"{session_marker(control)}.release").write_text("release\n", encoding="utf-8")
 
 
 def prove_pty_usable_after_exit(master: int, slave_name: str, output: bytearray) -> None:
@@ -423,7 +498,8 @@ def setup_m42_fixture(controller_binary: Path, mock_binary: Path) -> tuple[tempf
     write_mock_adapter(root, mock_binary, "adapter-b", "timeout")
     write_mock_adapter(root, mock_binary, "capability-a", "shared-capabilities")
     write_mock_adapter(root, mock_binary, "capability-b", "shared-capabilities")
-    write_mock_adapter(root, mock_binary, "live-a", "observability-events")
+    write_mock_adapter(root, mock_binary, "live-a", "observability-events",
+                       ("--event-release", str(control / "observations.release")))
     write_mock_adapter(root, mock_binary, "stress-a", "stress-events")
     write_mock_adapter(root, mock_binary, "stress-b", "stress-events")
     write_mock_adapter(
@@ -433,7 +509,13 @@ def setup_m42_fixture(controller_binary: Path, mock_binary: Path) -> tuple[tempf
         "actions",
         ("--action-marker", str(control / "actions")),
     )
-    write_mock_adapter(root, mock_binary, "z-sessions", "sessions")
+    write_mock_adapter(
+        root,
+        mock_binary,
+        "z-sessions",
+        "delayed-sessions",
+        ("--session-marker", str(control / "sessions")),
+    )
     daemon = subprocess.Popen(
         [str(controller_binary), "--root", str(root), "controller-daemon"],
         env={**os.environ, "DRAGONSTUI_CONTROLLER_TOKEN": secrets.token_hex(32)},
@@ -492,6 +574,7 @@ def main() -> int:
     daemon: subprocess.Popen[bytes] | None = None
     endpoint: dict[str, str] | None = None
     m42_root: Path | None = None
+    m42_control: Path | None = None
     if args.m42_controller is not None:
         fixture, daemon, endpoint, m42_root = setup_m42_fixture(args.m42_controller, args.m42_mock)
         command = [*command, "--adapter-root", str(m42_root)]
@@ -527,6 +610,7 @@ def main() -> int:
 
         if m42_root is not None:
             control = m42_root / ".m42-pty"
+            m42_control = control
             before = len(output)
             send(master, output, b"8")
             adapter_render = output[before:].decode("utf-8", errors="replace")
@@ -538,7 +622,7 @@ def main() -> int:
 
             reset_hold_markers(control)
             send(master, output, b"s")
-            wait_for_file(control / "ready", 1.0, "held adapter start did not publish readiness")
+            wait_for_file(control / "ready", 1.0, "held adapter start did not publish readiness", master=master, output=output)
             send(master, output, b"s")
             wait_for_text(
                 master,
@@ -560,7 +644,7 @@ def main() -> int:
 
             reset_hold_markers(control)
             send(master, output, b"r")
-            wait_for_file(control / "ready", 1.0, "held Restart did not publish readiness")
+            wait_for_file(control / "ready", 1.0, "held Restart did not publish readiness", master=master, output=output)
             (control / "release").write_text("release\n", encoding="utf-8")
             wait_for_text(master, output, "Completed: Restarted", 2.0, "Restart did not complete through the TUI")
             wait_for_text(master, output, "running", 2.0, "authoritative restarted diagnostics did not render")
@@ -597,14 +681,16 @@ def main() -> int:
             visible = fully_reconstructed_visible_text(output)
             require("Adapter Inspector" in visible, "capability browser did not return to the adapter inspector")
 
-            # The observability fixture emits two eight-event batches. The gap
-            # exceeds the live worker's one-second poll cadence so the bounded
-            # sync_channel(8) receives each batch without widening M44.
+            # Release batch two only after batch one reaches the UI. A fixed delay
+            # can coalesce both batches when controller polling is delayed, losing
+            # events through the intentionally bounded sync_channel(8).
             # The showcase worker drains authenticated controller data away from
             # the UI loop and the tick applies it to render-owned state.
             send(master, output, b"\x1b[B" * 4)
             send(master, output, b"s")
             wait_for_text(master, output, "running", 2.0, "live adapter did not start")
+            wait_for_property(master, output, "Live events received:", "8", 5.0, "first observability batch did not reach showcase state")
+            (control / "observations.release").write_text("release\n", encoding="utf-8")
             wait_for_property(master, output, "Live events received:", "16", 5.0, "observability fixture did not reach showcase state")
             wait_for_property(master, output, "Last live adapter:", "live-a", 1.0, "live adapter identity was not rendered")
             wait_for_property(master, output, "Last live stream:", "observations", 1.0, "live stream identity was not rendered")
@@ -691,13 +777,13 @@ def main() -> int:
             send(master, output, b"\x1b[B")
             wait_for_property(master, output, "Adapter ID:", "z-actions", 1.0, "action adapter was not selected")
             send(master, output, b"s")
-            wait_for_text(master, output, "running", 2.0, "action adapter did not start")
+            wait_for_current_text(master, output, 'Completed: Started { id: AdapterId("z-actions") }', 2.0, "action adapter did not start")
             send(master, output, b"a")
             wait_for_text(master, output, "Adapter Actions", 1.0, "declared action browser did not open")
             wait_for_text(master, output, "fixture.action.alpha", 1.0, "declared action metadata was not visible")
 
             send(master, output, b"\r")
-            wait_for_action_invocations(control, ["fixture.action.alpha"], 2.0, "direct action did not invoke once")
+            wait_for_action_invocations(control, ["fixture.action.alpha"], 2.0, "direct action did not invoke once", master=master, output=output)
             wait_for_text(master, output, "Operation succeeded", 2.0, "successful operation notification was not visible")
 
             send(master, output, b"\x1b[B\r")
@@ -706,6 +792,7 @@ def main() -> int:
                 ["fixture.action.alpha", "fixture.destroy.everything"],
                 2.0,
                 "declared failure action did not invoke once",
+                master=master, output=output,
             )
             wait_for_text(master, output, "Operation failed", 2.0, "failed operation notification was not visible")
 
@@ -723,6 +810,7 @@ def main() -> int:
                 ["fixture.action.alpha", "fixture.destroy.everything", "fixture.inspect"],
                 2.0,
                 "confirmed action did not invoke exactly once",
+                master=master, output=output,
             )
             wait_for_text(master, output, "Operation succeeded", 2.0, "confirmed operation did not succeed")
 
@@ -737,6 +825,7 @@ def main() -> int:
                 ],
                 2.0,
                 "delayed action did not invoke once",
+                master=master, output=output,
             )
             wait_for_text(master, output, "running", 1.0, "delayed operation did not expose running state")
             wait_for_text(master, output, "succeeded", 2.0, "delayed operation did not reach typed success")
@@ -747,9 +836,9 @@ def main() -> int:
             send(master, output, b"o")
             wait_for_text(master, output, "Adapter Inspector", 1.0, "observability did not return after action acceptance")
 
-            # M65: discover a provider-declared interactive surface, then prove
-            # typed input, render-area resize, close/back navigation, and a
-            # second active host left for exit-path cleanup.
+            # M65: discover a provider-declared interactive surface. The delayed
+            # provider fixture writes its active-session registry before it emits
+            # SessionOpened, then waits for an explicit release marker.
             send(master, output, b"\x1b[B" * 5)
             send(master, output, b"s")
             wait_for_current_text(
@@ -760,19 +849,104 @@ def main() -> int:
                 "session adapter did not start",
             )
             send(master, output, b"h")
-            wait_for_current_text(master, output, "Interactive Sessions", 1.0, "declared session browser did not open")
-            wait_for_current_text(master, output, "Interactive fixture", 1.0, "provider-declared session metadata was not visible")
+            wait_for_session_browser(master, output, 2.0, "declared session browser did not open")
+            reset_session_markers(control)
             send(master, output, b"\r")
+            wait_for_file(
+                Path(f"{session_marker(control)}.ready"),
+                1.0,
+                "delayed session open did not publish provider readiness",
+                master=master, output=output,
+            )
+            wait_for_session_marker_entries(
+                control,
+                ["fixture-session"],
+                1.0,
+                "provider did not retain the opened interactive session",
+                master=master, output=output,
+            )
+            release_delayed_session(control)
             wait_for_session_host(master, output, 1.0, "interactive host did not open")
             send(master, output, b"alpha")
             wait_for_current_text(master, output, "echo:a", 2.0, "typed session input did not reach the provider")
             set_size(master, 100, 30)
             os.killpg(process.pid, signal.SIGWINCH)
             wait_for_current_text(master, output, "resized:22x97", 2.0, "rendered session dimensions did not reach the provider")
+            send(master, output, b"\x05")
+            wait_for_session_browser(master, output, 2.0, "non-zero terminal exit did not return to the session browser")
+            wait_for_session_marker_entries(
+                control,
+                [],
+                2.0,
+                "provider retained the non-zero-exit session after output pressure",
+                master=master, output=output,
+            )
+
+            reset_session_markers(control)
+            send(master, output, b"\r")
+            wait_for_file(
+                Path(f"{session_marker(control)}.ready"),
+                1.0,
+                "explicit-close session did not publish provider readiness",
+                master=master, output=output,
+            )
+            release_delayed_session(control)
+            wait_for_session_host(master, output, 1.0, "explicit-close interactive host did not open")
             send(master, output, b"\x1bx")
-            wait_for_current_text(master, output, "Interactive Sessions", 2.0, "typed session exit did not return to the session browser")
+            wait_for_session_browser(master, output, 2.0, "typed session close did not return to the session browser")
+            wait_for_session_marker_entries(
+                control,
+                [],
+                2.0,
+                "provider retained the explicitly closed session",
+                master=master, output=output,
+            )
             send(master, output, b"h")
-            wait_for_current_text(master, output, "Interactive session exited", 1.0, "session browser did not return to adapters")
+            # A terminal-operation notification may cover the right-side
+            # inspector title, but cannot cover the adapter table itself.
+            wait_for_current_text(master, output, "PTY adapter-a", 1.0, "session browser did not return to adapters")
+
+            # A now has a provider-owned session but no UI claimant: Escape
+            # abandons the pending open, release emits SessionOpened, then the
+            # controller must close it. The marker is the mock's active-session
+            # registry, not a request log, so [] proves resource release.
+            # Leaving the session browser deliberately resets the shared table
+            # selection to row zero. Select the sorted z-sessions fixture
+            # explicitly; a generic empty browser has the same heading but
+            # cannot prove an open reached the provider.
+            send(master, output, b"\x1b[B" * 8)
+            reset_session_markers(control)
+            send(master, output, b"h")
+            wait_for_session_browser(master, output, 2.0, "stale-open session browser did not open")
+            send(master, output, b"\r")
+            wait_for_file(
+                Path(f"{session_marker(control)}.ready"),
+                1.0,
+                "stale delayed session did not publish provider readiness",
+                master=master, output=output,
+            )
+            wait_for_session_marker_entries(
+                control,
+                ["fixture-session"],
+                1.0,
+                "stale delayed session was not provider-owned before release",
+                master=master, output=output,
+            )
+            send(master, output, b"\x1b")
+            wait_for_current_text(master, output, "PTY adapter-a", 1.0, "Escape did not abandon the pending session browser")
+            release_delayed_session(control)
+            wait_for_session_marker_entries(
+                control,
+                [],
+                2.0,
+                "stale SessionOpened did not close the provider-owned session",
+                master=master, output=output,
+            )
+            drain_for(master, output, 0.10)
+            require(
+                not session_host_is_ready(visible_text(output)),
+                "stale SessionOpened replaced the active session browser state",
+            )
             set_size(master, *RESIZE_SEQUENCE[0])
             os.killpg(process.pid, signal.SIGWINCH)
             drain_for(master, output, 0.10)
@@ -887,9 +1061,16 @@ def main() -> int:
             # discovery below proves both the selected adapter and controller
             # runtime availability without depending on a clipped detail pane.
             send(master, output, b"h")
-            wait_for_current_text(master, output, "Interactive Sessions", 1.0, "final declared session browser did not open")
-            wait_for_current_text(master, output, "Interactive fixture", 1.0, "final provider-declared session metadata was not visible")
+            wait_for_session_browser(master, output, 2.0, "final declared session browser did not open")
+            reset_session_markers(control)
             send(master, output, b"\r")
+            wait_for_file(
+                Path(f"{session_marker(control)}.ready"),
+                1.0,
+                "final delayed session did not publish provider readiness",
+                master=master, output=output,
+            )
+            release_delayed_session(control)
             wait_for_session_host(master, output, 1.0, "second interactive host did not open")
 
         if args.exit == "q":
@@ -907,6 +1088,14 @@ def main() -> int:
             process.kill()
             raise RuntimeError("showcase did not exit after the requested key")
         drain_for(master, output, 0.10)
+        if m42_control is not None:
+            wait_for_session_marker_entries(
+                m42_control,
+                [],
+                2.0,
+                "outer shutdown retained the active provider session",
+                master=master, output=output,
+            )
 
         restored_mode = termios.tcgetattr(master)
         rendered = output.decode("utf-8", errors="replace")
@@ -940,6 +1129,12 @@ def main() -> int:
             "canonical/echo terminal mode was not restored",
         )
         prove_pty_usable_after_exit(master, slave_name, output)
+    except Exception:
+        # Retain the current frame before teardown even for marker/readiness
+        # failures; historical output tails can hide the actual selected row.
+        screen = fully_reconstructed_visible_text(output)
+        print(f"PTY failure current screen:\n{screen}", file=sys.stderr)
+        raise
     finally:
         try:
             if process.poll() is None:
@@ -956,7 +1151,8 @@ def main() -> int:
         "Showcase PTY passed: six-second splash/animation, pages, settings, focus, keyboard, mouse, palette, modal, "
         "Unicode, Braille, resize sequence, lifecycle restoration, and "
         f"{args.exit} exit"
-        + (", typed adapter lifecycle/diagnostics, conflict, failure, and capability browser acceptance." if m42_root is not None else ".")
+        + (", typed adapter lifecycle/diagnostics, conflict, failure, capability browser, M65 input/resize/close, "
+           "output-pressure exit, abandoned-open cleanup, active-session shutdown, and fixture process cleanup." if m42_root is not None else ".")
     )
     return 0
 

@@ -20,6 +20,8 @@ pub const OPERATION_HISTORY_CAPACITY: usize = 16;
 pub const ACTIVE_SESSION_CAPACITY: usize = 8;
 pub const SESSION_EVENT_QUEUE_CAPACITY: usize = 64;
 
+type SessionKey = (AdapterId, SessionId);
+
 /// Coordinates discovered adapters without imposing an event loop on a DragonsTUI application.
 #[derive(Debug)]
 pub struct AdapterManager {
@@ -33,8 +35,8 @@ pub struct AdapterManager {
     dropped_events: usize,
     operations: BTreeMap<OperationId, OperationEntry>,
     operation_order: VecDeque<OperationId>,
-    active_sessions: BTreeMap<SessionId, AdapterId>,
-    closing_sessions: BTreeSet<SessionId>,
+    active_sessions: BTreeSet<SessionKey>,
+    closing_sessions: BTreeSet<SessionKey>,
     session_events: VecDeque<AdapterSessionEvent>,
     next_operation: u64,
     stop_timeout: Duration,
@@ -55,7 +57,7 @@ impl AdapterManager {
             dropped_events: 0,
             operations: BTreeMap::new(),
             operation_order: VecDeque::with_capacity(OPERATION_HISTORY_CAPACITY),
-            active_sessions: BTreeMap::new(),
+            active_sessions: BTreeSet::new(),
             closing_sessions: BTreeSet::new(),
             session_events: VecDeque::with_capacity(SESSION_EVENT_QUEUE_CAPACITY),
             next_operation: 1,
@@ -113,7 +115,7 @@ impl AdapterManager {
             "adapter_restarted",
             format!("adapter {id} restarted before the operation completed"),
         );
-        self.remove_sessions_for_adapter(id);
+        self.disconnect_sessions_for_adapter(id, "adapter restarted".to_owned());
         self.capabilities.remove_provider(id);
         self.runtimes.remove(id);
         match AdapterRuntime::start(manifest, config) {
@@ -145,7 +147,7 @@ impl AdapterManager {
             "adapter_stopped",
             format!("adapter {id} stopped before the operation completed"),
         );
-        self.remove_sessions_for_adapter(id);
+        self.disconnect_sessions_for_adapter(id, "adapter stopped".to_owned());
         self.states
             .insert(id.clone(), ManagedState::new(AdapterState::Stopping));
         self.capabilities.remove_provider(id);
@@ -203,6 +205,14 @@ impl AdapterManager {
             let mut failure = None;
             let mut events = Vec::new();
             let mut session_events = Vec::new();
+            let mut session_exits = Vec::new();
+            let active_session_ids: Vec<_> = self
+                .active_sessions
+                .iter()
+                .filter_map(|(adapter_id, session_id)| {
+                    (adapter_id == &id).then_some(session_id.clone())
+                })
+                .collect();
             if let Some(runtime) = self.runtimes.get_mut(&id) {
                 match runtime.pump(per_adapter_timeout) {
                     Ok(_) => {}
@@ -220,6 +230,11 @@ impl AdapterManager {
                 while let Some(event) = runtime.pop_session_event() {
                     session_events.push(event);
                 }
+                for session_id in active_session_ids {
+                    if let Some(exit_code) = runtime.take_session_exit(&session_id) {
+                        session_exits.push((session_id, exit_code));
+                    }
+                }
             }
             for event in events {
                 self.push_event(event);
@@ -227,7 +242,9 @@ impl AdapterManager {
             for event in session_events {
                 match event {
                     crate::runtime::RuntimeSessionEvent::Output { session_id, data }
-                        if self.active_sessions.get(&session_id) == Some(&id) =>
+                        if self
+                            .active_sessions
+                            .contains(&(id.clone(), session_id.clone())) =>
                     {
                         self.push_session_event(AdapterSessionEvent::Output {
                             adapter_id: id.clone(),
@@ -235,18 +252,21 @@ impl AdapterManager {
                             data,
                         });
                     }
-                    crate::runtime::RuntimeSessionEvent::Exited {
+                    _ => {}
+                }
+            }
+            for (session_id, exit_code) in session_exits {
+                if self
+                    .active_sessions
+                    .remove(&(id.clone(), session_id.clone()))
+                {
+                    self.closing_sessions
+                        .remove(&(id.clone(), session_id.clone()));
+                    self.push_session_event(AdapterSessionEvent::Exited {
+                        adapter_id: id.clone(),
                         session_id,
                         exit_code,
-                    } if self.active_sessions.remove(&session_id) == Some(id.clone()) => {
-                        self.closing_sessions.remove(&session_id);
-                        self.push_session_event(AdapterSessionEvent::Exited {
-                            adapter_id: id.clone(),
-                            session_id,
-                            exit_code,
-                        });
-                    }
-                    _ => {}
+                    });
                 }
             }
             if let Some(error) = failure {
@@ -365,10 +385,11 @@ impl AdapterManager {
                 .wait_session_open(&request_id, timeout)
                 .map_err(ManagerError::Rpc)?
         };
-        if self.active_sessions.contains_key(&session_id) {
+        let key = (id.clone(), session_id.clone());
+        if self.active_sessions.contains(&key) {
             return Err(ManagerError::DuplicateSession(session_id));
         }
-        self.active_sessions.insert(session_id.clone(), id.clone());
+        self.active_sessions.insert(key);
         Ok(session_id)
     }
 
@@ -406,7 +427,8 @@ impl AdapterManager {
         self.session_runtime(id, session_id)?
             .close_session(session_id)
             .map_err(ManagerError::Rpc)?;
-        self.closing_sessions.insert(session_id.clone());
+        self.closing_sessions
+            .insert((id.clone(), session_id.clone()));
         Ok(())
     }
 
@@ -508,6 +530,12 @@ impl AdapterManager {
         std::mem::take(&mut self.session_events)
             .into_iter()
             .collect()
+    }
+
+    /// Returns whether the exact controller-owned adapter/session pair remains active.
+    pub fn session_active(&self, id: &AdapterId, session_id: &SessionId) -> bool {
+        self.active_sessions
+            .contains(&(id.clone(), session_id.clone()))
     }
 
     pub fn providers_for(&self, capability: &Capability) -> Vec<AdapterId> {
@@ -727,42 +755,40 @@ impl AdapterManager {
         id: &AdapterId,
         session_id: &SessionId,
     ) -> Result<&mut AdapterRuntime, ManagerError> {
-        if self.closing_sessions.contains(session_id) {
+        let key = (id.clone(), session_id.clone());
+        if self.closing_sessions.contains(&key) {
             return Err(ManagerError::SessionClosing(session_id.clone()));
         }
-        match self.active_sessions.get(session_id) {
-            Some(owner) if owner == id => self
+        if self.active_sessions.contains(&key) {
+            return self
                 .runtimes
                 .get_mut(id)
-                .ok_or_else(|| ManagerError::NotRunning(id.clone())),
-            Some(_) => Err(ManagerError::SessionAdapterMismatch {
+                .ok_or_else(|| ManagerError::NotRunning(id.clone()));
+        }
+        if self
+            .active_sessions
+            .iter()
+            .any(|(_, owned_session_id)| owned_session_id == session_id)
+        {
+            Err(ManagerError::SessionAdapterMismatch {
                 adapter_id: id.clone(),
                 session_id: session_id.clone(),
-            }),
-            None => Err(ManagerError::UnknownSession(session_id.clone())),
+            })
+        } else {
+            Err(ManagerError::UnknownSession(session_id.clone()))
         }
-    }
-
-    fn remove_sessions_for_adapter(&mut self, adapter_id: &AdapterId) {
-        self.active_sessions.retain(|session_id, owner| {
-            if owner == adapter_id {
-                self.closing_sessions.remove(session_id);
-                false
-            } else {
-                true
-            }
-        });
     }
 
     fn disconnect_sessions_for_adapter(&mut self, adapter_id: &AdapterId, reason: String) {
         let sessions: Vec<_> = self
             .active_sessions
             .iter()
-            .filter_map(|(session_id, owner)| (owner == adapter_id).then_some(session_id.clone()))
+            .filter_map(|(owner, session_id)| (owner == adapter_id).then_some(session_id.clone()))
             .collect();
         for session_id in sessions {
-            self.active_sessions.remove(&session_id);
-            self.closing_sessions.remove(&session_id);
+            let key = (adapter_id.clone(), session_id.clone());
+            self.active_sessions.remove(&key);
+            self.closing_sessions.remove(&key);
             self.push_session_event(AdapterSessionEvent::Disconnected {
                 adapter_id: adapter_id.clone(),
                 session_id,
