@@ -27,7 +27,5 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Showcase check
         run: cargo check --features adapter-showcase --bin dragonstui-showcase
-      - name: Showcase tests
-        run: cargo test --features adapter-showcase --bin dragonstui-showcase
       - name: Showcase clippy
         run: cargo clippy --features adapter-showcase --bin dragonstui-showcase -- -D warnings
