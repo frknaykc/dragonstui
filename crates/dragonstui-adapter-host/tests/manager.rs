@@ -443,3 +443,63 @@ fn manager_evicts_the_oldest_completed_operation_without_evicting_the_newest() {
     assert!(!retained.iter().any(|operation| operation.id == created[0]));
     assert!(retained.iter().any(|operation| operation.id == created[16]));
 }
+
+#[test]
+fn manager_opens_only_the_provider_declared_session_capability() {
+    let root = TempRoot::new("session-open");
+    root.adapter("mock");
+    let id = AdapterId::new("mock").unwrap();
+    let capability = Capability::new("fixture.terminal").unwrap();
+    let mut manager = AdapterManager::new(Duration::from_millis(200), 8);
+    manager.discover(LocalAdapterRoot::new(&root.path)).unwrap();
+    manager
+        .start_with_config(&id, config("mock", "sessions"))
+        .unwrap();
+
+    let session = manager
+        .open_session(&id, &capability, 24, 80, Duration::from_secs(1))
+        .unwrap();
+
+    assert_eq!(session.as_str(), "fixture-session");
+    assert!(matches!(
+        manager.open_session(
+            &id,
+            &Capability::new("test.echo").unwrap(),
+            24,
+            80,
+            Duration::from_secs(1),
+        ),
+        Err(ManagerError::UnknownSessionCapability { .. })
+    ));
+}
+
+#[test]
+fn manager_rejects_duplicate_close_and_input_or_resize_while_close_is_pending() {
+    let root = TempRoot::new("session-close-pending");
+    root.adapter("mock");
+    let id = AdapterId::new("mock").unwrap();
+    let capability = Capability::new("fixture.terminal").unwrap();
+    let mut manager = AdapterManager::new(Duration::from_millis(200), 8);
+    manager.discover(LocalAdapterRoot::new(&root.path)).unwrap();
+    manager
+        .start_with_config(&id, config("mock", "sessions"))
+        .unwrap();
+
+    let session = manager
+        .open_session(&id, &capability, 24, 80, Duration::from_secs(1))
+        .unwrap();
+    manager.close_session(&id, &session).unwrap();
+
+    assert!(matches!(
+        manager.close_session(&id, &session),
+        Err(ManagerError::SessionClosing(actual)) if actual == session
+    ));
+    assert!(matches!(
+        manager.input_session(&id, &session, "late".to_owned()),
+        Err(ManagerError::SessionClosing(actual)) if actual == session
+    ));
+    assert!(matches!(
+        manager.resize_session(&id, &session, 10, 40),
+        Err(ManagerError::SessionClosing(actual)) if actual == session
+    ));
+}

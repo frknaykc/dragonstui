@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     error::Error,
     fmt,
     path::Path,
@@ -11,12 +11,14 @@ use serde_json::Value;
 
 use crate::{
     ActionId, AdapterAction, AdapterEvent, AdapterId, AdapterOperation, AdapterRuntime,
-    AdapterRuntimeConfig, AdapterStartError, AdapterState, Capability, CapabilityRegistry,
-    DiscoveredAdapter, DiscoveryError, LocalAdapterRoot, OperationId, OperationState,
-    ProcessStatus, RequestId, RpcError, RpcOutcome,
+    AdapterRuntimeConfig, AdapterSession, AdapterStartError, AdapterState, Capability,
+    CapabilityRegistry, DiscoveredAdapter, DiscoveryError, LocalAdapterRoot, OperationId,
+    OperationState, ProcessStatus, RequestId, RpcError, RpcOutcome, SessionId,
 };
 
 pub const OPERATION_HISTORY_CAPACITY: usize = 16;
+pub const ACTIVE_SESSION_CAPACITY: usize = 8;
+pub const SESSION_EVENT_QUEUE_CAPACITY: usize = 64;
 
 /// Coordinates discovered adapters without imposing an event loop on a DragonsTUI application.
 #[derive(Debug)]
@@ -31,6 +33,9 @@ pub struct AdapterManager {
     dropped_events: usize,
     operations: BTreeMap<OperationId, OperationEntry>,
     operation_order: VecDeque<OperationId>,
+    active_sessions: BTreeMap<SessionId, AdapterId>,
+    closing_sessions: BTreeSet<SessionId>,
+    session_events: VecDeque<AdapterSessionEvent>,
     next_operation: u64,
     stop_timeout: Duration,
 }
@@ -50,6 +55,9 @@ impl AdapterManager {
             dropped_events: 0,
             operations: BTreeMap::new(),
             operation_order: VecDeque::with_capacity(OPERATION_HISTORY_CAPACITY),
+            active_sessions: BTreeMap::new(),
+            closing_sessions: BTreeSet::new(),
+            session_events: VecDeque::with_capacity(SESSION_EVENT_QUEUE_CAPACITY),
             next_operation: 1,
             stop_timeout,
         }
@@ -105,6 +113,7 @@ impl AdapterManager {
             "adapter_restarted",
             format!("adapter {id} restarted before the operation completed"),
         );
+        self.remove_sessions_for_adapter(id);
         self.capabilities.remove_provider(id);
         self.runtimes.remove(id);
         match AdapterRuntime::start(manifest, config) {
@@ -136,6 +145,7 @@ impl AdapterManager {
             "adapter_stopped",
             format!("adapter {id} stopped before the operation completed"),
         );
+        self.remove_sessions_for_adapter(id);
         self.states
             .insert(id.clone(), ManagedState::new(AdapterState::Stopping));
         self.capabilities.remove_provider(id);
@@ -192,6 +202,7 @@ impl AdapterManager {
             let was_running = self.state(&id) == Some(AdapterState::Running);
             let mut failure = None;
             let mut events = Vec::new();
+            let mut session_events = Vec::new();
             if let Some(runtime) = self.runtimes.get_mut(&id) {
                 match runtime.pump(per_adapter_timeout) {
                     Ok(_) => {}
@@ -206,9 +217,37 @@ impl AdapterManager {
                 while let Some(event) = runtime.pop_event() {
                     events.push(event);
                 }
+                while let Some(event) = runtime.pop_session_event() {
+                    session_events.push(event);
+                }
             }
             for event in events {
                 self.push_event(event);
+            }
+            for event in session_events {
+                match event {
+                    crate::runtime::RuntimeSessionEvent::Output { session_id, data }
+                        if self.active_sessions.get(&session_id) == Some(&id) =>
+                    {
+                        self.push_session_event(AdapterSessionEvent::Output {
+                            adapter_id: id.clone(),
+                            session_id,
+                            data,
+                        });
+                    }
+                    crate::runtime::RuntimeSessionEvent::Exited {
+                        session_id,
+                        exit_code,
+                    } if self.active_sessions.remove(&session_id) == Some(id.clone()) => {
+                        self.closing_sessions.remove(&session_id);
+                        self.push_session_event(AdapterSessionEvent::Exited {
+                            adapter_id: id.clone(),
+                            session_id,
+                            exit_code,
+                        });
+                    }
+                    _ => {}
+                }
             }
             if let Some(error) = failure {
                 self.capabilities.remove_provider(&id);
@@ -219,7 +258,7 @@ impl AdapterManager {
                 if was_running {
                     self.push_disconnect(AdapterDisconnect {
                         adapter_id: id.clone(),
-                        reason: error,
+                        reason: error.clone(),
                     });
                 }
                 self.fail_active_operations(
@@ -227,6 +266,7 @@ impl AdapterManager {
                     "adapter_crashed",
                     "adapter process crashed before the operation completed".to_owned(),
                 );
+                self.disconnect_sessions_for_adapter(&id, error);
             }
         }
         self.reconcile_operations();
@@ -256,6 +296,14 @@ impl AdapterManager {
             .ok_or_else(|| ManagerError::NotRunning(id.clone()))
     }
 
+    /// Returns only the interactive session surfaces declared by this provider.
+    pub fn sessions(&self, id: &AdapterId) -> Result<Vec<AdapterSession>, ManagerError> {
+        self.runtimes
+            .get(id)
+            .map(|runtime| runtime.sessions().to_vec())
+            .ok_or_else(|| ManagerError::NotRunning(id.clone()))
+    }
+
     /// Resolves an exact producer-declared action identity before writing an RPC request.
     pub fn invoke_action(
         &mut self,
@@ -280,6 +328,86 @@ impl AdapterManager {
         runtime
             .send_action_request(&action, payload, timeout)
             .map_err(ManagerError::Rpc)
+    }
+
+    /// Opens an explicitly provider-declared session through the running
+    /// adapter runtime. The manager remains the sole routing authority.
+    pub fn open_session(
+        &mut self,
+        id: &AdapterId,
+        capability: &Capability,
+        rows: u16,
+        columns: u16,
+        timeout: Duration,
+    ) -> Result<crate::SessionId, ManagerError> {
+        if self.active_sessions.len() == ACTIVE_SESSION_CAPACITY {
+            return Err(ManagerError::SessionCapacity);
+        }
+        let session_id = {
+            let runtime = self
+                .runtimes
+                .get_mut(id)
+                .ok_or_else(|| ManagerError::NotRunning(id.clone()))?;
+            if !runtime
+                .sessions()
+                .iter()
+                .any(|session| session.capability == *capability)
+            {
+                return Err(ManagerError::UnknownSessionCapability {
+                    adapter_id: id.clone(),
+                    capability: capability.clone(),
+                });
+            }
+            let request_id = runtime
+                .open_session(capability.clone(), rows, columns, timeout)
+                .map_err(ManagerError::Rpc)?;
+            runtime
+                .wait_session_open(&request_id, timeout)
+                .map_err(ManagerError::Rpc)?
+        };
+        if self.active_sessions.contains_key(&session_id) {
+            return Err(ManagerError::DuplicateSession(session_id));
+        }
+        self.active_sessions.insert(session_id.clone(), id.clone());
+        Ok(session_id)
+    }
+
+    /// Routes input by an explicit manager-owned session identity.
+    pub fn input_session(
+        &mut self,
+        id: &AdapterId,
+        session_id: &SessionId,
+        data: String,
+    ) -> Result<(), ManagerError> {
+        self.session_runtime(id, session_id)?
+            .send_session_input(session_id, data)
+            .map_err(ManagerError::Rpc)
+    }
+
+    /// Routes geometry changes by an explicit manager-owned session identity.
+    pub fn resize_session(
+        &mut self,
+        id: &AdapterId,
+        session_id: &SessionId,
+        rows: u16,
+        columns: u16,
+    ) -> Result<(), ManagerError> {
+        self.session_runtime(id, session_id)?
+            .resize_session(session_id, rows, columns)
+            .map_err(ManagerError::Rpc)
+    }
+
+    /// Requests closure through the session's declared provider.
+    pub fn close_session(
+        &mut self,
+        id: &AdapterId,
+        session_id: &SessionId,
+    ) -> Result<(), ManagerError> {
+        self.session_runtime(id, session_id)?
+            .close_session(session_id)
+            .map_err(ManagerError::Rpc)?;
+        self.closing_sessions.insert(session_id.clone());
+        Ok(())
     }
 
     /// Creates a controller-owned pending action operation. Dispatch and every
@@ -373,6 +501,13 @@ impl AdapterManager {
             events: self.take_events(),
             disconnects: std::mem::take(&mut self.disconnects).into_iter().collect(),
         }
+    }
+
+    /// Drains the bounded session-output queue owned by this manager.
+    pub fn take_session_events(&mut self) -> Vec<AdapterSessionEvent> {
+        std::mem::take(&mut self.session_events)
+            .into_iter()
+            .collect()
     }
 
     pub fn providers_for(&self, capability: &Capability) -> Vec<AdapterId> {
@@ -579,6 +714,62 @@ impl AdapterManager {
         }
         self.disconnects.push_back(disconnect);
     }
+
+    fn push_session_event(&mut self, event: AdapterSessionEvent) {
+        if self.session_events.len() == SESSION_EVENT_QUEUE_CAPACITY {
+            self.session_events.pop_front();
+        }
+        self.session_events.push_back(event);
+    }
+
+    fn session_runtime(
+        &mut self,
+        id: &AdapterId,
+        session_id: &SessionId,
+    ) -> Result<&mut AdapterRuntime, ManagerError> {
+        if self.closing_sessions.contains(session_id) {
+            return Err(ManagerError::SessionClosing(session_id.clone()));
+        }
+        match self.active_sessions.get(session_id) {
+            Some(owner) if owner == id => self
+                .runtimes
+                .get_mut(id)
+                .ok_or_else(|| ManagerError::NotRunning(id.clone())),
+            Some(_) => Err(ManagerError::SessionAdapterMismatch {
+                adapter_id: id.clone(),
+                session_id: session_id.clone(),
+            }),
+            None => Err(ManagerError::UnknownSession(session_id.clone())),
+        }
+    }
+
+    fn remove_sessions_for_adapter(&mut self, adapter_id: &AdapterId) {
+        self.active_sessions.retain(|session_id, owner| {
+            if owner == adapter_id {
+                self.closing_sessions.remove(session_id);
+                false
+            } else {
+                true
+            }
+        });
+    }
+
+    fn disconnect_sessions_for_adapter(&mut self, adapter_id: &AdapterId, reason: String) {
+        let sessions: Vec<_> = self
+            .active_sessions
+            .iter()
+            .filter_map(|(session_id, owner)| (owner == adapter_id).then_some(session_id.clone()))
+            .collect();
+        for session_id in sessions {
+            self.active_sessions.remove(&session_id);
+            self.closing_sessions.remove(&session_id);
+            self.push_session_event(AdapterSessionEvent::Disconnected {
+                adapter_id: adapter_id.clone(),
+                session_id,
+                reason: reason.clone(),
+            });
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -605,6 +796,26 @@ fn operation_rpc_failure(error: RpcError) -> (String, String) {
 pub struct AdapterLiveData {
     pub events: Vec<AdapterEvent>,
     pub disconnects: Vec<AdapterDisconnect>,
+}
+
+/// One typed output or terminal-state record from a manager-owned session.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum AdapterSessionEvent {
+    Output {
+        adapter_id: AdapterId,
+        session_id: SessionId,
+        data: String,
+    },
+    Exited {
+        adapter_id: AdapterId,
+        session_id: SessionId,
+        exit_code: Option<i32>,
+    },
+    Disconnected {
+        adapter_id: AdapterId,
+        session_id: SessionId,
+        reason: String,
+    },
 }
 
 /// A single transition from a running adapter stream to a terminal failure state.
@@ -662,6 +873,18 @@ pub enum ManagerError {
         adapter_id: AdapterId,
         action_id: ActionId,
     },
+    UnknownSessionCapability {
+        adapter_id: AdapterId,
+        capability: Capability,
+    },
+    SessionCapacity,
+    DuplicateSession(SessionId),
+    SessionClosing(SessionId),
+    UnknownSession(SessionId),
+    SessionAdapterMismatch {
+        adapter_id: AdapterId,
+        session_id: SessionId,
+    },
     OperationCapacity,
     OperationId(String),
     Start(AdapterStartError),
@@ -679,6 +902,24 @@ impl fmt::Display for ManagerError {
             } => write!(
                 formatter,
                 "unknown action {action_id} for adapter {adapter_id}"
+            ),
+            Self::UnknownSessionCapability {
+                adapter_id,
+                capability,
+            } => write!(
+                formatter,
+                "unknown session capability {capability} for adapter {adapter_id}"
+            ),
+            Self::SessionCapacity => write!(formatter, "active session capacity is full"),
+            Self::DuplicateSession(id) => write!(formatter, "duplicate session {id}"),
+            Self::SessionClosing(id) => write!(formatter, "session {id} is closing"),
+            Self::UnknownSession(id) => write!(formatter, "unknown session {id}"),
+            Self::SessionAdapterMismatch {
+                adapter_id,
+                session_id,
+            } => write!(
+                formatter,
+                "session {session_id} is not owned by adapter {adapter_id}"
             ),
             Self::OperationCapacity => write!(formatter, "operation retention capacity is full"),
             Self::OperationId(error) => error.fmt(formatter),

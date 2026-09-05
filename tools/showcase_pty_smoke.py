@@ -25,6 +25,7 @@ from pathlib import Path
 
 RESIZE_SEQUENCE = ((160, 55), (120, 40), (80, 24), (40, 15), (20, 8), (5, 3), (1, 1), (80, 24))
 ANSI_SEQUENCE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|[@-_][0-?]*[ -/]*[@-~])")
+SESSION_HOST_READY_MARKER = "(session output pending)"
 
 
 class PtyScreen:
@@ -148,6 +149,10 @@ def visible_text(output: bytearray) -> str:
     return screen.text()
 
 
+def current_screen_contains(output: bytearray, needle: str) -> bool:
+    return needle in visible_text(output)
+
+
 def fully_reconstructed_visible_text(output: bytearray) -> str:
     screen = PtyScreen()
     screen.feed(bytes(output))
@@ -196,7 +201,7 @@ def send(fd: int, output: bytearray, data: bytes, pause: float = 0.08) -> None:
 def wait_for_text(fd: int, output: bytearray, needle: str, timeout: float, message: str) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if needle in visible_text(output) or needle in rendered_text(output):
+        if current_screen_contains(output, needle) or needle in rendered_text(output):
             return
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -204,6 +209,36 @@ def wait_for_text(fd: int, output: bytearray, needle: str, timeout: float, messa
         read_available(fd, output, min(0.05, remaining))
     visible = fully_reconstructed_visible_text(output)
     if needle in visible:
+        return
+    raise RuntimeError(f"{message}; rendered screen tail: {visible[-1200:]!r}")
+
+
+def wait_for_current_text(
+    fd: int, output: bytearray, needle: str, timeout: float, message: str
+) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if current_screen_contains(output, needle):
+            return
+        read_available(fd, output, min(0.05, deadline - time.monotonic()))
+    visible = fully_reconstructed_visible_text(output)
+    if needle in visible:
+        return
+    raise RuntimeError(f"{message}; rendered screen tail: {visible[-1200:]!r}")
+
+
+def session_host_is_ready(text: str) -> bool:
+    return SESSION_HOST_READY_MARKER in text
+
+
+def wait_for_session_host(fd: int, output: bytearray, timeout: float, message: str) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if session_host_is_ready(visible_text(output)):
+            return
+        read_available(fd, output, min(0.05, deadline - time.monotonic()))
+    visible = fully_reconstructed_visible_text(output)
+    if session_host_is_ready(visible):
         return
     raise RuntimeError(f"{message}; rendered screen tail: {visible[-1200:]!r}")
 
@@ -398,6 +433,7 @@ def setup_m42_fixture(controller_binary: Path, mock_binary: Path) -> tuple[tempf
         "actions",
         ("--action-marker", str(control / "actions")),
     )
+    write_mock_adapter(root, mock_binary, "z-sessions", "sessions")
     daemon = subprocess.Popen(
         [str(controller_binary), "--root", str(root), "controller-daemon"],
         env={**os.environ, "DRAGONSTUI_CONTROLLER_TOKEN": secrets.token_hex(32)},
@@ -711,6 +747,36 @@ def main() -> int:
             send(master, output, b"o")
             wait_for_text(master, output, "Adapter Inspector", 1.0, "observability did not return after action acceptance")
 
+            # M65: discover a provider-declared interactive surface, then prove
+            # typed input, render-area resize, close/back navigation, and a
+            # second active host left for exit-path cleanup.
+            send(master, output, b"\x1b[B" * 5)
+            send(master, output, b"s")
+            wait_for_current_text(
+                master,
+                output,
+                'Completed: Started { id: AdapterId("z-sessions") }',
+                2.0,
+                "session adapter did not start",
+            )
+            send(master, output, b"h")
+            wait_for_current_text(master, output, "Interactive Sessions", 1.0, "declared session browser did not open")
+            wait_for_current_text(master, output, "Interactive fixture", 1.0, "provider-declared session metadata was not visible")
+            send(master, output, b"\r")
+            wait_for_session_host(master, output, 1.0, "interactive host did not open")
+            send(master, output, b"alpha")
+            wait_for_current_text(master, output, "echo:a", 2.0, "typed session input did not reach the provider")
+            set_size(master, 100, 30)
+            os.killpg(process.pid, signal.SIGWINCH)
+            wait_for_current_text(master, output, "resized:22x97", 2.0, "rendered session dimensions did not reach the provider")
+            send(master, output, b"\x1bx")
+            wait_for_current_text(master, output, "Interactive Sessions", 2.0, "typed session exit did not return to the session browser")
+            send(master, output, b"h")
+            wait_for_current_text(master, output, "Interactive session exited", 1.0, "session browser did not return to adapters")
+            set_size(master, *RESIZE_SEQUENCE[0])
+            os.killpg(process.pid, signal.SIGWINCH)
+            drain_for(master, output, 0.10)
+
             # The action assertions above already observed each terminal outcome.
             # Let the bounded five-second informational overlays expire before
             # asserting underlying adapter-inspector text through later header
@@ -805,6 +871,26 @@ def main() -> int:
             set_size(master, width, height)
             os.killpg(process.pid, signal.SIGWINCH)
             drain_for(master, output, 0.10)
+
+        if m42_root is not None:
+            # Keep a second controller-owned host active only for the outer
+            # exit/signal cleanup path. Resetting via the capability browser
+            # gives the fixture's sorted adapter table a deterministic origin.
+            send(master, output, b"8")
+            wait_for_current_text(master, output, "Adapter Inspector", 1.0, "could not return to adapters for final session cleanup")
+            send(master, output, b"c")
+            wait_for_current_text(master, output, "Capabilities", 1.0, "capability browser did not reset final session selection")
+            send(master, output, b"c")
+            wait_for_current_text(master, output, "Adapter Inspector", 1.0, "capability browser did not return after resetting final session selection")
+            send(master, output, b"\x1b[B" * 8)
+            # Only z-sessions declares this fixture surface, so the typed
+            # discovery below proves both the selected adapter and controller
+            # runtime availability without depending on a clipped detail pane.
+            send(master, output, b"h")
+            wait_for_current_text(master, output, "Interactive Sessions", 1.0, "final declared session browser did not open")
+            wait_for_current_text(master, output, "Interactive fixture", 1.0, "final provider-declared session metadata was not visible")
+            send(master, output, b"\r")
+            wait_for_session_host(master, output, 1.0, "second interactive host did not open")
 
         if args.exit == "q":
             send(master, output, b"q")

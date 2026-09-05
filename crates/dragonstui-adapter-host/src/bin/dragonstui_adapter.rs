@@ -346,7 +346,10 @@ fn live_state(root: &Path, id: &AdapterId) -> Option<String> {
         | ControllerIpcStatus::Diagnostics(_)
         | ControllerIpcStatus::Management(_)
         | ControllerIpcStatus::Actions(_)
+        | ControllerIpcStatus::Sessions(_)
         | ControllerIpcStatus::Action(_)
+        | ControllerIpcStatus::SessionOpened { .. }
+        | ControllerIpcStatus::SessionEvents(_)
         | ControllerIpcStatus::Operation(_)
         | ControllerIpcStatus::Operations(_)
         | ControllerIpcStatus::LiveData(_)

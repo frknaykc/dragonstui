@@ -9,7 +9,8 @@ use std::{
 use crate::{
     ActionId, AdapterAction, AdapterId, AdapterInfo, AdapterManifest, AdapterProcess,
     AdapterProcessConfig, Capability, Hello, PROTOCOL_VERSION, ProcessError, ProcessStatus,
-    ProtocolMessage, Request, RequestId,
+    ProtocolMessage, Request, RequestId, SessionClose, SessionId, SessionInput, SessionOpen,
+    SessionResize,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -17,6 +18,7 @@ use serde_json::Value;
 const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_EVENT_QUEUE_CAPACITY: usize = 128;
 const DEFAULT_RESPONSE_QUEUE_CAPACITY: usize = 128;
+const DEFAULT_SESSION_EVENT_QUEUE_CAPACITY: usize = 64;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AdapterRuntimeConfig {
@@ -102,10 +104,13 @@ pub struct AdapterRuntime {
     last_error: Option<String>,
     next_request: u64,
     pending: BTreeMap<RequestId, PendingRequest>,
+    session_opened: BTreeMap<RequestId, SessionId>,
+    active_sessions: BTreeSet<SessionId>,
     outcomes: BTreeMap<RequestId, RpcOutcome>,
     request_failures: BTreeMap<RequestId, RpcError>,
     unknown_responses: usize,
     events: BoundedQueue<AdapterEvent>,
+    session_events: BoundedQueue<RuntimeSessionEvent>,
     response_queue_capacity: usize,
 }
 
@@ -159,10 +164,13 @@ impl AdapterRuntime {
             last_error: None,
             next_request: 1,
             pending: BTreeMap::new(),
+            session_opened: BTreeMap::new(),
+            active_sessions: BTreeSet::new(),
             outcomes: BTreeMap::new(),
             request_failures: BTreeMap::new(),
             unknown_responses: 0,
             events: BoundedQueue::new(config.event_queue_capacity),
+            session_events: BoundedQueue::new(DEFAULT_SESSION_EVENT_QUEUE_CAPACITY),
             response_queue_capacity: config.response_queue_capacity,
         })
     }
@@ -189,6 +197,12 @@ impl AdapterRuntime {
 
     pub fn actions(&self) -> &[AdapterAction] {
         &self.info.actions
+    }
+
+    /// Returns provider-declared interactive session surfaces without inferring
+    /// semantics from capability identifiers or output text.
+    pub fn sessions(&self) -> &[crate::AdapterSession] {
+        &self.info.sessions
     }
 
     pub fn pid(&self) -> u32 {
@@ -241,6 +255,137 @@ impl AdapterRuntime {
             payload,
             timeout,
         )
+    }
+
+    /// Sends an explicit typed session-open request.
+    pub fn open_session(
+        &mut self,
+        capability: Capability,
+        rows: u16,
+        columns: u16,
+        timeout: Duration,
+    ) -> Result<RequestId, RpcError> {
+        if self.state != AdapterState::Running {
+            return Err(RpcError::Crashed);
+        }
+        let id = RequestId::new(format!("{}:{}", self.info.id, self.next_request))
+            .map_err(|error| RpcError::Failed(error.to_string()))?;
+        self.next_request += 1;
+        self.process
+            .write_message(&ProtocolMessage::SessionOpen(SessionOpen {
+                protocol: PROTOCOL_VERSION,
+                id: id.clone(),
+                capability,
+                rows,
+                columns,
+            }))
+            .map_err(|error| {
+                self.mark_crashed(error.to_string());
+                RpcError::Crashed
+            })?;
+        self.pending.insert(
+            id.clone(),
+            PendingRequest {
+                deadline: Instant::now() + timeout,
+            },
+        );
+        Ok(id)
+    }
+
+    /// Waits for the provider's typed acknowledgement of a session-open request.
+    pub fn wait_session_open(
+        &mut self,
+        id: &RequestId,
+        timeout: Duration,
+    ) -> Result<SessionId, RpcError> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            self.expire_pending();
+            if let Some(session_id) = self.session_opened.remove(id) {
+                return Ok(session_id);
+            }
+            if let Some(error) = self.request_failures.remove(id) {
+                return Err(error);
+            }
+            if self.outcomes.remove(id).is_some() || !self.pending.contains_key(id) {
+                return Err(RpcError::Failed(
+                    "session open was not acknowledged".to_owned(),
+                ));
+            }
+            if Instant::now() >= deadline {
+                self.pending.remove(id);
+                return Err(RpcError::Timeout);
+            }
+            match self.pump(
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .min(Duration::from_millis(20)),
+            ) {
+                Ok(_) | Err(RpcError::Timeout) => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    /// Forwards input only to a session previously opened by this runtime.
+    pub fn send_session_input(
+        &mut self,
+        session_id: &SessionId,
+        data: String,
+    ) -> Result<(), RpcError> {
+        if !self.active_sessions.contains(session_id) {
+            return Err(RpcError::Failed("unknown session".to_owned()));
+        }
+        self.process
+            .write_message(&ProtocolMessage::SessionInput(SessionInput {
+                protocol: PROTOCOL_VERSION,
+                session_id: session_id.clone(),
+                data,
+            }))
+            .map_err(|error| {
+                self.mark_crashed(error.to_string());
+                RpcError::Crashed
+            })
+    }
+
+    /// Forwards a geometry change only to a session opened by this runtime.
+    pub fn resize_session(
+        &mut self,
+        session_id: &SessionId,
+        rows: u16,
+        columns: u16,
+    ) -> Result<(), RpcError> {
+        if !self.active_sessions.contains(session_id) {
+            return Err(RpcError::Failed("unknown session".to_owned()));
+        }
+        self.process
+            .write_message(&ProtocolMessage::SessionResize(SessionResize {
+                protocol: PROTOCOL_VERSION,
+                session_id: session_id.clone(),
+                rows,
+                columns,
+            }))
+            .map_err(|error| {
+                self.mark_crashed(error.to_string());
+                RpcError::Crashed
+            })
+    }
+
+    /// Requests provider-owned cleanup; the session remains active until its
+    /// typed exit record is received.
+    pub fn close_session(&mut self, session_id: &SessionId) -> Result<(), RpcError> {
+        if !self.active_sessions.contains(session_id) {
+            return Err(RpcError::Failed("unknown session".to_owned()));
+        }
+        self.process
+            .write_message(&ProtocolMessage::SessionClose(SessionClose {
+                protocol: PROTOCOL_VERSION,
+                session_id: session_id.clone(),
+            }))
+            .map_err(|error| {
+                self.mark_crashed(error.to_string());
+                RpcError::Crashed
+            })
     }
 
     fn send_request_with_action(
@@ -356,6 +501,10 @@ impl AdapterRuntime {
         self.events.pop_front()
     }
 
+    pub(crate) fn pop_session_event(&mut self) -> Option<RuntimeSessionEvent> {
+        self.session_events.pop_front()
+    }
+
     pub fn event_queue_capacity(&self) -> usize {
         self.events.capacity()
     }
@@ -400,6 +549,34 @@ impl AdapterRuntime {
 
     fn handle_message(&mut self, message: ProtocolMessage) {
         match message {
+            ProtocolMessage::SessionOpened(opened) => {
+                if self.pending.remove(&opened.id).is_some() {
+                    self.active_sessions.insert(opened.session_id.clone());
+                    self.session_opened.insert(opened.id, opened.session_id);
+                } else {
+                    self.unknown_responses += 1;
+                }
+            }
+            ProtocolMessage::SessionOutput(output) => {
+                if self.active_sessions.contains(&output.session_id) {
+                    self.session_events.push(RuntimeSessionEvent::Output {
+                        session_id: output.session_id,
+                        data: output.data,
+                    });
+                } else {
+                    self.unknown_responses += 1;
+                }
+            }
+            ProtocolMessage::SessionExit(exit) => {
+                if self.active_sessions.remove(&exit.session_id) {
+                    self.session_events.push(RuntimeSessionEvent::Exited {
+                        session_id: exit.session_id,
+                        exit_code: exit.exit_code,
+                    });
+                } else {
+                    self.unknown_responses += 1;
+                }
+            }
             ProtocolMessage::Response(response) => {
                 if self.pending.remove(&response.id).is_some() {
                     self.outcomes
@@ -492,6 +669,18 @@ impl Error for RpcError {}
 #[derive(Clone, Debug)]
 struct PendingRequest {
     deadline: Instant,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum RuntimeSessionEvent {
+    Output {
+        session_id: SessionId,
+        data: String,
+    },
+    Exited {
+        session_id: SessionId,
+        exit_code: Option<i32>,
+    },
 }
 
 #[derive(Clone, Debug)]

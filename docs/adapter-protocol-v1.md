@@ -1,6 +1,6 @@
 # DragonsTUI Adapter Protocol v1
 
-Protocol v1 is newline-delimited JSON over a supervised adapter child process's stdin and stdout. Exactly one JSON object is emitted per line. The host writes `hello`, `request`, and `shutdown`; adapter stdout returns `adapter_info`, `response`, `error`, `event`, and `shutdown_ack`. Adapter stderr is diagnostics only and is never interpreted as protocol.
+Protocol v1 is newline-delimited JSON over a supervised adapter child process's stdin and stdout. Exactly one JSON object is emitted per line. The host writes `hello`, `request`, `session_open`, `session_input`, `session_resize`, `session_close`, and `shutdown`; adapter stdout returns `adapter_info`, `response`, `error`, `event`, `session_opened`, `session_output`, `session_exit`, and `shutdown_ack`. Adapter stderr is diagnostics only and is never interpreted as protocol.
 
 Every envelope has an explicit numeric `protocol` field. The M24–M34 host supports `1`; compatibility is established during handshake rather than assumed from a static manifest.
 
@@ -9,11 +9,18 @@ Every envelope has an explicit numeric `protocol` field. The M24–M34 host supp
 | Type | Direction | Typed fields | Flexible field |
 | --- | --- | --- | --- |
 | `hello` | host → adapter | `protocol`, `host_version` | — |
-| `adapter_info` | adapter → host | `protocol`, `id`, `version`, `capabilities`, optional `actions` | — |
+| `adapter_info` | adapter → host | `protocol`, `id`, `version`, `capabilities`, optional `actions`, optional `sessions` | — |
 | `request` | host → adapter | `protocol`, `id`, `operation`, optional `action` | `payload` |
 | `response` | adapter → host | `protocol`, `id` | `payload` |
 | `error` | adapter → host | `protocol`, optional `id`, `code`, `message` | — |
 | `event` | adapter → host | `protocol`, `stream`, `kind`, optional `observation` | `payload` |
+| `session_open` | host → adapter | `protocol`, `id`, declared `capability`, `rows`, `columns` | — |
+| `session_opened` | adapter → host | `protocol`, request `id`, provider `session_id` | — |
+| `session_input` | host → adapter | `protocol`, `session_id`, `data` | — |
+| `session_resize` | host → adapter | `protocol`, `session_id`, `rows`, `columns` | — |
+| `session_close` | host → adapter | `protocol`, `session_id` | — |
+| `session_output` | adapter → host | `protocol`, `session_id`, `data` | — |
+| `session_exit` | adapter → host | `protocol`, `session_id`, optional `exit_code` | — |
 | `shutdown` | host → adapter | `protocol` | — |
 | `shutdown_ack` | adapter → host | `protocol` | — |
 
@@ -26,6 +33,16 @@ An adapter may declare ordered `actions` in `adapter_info`. Each action has a pr
 `confirmation_required: true` is producer-declared **UI confirmation policy**: a compliant UI must require a distinct user confirmation before sending that invocation. Omission defaults to `false`; an alarming-looking identifier remains directly invokable when the producer declares no confirmation, while a harmless-looking identifier can require confirmation. The UI captures the adapter ID, action ID, and payload when opening confirmation, so selection changes cannot redirect the eventual request.
 
 Confirmation is not authorization. It prevents accidental UI dispatch only; it does not grant permissions, prove an adapter is safe, or provide an adapter-side idempotency guarantee. Existing authenticated loopback controller IPC continues to authenticate callers before dispatch, but protocol v1 has no action-specific permission or RBAC authority to enforce. No such claim is made by `confirmation_required`.
+
+## Interactive sessions
+
+An adapter may declare ordered `sessions` in `adapter_info`. Each declaration contains an existing capability, producer-owned human-readable `label`, and optional `description`. A host may present only these declarations; it never infers an interactive surface from adapter identity, capability text, action labels, streams, kinds, or payloads.
+
+Opening a declaration sends `session_open` with that exact capability and the dimensions of the rendered host area. `session_opened` correlates the request ID to a provider-owned `session_id`. Subsequent `session_input`, `session_resize`, and `session_close` messages carry that session identity. Input and output are opaque text at this boundary: the host does not parse commands, derive terminal semantics, or emulate a provider terminal.
+
+`session_output` streams text for the matching active session. `session_exit` is authoritative terminal state and may carry an optional provider exit code; there is no synthetic success response for close. A compliant host must keep session ownership tied to both adapter and session identity, reject input/resize after a close is pending, and bound retained output/events.
+
+`sessions` is optional and additive, so existing adapters decode with no declared session surfaces and retain their lifecycle, capability, RPC, action, and observability behavior. Session envelopes are sent only after an explicit host open request, so an adapter that does not declare a surface is never asked to implement one.
 
 ## Observability event semantics
 
@@ -63,6 +80,7 @@ The semantic contract backs M53 Log, M54 metric graph, M55 heatmap-from-metrics,
 - `Capability`: one or more such segments joined by `.`; for example `containers.logs` or `test.echo`.
 - `ActionId`: one or more such segments joined by `.`; it is an opaque producer identity, not a policy selector.
 - `RequestId`: a non-empty bounded ASCII correlation token.
+- `SessionId`: one lower-case ASCII segment using the same validation as `AdapterId`; it is provider-owned and is not a terminal, shell, or product identity.
 
 Unknown message types, malformed JSON, and invalid typed identifiers are rejected. A validly decoded protocol number different from `1` is handled by compatibility negotiation, not silently accepted as running.
 

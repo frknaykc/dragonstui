@@ -111,6 +111,28 @@ impl fmt::Display for RequestId {
     }
 }
 
+/// A provider-owned interactive session identity.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct SessionId(String);
+
+impl SessionId {
+    pub fn new(value: impl Into<String>) -> Result<Self, IdentifierError> {
+        let value = value.into();
+        validate_segment(&value, "session id")?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for SessionId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
 /// A deterministic validation failure for a protocol identifier.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IdentifierError {
@@ -174,6 +196,7 @@ string_identifier_serde!(AdapterId);
 string_identifier_serde!(Capability);
 string_identifier_serde!(ActionId);
 string_identifier_serde!(RequestId);
+string_identifier_serde!(SessionId);
 
 /// Host-to-adapter startup greeting.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -192,6 +215,19 @@ pub struct AdapterInfo {
     /// Optional producer-declared actions. Legacy adapters decode with none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub actions: Vec<AdapterAction>,
+    /// Optional provider-declared interactive session surfaces. Existing
+    /// adapters decode with no session declarations.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sessions: Vec<AdapterSession>,
+}
+
+/// Metadata describing one provider-declared interactive session surface.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AdapterSession {
+    pub capability: Capability,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 /// Metadata describing one generic action that an adapter explicitly exposes.
@@ -373,6 +409,64 @@ pub struct ShutdownAck {
     pub protocol: u32,
 }
 
+/// Host request to open one explicitly declared interactive-session capability.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SessionOpen {
+    pub protocol: u32,
+    pub id: RequestId,
+    pub capability: Capability,
+    pub rows: u16,
+    pub columns: u16,
+}
+
+/// Provider acknowledgement that binds an open request to its session identity.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SessionOpened {
+    pub protocol: u32,
+    pub id: RequestId,
+    pub session_id: SessionId,
+}
+
+/// Host-to-provider text input for an active session.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SessionInput {
+    pub protocol: u32,
+    pub session_id: SessionId,
+    pub data: String,
+}
+
+/// Host-to-provider geometry change for an active session.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SessionResize {
+    pub protocol: u32,
+    pub session_id: SessionId,
+    pub rows: u16,
+    pub columns: u16,
+}
+
+/// Host request to release an active session.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SessionClose {
+    pub protocol: u32,
+    pub session_id: SessionId,
+}
+
+/// Provider-to-host streamed textual output for an active session.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SessionOutput {
+    pub protocol: u32,
+    pub session_id: SessionId,
+    pub data: String,
+}
+
+/// Provider-to-host terminal state for an active session.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SessionExit {
+    pub protocol: u32,
+    pub session_id: SessionId,
+    pub exit_code: Option<i32>,
+}
+
 /// All newline-delimited JSON envelopes understood by Protocol v1.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -385,6 +479,13 @@ pub enum ProtocolMessage {
     Event(Event),
     Shutdown(Shutdown),
     ShutdownAck(ShutdownAck),
+    SessionOpen(SessionOpen),
+    SessionOpened(SessionOpened),
+    SessionInput(SessionInput),
+    SessionResize(SessionResize),
+    SessionClose(SessionClose),
+    SessionOutput(SessionOutput),
+    SessionExit(SessionExit),
 }
 
 impl ProtocolMessage {
@@ -398,6 +499,13 @@ impl ProtocolMessage {
             Self::Event(message) => message.protocol,
             Self::Shutdown(message) => message.protocol,
             Self::ShutdownAck(message) => message.protocol,
+            Self::SessionOpen(message) => message.protocol,
+            Self::SessionOpened(message) => message.protocol,
+            Self::SessionInput(message) => message.protocol,
+            Self::SessionResize(message) => message.protocol,
+            Self::SessionClose(message) => message.protocol,
+            Self::SessionOutput(message) => message.protocol,
+            Self::SessionExit(message) => message.protocol,
         }
     }
 }

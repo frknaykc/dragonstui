@@ -13,7 +13,8 @@ use serde_json::Value;
 
 use crate::{
     ActionId, AdapterAction, AdapterController, AdapterDiagnostics, AdapterId, AdapterLiveData,
-    AdapterManagementOutcome, AdapterOperation, RpcOutcome,
+    AdapterManagementOutcome, AdapterOperation, AdapterSession, AdapterSessionEvent, Capability,
+    RpcOutcome, SessionId,
 };
 
 /// Loopback-only controller command. A daemon persists the controller and
@@ -45,11 +46,36 @@ pub enum ControllerIpcCommand {
     Actions {
         id: String,
     },
+    Sessions {
+        id: String,
+    },
     InvokeAction {
         id: String,
         action_id: String,
         payload: Value,
     },
+    OpenSession {
+        id: String,
+        capability: String,
+        rows: u16,
+        columns: u16,
+    },
+    InputSession {
+        id: String,
+        session_id: SessionId,
+        data: String,
+    },
+    ResizeSession {
+        id: String,
+        session_id: SessionId,
+        rows: u16,
+        columns: u16,
+    },
+    CloseSession {
+        id: String,
+        session_id: SessionId,
+    },
+    SessionEvents,
     StartOperation {
         id: String,
         action_id: String,
@@ -103,7 +129,13 @@ pub enum ControllerIpcStatus {
     Diagnostics(Box<ControllerIpcDiagnostics>),
     Management(ControllerManagementResponse),
     Actions(Vec<AdapterAction>),
+    Sessions(Vec<AdapterSession>),
     Action(ControllerActionResponse),
+    SessionOpened {
+        adapter_id: AdapterId,
+        session_id: SessionId,
+    },
+    SessionEvents(Vec<AdapterSessionEvent>),
     Operation(AdapterOperation),
     Operations(Vec<AdapterOperation>),
     LiveData(AdapterLiveData),
@@ -181,6 +213,10 @@ fn adapter_id(id: &str) -> Result<AdapterId, ControllerIpcError> {
 
 fn action_id(id: &str) -> Result<ActionId, ControllerIpcError> {
     ActionId::new(id).map_err(|error| ControllerIpcError::InvalidId(error.to_string()))
+}
+
+fn capability(id: &str) -> Result<Capability, ControllerIpcError> {
+    Capability::new(id).map_err(|error| ControllerIpcError::InvalidId(error.to_string()))
 }
 
 fn legacy_management_status(result: ManagementResult) -> ControllerIpcStatus {
@@ -365,6 +401,14 @@ impl ControllerIpcServer {
                     .map(|status| (status, false))
                     .map_err(ControllerIpcError::Controller)
             }
+            ControllerIpcCommand::Sessions { id } => {
+                let id = adapter_id(&id)?;
+                self.controller
+                    .sessions(&id)
+                    .map(ControllerIpcStatus::Sessions)
+                    .map(|status| (status, false))
+                    .map_err(ControllerIpcError::Controller)
+            }
             ControllerIpcCommand::InvokeAction {
                 id,
                 action_id: action_id_value,
@@ -391,6 +435,60 @@ impl ControllerIpcServer {
                     false,
                 ))
             }
+            ControllerIpcCommand::OpenSession {
+                id,
+                capability: capability_value,
+                rows,
+                columns,
+            } => {
+                let adapter_id = adapter_id(&id)?;
+                let capability = capability(&capability_value)?;
+                let session_id = self
+                    .controller
+                    .open_session(&adapter_id, &capability, rows, columns)
+                    .map_err(ControllerIpcError::Controller)?;
+                Ok((
+                    ControllerIpcStatus::SessionOpened {
+                        adapter_id,
+                        session_id,
+                    },
+                    false,
+                ))
+            }
+            ControllerIpcCommand::InputSession {
+                id,
+                session_id,
+                data,
+            } => {
+                let adapter_id = adapter_id(&id)?;
+                self.controller
+                    .input_session(&adapter_id, &session_id, data)
+                    .map_err(ControllerIpcError::Controller)?;
+                Ok((ControllerIpcStatus::Completed, false))
+            }
+            ControllerIpcCommand::ResizeSession {
+                id,
+                session_id,
+                rows,
+                columns,
+            } => {
+                let adapter_id = adapter_id(&id)?;
+                self.controller
+                    .resize_session(&adapter_id, &session_id, rows, columns)
+                    .map_err(ControllerIpcError::Controller)?;
+                Ok((ControllerIpcStatus::Completed, false))
+            }
+            ControllerIpcCommand::CloseSession { id, session_id } => {
+                let adapter_id = adapter_id(&id)?;
+                self.controller
+                    .close_session(&adapter_id, &session_id)
+                    .map_err(ControllerIpcError::Controller)?;
+                Ok((ControllerIpcStatus::Completed, false))
+            }
+            ControllerIpcCommand::SessionEvents => Ok((
+                ControllerIpcStatus::SessionEvents(self.controller.take_session_events()),
+                false,
+            )),
             ControllerIpcCommand::StartOperation {
                 id,
                 action_id: action_id_value,
@@ -707,6 +805,103 @@ impl ControllerActionClient {
     }
 }
 
+/// Typed session-open client for the authoritative local controller daemon.
+/// Application UI code must call this facade from its bounded background worker.
+#[derive(Clone, Debug)]
+pub struct ControllerSessionClient {
+    client: ControllerClient,
+}
+
+impl ControllerSessionClient {
+    pub fn new(address: SocketAddr, token: impl Into<String>) -> Self {
+        Self {
+            client: ControllerClient::new(address, token),
+        }
+    }
+
+    pub fn sessions(&self, id: &AdapterId) -> Result<Vec<AdapterSession>, ControllerIpcError> {
+        match self
+            .client
+            .call(ControllerIpcCommand::Sessions { id: id.to_string() })?
+        {
+            ControllerIpcStatus::Sessions(sessions) => Ok(sessions),
+            status => Err(ControllerIpcError::UnexpectedStatus(format!("{status:?}"))),
+        }
+    }
+
+    pub fn open(
+        &self,
+        id: &AdapterId,
+        capability: &Capability,
+        rows: u16,
+        columns: u16,
+    ) -> Result<SessionId, ControllerIpcError> {
+        match self.client.call(ControllerIpcCommand::OpenSession {
+            id: id.to_string(),
+            capability: capability.to_string(),
+            rows,
+            columns,
+        })? {
+            ControllerIpcStatus::SessionOpened {
+                adapter_id,
+                session_id,
+            } if adapter_id == *id => Ok(session_id),
+            status => Err(ControllerIpcError::UnexpectedStatus(format!("{status:?}"))),
+        }
+    }
+
+    pub fn input(
+        &self,
+        id: &AdapterId,
+        session_id: &SessionId,
+        data: impl Into<String>,
+    ) -> Result<(), ControllerIpcError> {
+        match self.client.call(ControllerIpcCommand::InputSession {
+            id: id.to_string(),
+            session_id: session_id.clone(),
+            data: data.into(),
+        })? {
+            ControllerIpcStatus::Completed => Ok(()),
+            status => Err(ControllerIpcError::UnexpectedStatus(format!("{status:?}"))),
+        }
+    }
+
+    pub fn resize(
+        &self,
+        id: &AdapterId,
+        session_id: &SessionId,
+        rows: u16,
+        columns: u16,
+    ) -> Result<(), ControllerIpcError> {
+        match self.client.call(ControllerIpcCommand::ResizeSession {
+            id: id.to_string(),
+            session_id: session_id.clone(),
+            rows,
+            columns,
+        })? {
+            ControllerIpcStatus::Completed => Ok(()),
+            status => Err(ControllerIpcError::UnexpectedStatus(format!("{status:?}"))),
+        }
+    }
+
+    pub fn close(&self, id: &AdapterId, session_id: &SessionId) -> Result<(), ControllerIpcError> {
+        match self.client.call(ControllerIpcCommand::CloseSession {
+            id: id.to_string(),
+            session_id: session_id.clone(),
+        })? {
+            ControllerIpcStatus::Completed => Ok(()),
+            status => Err(ControllerIpcError::UnexpectedStatus(format!("{status:?}"))),
+        }
+    }
+
+    pub fn events(&self) -> Result<Vec<AdapterSessionEvent>, ControllerIpcError> {
+        match self.client.call(ControllerIpcCommand::SessionEvents)? {
+            ControllerIpcStatus::SessionEvents(events) => Ok(events),
+            status => Err(ControllerIpcError::UnexpectedStatus(format!("{status:?}"))),
+        }
+    }
+}
+
 /// Typed operation client for the authoritative local controller daemon.
 #[derive(Clone, Debug)]
 pub struct ControllerOperationClient {
@@ -794,6 +989,28 @@ pub fn local_controller_action_client(
         return Err(LocalControllerError::NonLoopbackEndpoint);
     }
     Ok(Some(ControllerActionClient::new(
+        endpoint.address,
+        endpoint.token,
+    )))
+}
+
+/// Reads the private local controller endpoint for generic session routing
+/// without exposing its credential to application callers.
+pub fn local_controller_session_client(
+    root: &Path,
+) -> Result<Option<ControllerSessionClient>, LocalControllerError> {
+    let endpoint_path = root.join(CONTROLLER_DIRECTORY).join(CONTROLLER_ENDPOINT);
+    let body = match fs::read(&endpoint_path) {
+        Ok(body) => body,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(LocalControllerError::Read(error)),
+    };
+    let endpoint: LocalControllerEndpoint =
+        serde_json::from_slice(&body).map_err(LocalControllerError::Decode)?;
+    if !endpoint.address.ip().is_loopback() {
+        return Err(LocalControllerError::NonLoopbackEndpoint);
+    }
+    Ok(Some(ControllerSessionClient::new(
         endpoint.address,
         endpoint.token,
     )))

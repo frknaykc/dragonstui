@@ -27,17 +27,18 @@ use dragons_tui::{
     Event, FocusId, FocusState, Frame, Gauge, InspectorLayout, InspectorSplitState, KeyCode,
     KeyEvent, KeyMap, KeyModifiers, Line, List, ListState, Modal, MouseEvent, MouseKind,
     PaletteCommand, Panel, Position, ProgressBar, PropertyRow, PropertyView, Rect, RichText,
-    Runtime, Scrollbar, ScrollbarState, ShutdownSignal, Size, Span, Sparkline, Spinner,
-    StructuredData, Style, Table, TableColumn, TableState, Text, TextArea, TextInput, Theme, Tree,
-    TreeNode, TreeState, Viewport, ViewportState, display_width, is_quit_key, terminal_size,
+    Runtime, Scrollbar, ScrollbarState, SessionHost, SessionHostState, ShutdownSignal, Size, Span,
+    Sparkline, Spinner, StructuredData, Style, Table, TableColumn, TableState, Text, TextArea,
+    TextInput, Theme, Tree, TreeNode, TreeState, Viewport, ViewportState, display_width,
+    is_quit_key, terminal_size,
 };
 use dragonstui_adapter_host::{
     ActionId, AdapterAction, AdapterClassification, AdapterDisconnect, AdapterEvent, AdapterId,
-    AdapterLiveData, AdapterManagement, AdapterManagementAction, AdapterOperation,
-    ControllerIpcDiagnostics, DiscoveryError, LocalAdapterRoot, Observation, ObservationSeverity,
-    OperationId, OperationState, local_controller_action_client, local_controller_diagnostics,
-    local_controller_live_data, local_controller_management_client,
-    local_controller_operation_client,
+    AdapterLiveData, AdapterManagement, AdapterManagementAction, AdapterOperation, AdapterSession,
+    AdapterSessionEvent, ControllerIpcDiagnostics, DiscoveryError, LocalAdapterRoot, Observation,
+    ObservationSeverity, OperationId, OperationState, SessionId, local_controller_action_client,
+    local_controller_diagnostics, local_controller_live_data, local_controller_management_client,
+    local_controller_operation_client, local_controller_session_client,
 };
 
 const TICK_INTERVAL: Duration = Duration::from_millis(50);
@@ -46,6 +47,9 @@ const LIVE_HISTORY_CAPACITY: usize = 16;
 const LIVE_DATA_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const NOTIFICATION_CAPACITY: usize = 8;
 const NOTIFICATION_LIFETIME: Duration = Duration::from_secs(5);
+const SESSION_EVENT_CHANNEL_CAPACITY: usize = 8;
+const SESSION_EVENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const SESSION_SCROLLBACK_CAPACITY: usize = 128;
 const SPLASH_DURATION: Duration = Duration::from_secs(6);
 const LIST_FOCUS: FocusId = FocusId::new(1);
 const TABLE_FOCUS: FocusId = FocusId::new(2);
@@ -217,6 +221,7 @@ enum AdapterBrowserMode {
     Adapters,
     Capabilities,
     Actions,
+    Sessions,
     StructuredPayload,
     Observability(ObservabilityMode),
 }
@@ -476,6 +481,30 @@ enum AdapterInvocation {
     Discover {
         adapter_id: AdapterId,
     },
+    DiscoverSessions {
+        adapter_id: AdapterId,
+    },
+    OpenSession {
+        adapter_id: AdapterId,
+        capability: dragonstui_adapter_host::Capability,
+        rows: u16,
+        columns: u16,
+    },
+    SessionInput {
+        adapter_id: AdapterId,
+        session_id: SessionId,
+        data: String,
+    },
+    SessionResize {
+        adapter_id: AdapterId,
+        session_id: SessionId,
+        rows: u16,
+        columns: u16,
+    },
+    CloseSession {
+        adapter_id: AdapterId,
+        session_id: SessionId,
+    },
     Invoke {
         adapter_id: AdapterId,
         action_id: ActionId,
@@ -489,6 +518,23 @@ enum AdapterInvocationResult {
     Discovered {
         adapter_id: AdapterId,
         actions: Result<Vec<AdapterAction>, String>,
+    },
+    SessionsDiscovered {
+        adapter_id: AdapterId,
+        sessions: Result<Vec<AdapterSession>, String>,
+    },
+    SessionOpened {
+        adapter_id: AdapterId,
+        session_id: Result<SessionId, String>,
+    },
+    SessionInputForwarded {
+        result: Result<(), String>,
+    },
+    SessionResized {
+        result: Result<(), String>,
+    },
+    SessionCloseRequested {
+        result: Result<(), String>,
     },
     Started {
         operation: Result<AdapterOperation, String>,
@@ -546,6 +592,87 @@ fn adapter_invocation_worker(
                         }),
                     adapter_id,
                 },
+                AdapterInvocation::DiscoverSessions { adapter_id } => {
+                    AdapterInvocationResult::SessionsDiscovered {
+                        sessions: local_controller_session_client(&root)
+                            .map_err(|error| error.to_string())
+                            .and_then(|client| {
+                                client.ok_or_else(|| "controller daemon is unavailable".to_owned())
+                            })
+                            .and_then(|client| {
+                                client
+                                    .sessions(&adapter_id)
+                                    .map_err(|error| error.to_string())
+                            }),
+                        adapter_id,
+                    }
+                }
+                AdapterInvocation::OpenSession {
+                    adapter_id,
+                    capability,
+                    rows,
+                    columns,
+                } => AdapterInvocationResult::SessionOpened {
+                    session_id: local_controller_session_client(&root)
+                        .map_err(|error| error.to_string())
+                        .and_then(|client| {
+                            client.ok_or_else(|| "controller daemon is unavailable".to_owned())
+                        })
+                        .and_then(|client| {
+                            client
+                                .open(&adapter_id, &capability, rows, columns)
+                                .map_err(|error| error.to_string())
+                        }),
+                    adapter_id,
+                },
+                AdapterInvocation::SessionInput {
+                    adapter_id,
+                    session_id,
+                    data,
+                } => AdapterInvocationResult::SessionInputForwarded {
+                    result: local_controller_session_client(&root)
+                        .map_err(|error| error.to_string())
+                        .and_then(|client| {
+                            client.ok_or_else(|| "controller daemon is unavailable".to_owned())
+                        })
+                        .and_then(|client| {
+                            client
+                                .input(&adapter_id, &session_id, &data)
+                                .map_err(|error| error.to_string())
+                        }),
+                },
+                AdapterInvocation::SessionResize {
+                    adapter_id,
+                    session_id,
+                    rows,
+                    columns,
+                } => AdapterInvocationResult::SessionResized {
+                    result: local_controller_session_client(&root)
+                        .map_err(|error| error.to_string())
+                        .and_then(|client| {
+                            client.ok_or_else(|| "controller daemon is unavailable".to_owned())
+                        })
+                        .and_then(|client| {
+                            client
+                                .resize(&adapter_id, &session_id, rows, columns)
+                                .map_err(|error| error.to_string())
+                        }),
+                },
+                AdapterInvocation::CloseSession {
+                    adapter_id,
+                    session_id,
+                } => AdapterInvocationResult::SessionCloseRequested {
+                    result: local_controller_session_client(&root)
+                        .map_err(|error| error.to_string())
+                        .and_then(|client| {
+                            client.ok_or_else(|| "controller daemon is unavailable".to_owned())
+                        })
+                        .and_then(|client| {
+                            client
+                                .close(&adapter_id, &session_id)
+                                .map_err(|error| error.to_string())
+                        }),
+                },
                 AdapterInvocation::Invoke {
                     adapter_id,
                     action_id,
@@ -581,6 +708,85 @@ fn adapter_invocation_worker(
         result_receiver,
         AdapterInvocationWorker { join: Some(join) },
     )
+}
+
+enum SessionEventMessage {
+    Event(AdapterSessionEvent),
+    PollError(String),
+}
+
+struct SessionEventWorker {
+    shutdown: SyncSender<()>,
+    join: Option<thread::JoinHandle<()>>,
+}
+
+impl SessionEventWorker {
+    fn stop(&mut self) {
+        let _ = self.shutdown.try_send(());
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+
+    #[cfg(test)]
+    fn is_finished(&self) -> bool {
+        self.join.is_none()
+    }
+}
+
+fn session_event_worker<F>(mut poll: F) -> (Receiver<SessionEventMessage>, SessionEventWorker)
+where
+    F: FnMut() -> Result<Vec<AdapterSessionEvent>, String> + Send + 'static,
+{
+    let (sender, receiver) = mpsc::sync_channel(SESSION_EVENT_CHANNEL_CAPACITY);
+    let (shutdown, shutdown_receiver) = mpsc::sync_channel(1);
+    let join = thread::spawn(move || {
+        loop {
+            if shutdown_receiver.try_recv().is_ok() {
+                break;
+            }
+            match poll() {
+                Ok(events) => {
+                    for event in events {
+                        match sender.try_send(SessionEventMessage::Event(event)) {
+                            Ok(()) | Err(TrySendError::Full(_)) => {}
+                            Err(TrySendError::Disconnected(_)) => return,
+                        }
+                    }
+                }
+                Err(error) => match sender.try_send(SessionEventMessage::PollError(error)) {
+                    Ok(()) | Err(TrySendError::Full(_)) => {}
+                    Err(TrySendError::Disconnected(_)) => return,
+                },
+            }
+            match shutdown_receiver.recv_timeout(SESSION_EVENT_POLL_INTERVAL) {
+                Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+        }
+    });
+    (
+        receiver,
+        SessionEventWorker {
+            shutdown,
+            join: Some(join),
+        },
+    )
+}
+
+fn local_session_event_worker(
+    root: PathBuf,
+    controller_io_lock: ControllerIoLock,
+) -> (Receiver<SessionEventMessage>, SessionEventWorker) {
+    session_event_worker(move || {
+        let _controller_io = controller_io_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        local_controller_session_client(&root)
+            .map_err(|error| error.to_string())
+            .and_then(|client| client.ok_or_else(|| "controller daemon is unavailable".to_owned()))
+            .and_then(|client| client.events().map_err(|error| error.to_string()))
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1487,6 +1693,9 @@ struct Showcase {
     adapter_browser_mode: AdapterBrowserMode,
     adapter_actions: Vec<AdapterAction>,
     adapter_actions_adapter: Option<AdapterId>,
+    adapter_sessions: Vec<AdapterSession>,
+    adapter_sessions_adapter: Option<AdapterId>,
+    active_session: Option<HostedSession>,
     /// Bounded projection returned by the controller; it is never operation authority.
     adapter_operations: Vec<AdapterOperation>,
     notifications: NotificationState,
@@ -1495,6 +1704,8 @@ struct Showcase {
     adapter_invocation_sender: Option<SyncSender<AdapterInvocation>>,
     adapter_invocation_results: Option<Receiver<AdapterInvocationResult>>,
     adapter_invocation_worker: Option<AdapterInvocationWorker>,
+    session_event_results: Option<Receiver<SessionEventMessage>>,
+    session_event_worker: Option<SessionEventWorker>,
     adapter_discovery_error: Option<String>,
     adapter_diagnostics: BTreeMap<String, ControllerIpcDiagnostics>,
     adapter_controller_error: Option<String>,
@@ -1531,6 +1742,13 @@ struct Showcase {
 }
 
 type AdapterDiagnosticsSnapshot = (BTreeMap<String, ControllerIpcDiagnostics>, Option<String>);
+
+struct HostedSession {
+    adapter_id: AdapterId,
+    session_id: SessionId,
+    host: SessionHost,
+    close_pending: bool,
+}
 
 impl Showcase {
     #[cfg(test)]
@@ -1623,6 +1841,9 @@ impl Showcase {
             adapter_browser_mode: AdapterBrowserMode::default(),
             adapter_actions: Vec::new(),
             adapter_actions_adapter: None,
+            adapter_sessions: Vec::new(),
+            adapter_sessions_adapter: None,
+            active_session: None,
             adapter_operations: Vec::new(),
             notifications: NotificationState::with_capacity(NOTIFICATION_CAPACITY),
             last_operation_refresh: started,
@@ -1630,6 +1851,8 @@ impl Showcase {
             adapter_invocation_sender,
             adapter_invocation_results,
             adapter_invocation_worker,
+            session_event_results: None,
+            session_event_worker: None,
             adapter_discovery_error,
             adapter_diagnostics: BTreeMap::new(),
             adapter_controller_error: None,
@@ -1666,6 +1889,128 @@ impl Showcase {
         };
         showcase.refresh_adapter_diagnostics();
         showcase
+    }
+
+    fn host_session(&mut self, adapter_id: AdapterId, session_id: SessionId) {
+        let mut host = SessionHost::new(SESSION_SCROLLBACK_CAPACITY);
+        host.mark_running();
+        self.active_session = Some(HostedSession {
+            adapter_id,
+            session_id,
+            host,
+            close_pending: false,
+        });
+    }
+
+    fn apply_session_event(&mut self, event: AdapterSessionEvent) -> bool {
+        let Some(active) = self.active_session.as_mut() else {
+            return false;
+        };
+        match event {
+            AdapterSessionEvent::Output {
+                adapter_id,
+                session_id,
+                data,
+            } if active.adapter_id == adapter_id && active.session_id == session_id => {
+                active.host.push_output(&data);
+                true
+            }
+            AdapterSessionEvent::Exited {
+                adapter_id,
+                session_id,
+                exit_code,
+            } if active.adapter_id == adapter_id && active.session_id == session_id => {
+                self.active_session = None;
+                self.adapter_browser_mode = AdapterBrowserMode::Sessions;
+                self.focus.set_focus(TABLE_FOCUS);
+                self.adapter_action_status = Some(match exit_code {
+                    Some(exit_code) => {
+                        format!("Interactive session exited with code {exit_code}")
+                    }
+                    None => "Interactive session exited".to_owned(),
+                });
+                true
+            }
+            AdapterSessionEvent::Disconnected {
+                adapter_id,
+                session_id,
+                reason,
+            } if active.adapter_id == adapter_id && active.session_id == session_id => {
+                self.active_session = None;
+                self.adapter_browser_mode = AdapterBrowserMode::Sessions;
+                self.focus.set_focus(TABLE_FOCUS);
+                self.adapter_action_status =
+                    Some(format!("Interactive session disconnected: {reason}"));
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn drain_session_event_results(&mut self) -> bool {
+        let messages = self
+            .session_event_results
+            .as_ref()
+            .map(|results| std::iter::from_fn(|| results.try_recv().ok()).collect::<Vec<_>>())
+            .unwrap_or_default();
+        let mut changed = false;
+        for message in messages {
+            match message {
+                SessionEventMessage::Event(event) => changed |= self.apply_session_event(event),
+                SessionEventMessage::PollError(error) => {
+                    self.adapter_action_status =
+                        Some(format!("Session event poll failed: {error}"));
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+
+    fn ensure_session_event_worker(&mut self) {
+        let active = self.active_session.as_ref().is_some_and(|session| {
+            matches!(
+                session.host.state(),
+                SessionHostState::Opening | SessionHostState::Running
+            )
+        });
+        if !active {
+            if let Some(mut worker) = self.session_event_worker.take() {
+                worker.stop();
+            }
+            self.session_event_results = None;
+            return;
+        }
+        if self.session_event_worker.is_some() {
+            return;
+        }
+        let Some(root) = self.adapter_root.clone() else {
+            return;
+        };
+        let (results, worker) =
+            local_session_event_worker(root, Arc::clone(&self.controller_io_lock));
+        self.session_event_results = Some(results);
+        self.session_event_worker = Some(worker);
+    }
+
+    fn shutdown_sessions(&mut self) {
+        if let Some(mut worker) = self.session_event_worker.take() {
+            worker.stop();
+        }
+        self.session_event_results = None;
+        let Some(active) = self.active_session.take() else {
+            return;
+        };
+        let Some(root) = self.adapter_root.as_deref() else {
+            return;
+        };
+        let _controller_io = self
+            .controller_io_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Ok(Some(client)) = local_controller_session_client(root) {
+            let _ = client.close(&active.adapter_id, &active.session_id);
+        }
     }
 
     fn refresh_adapter_diagnostics(&mut self) {
@@ -1872,6 +2217,13 @@ impl Showcase {
             .cloned()
     }
 
+    fn selected_adapter_session(&mut self) -> Option<AdapterSession> {
+        self.table
+            .selected_index(self.adapter_sessions.len())
+            .and_then(|index| self.adapter_sessions.get(index))
+            .cloned()
+    }
+
     fn queue_adapter_invocation(&mut self, request: AdapterInvocation) {
         let Some(sender) = &self.adapter_invocation_sender else {
             self.adapter_action_status = Some("Adapter root is required for actions".to_owned());
@@ -1902,6 +2254,125 @@ impl Showcase {
         self.adapter_browser_mode = AdapterBrowserMode::Actions;
         self.focus.set_focus(TABLE_FOCUS);
         self.queue_adapter_invocation(AdapterInvocation::Discover { adapter_id });
+    }
+
+    fn open_adapter_sessions(&mut self) {
+        let Some(adapter_id) = self.selected_adapter_id() else {
+            self.adapter_action_status =
+                Some("Select an adapter before opening sessions".to_owned());
+            return;
+        };
+        self.adapter_sessions.clear();
+        self.adapter_sessions_adapter = Some(adapter_id.clone());
+        self.table.set_selected(0);
+        self.adapter_browser_mode = AdapterBrowserMode::Sessions;
+        self.focus.set_focus(TABLE_FOCUS);
+        self.queue_adapter_invocation(AdapterInvocation::DiscoverSessions { adapter_id });
+    }
+
+    fn open_selected_adapter_session(&mut self, size: Size) {
+        let Some(adapter_id) = self.adapter_sessions_adapter.clone() else {
+            self.adapter_action_status = Some("No session provider is selected".to_owned());
+            return;
+        };
+        let Some(session) = self.selected_adapter_session() else {
+            self.adapter_action_status = Some("No interactive session is selected".to_owned());
+            return;
+        };
+        let Some((rows, columns)) = session_host_dimensions(size) else {
+            self.adapter_action_status = Some("Interactive session host is too small".to_owned());
+            return;
+        };
+        self.queue_adapter_invocation(AdapterInvocation::OpenSession {
+            adapter_id,
+            capability: session.capability,
+            rows,
+            columns,
+        });
+    }
+
+    fn forward_active_session_input(&mut self, key: KeyEvent) -> bool {
+        let Some(data) = session_input_for_key(key) else {
+            return false;
+        };
+        let Some(active) = self.active_session.as_ref() else {
+            return false;
+        };
+        if active.close_pending || active.host.state() != SessionHostState::Running {
+            return false;
+        }
+        self.queue_adapter_invocation(AdapterInvocation::SessionInput {
+            adapter_id: active.adapter_id.clone(),
+            session_id: active.session_id.clone(),
+            data,
+        });
+        true
+    }
+
+    fn request_active_session_close(&mut self) -> bool {
+        let Some(active) = self.active_session.as_ref() else {
+            return false;
+        };
+        if active.close_pending || active.host.state() != SessionHostState::Running {
+            return false;
+        }
+        let request = AdapterInvocation::CloseSession {
+            adapter_id: active.adapter_id.clone(),
+            session_id: active.session_id.clone(),
+        };
+        let Some(sender) = self.adapter_invocation_sender.as_ref() else {
+            return false;
+        };
+        match sender.try_send(request) {
+            Ok(()) => {
+                if let Some(active) = self.active_session.as_mut() {
+                    active.close_pending = true;
+                }
+                self.adapter_action_status = Some("Session close requested".to_owned());
+                true
+            }
+            Err(TrySendError::Full(_)) => {
+                self.adapter_action_status = Some("Session close request queue is full".to_owned());
+                false
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                self.adapter_action_status = Some("Session worker unavailable".to_owned());
+                false
+            }
+        }
+    }
+
+    fn resize_active_session(&mut self, size: Size) -> bool {
+        let Some((rows, columns)) = session_host_dimensions(size) else {
+            return false;
+        };
+        let Some(active) = self.active_session.as_ref() else {
+            return false;
+        };
+        if active.close_pending || active.host.state() != SessionHostState::Running {
+            return false;
+        }
+        let request = AdapterInvocation::SessionResize {
+            adapter_id: active.adapter_id.clone(),
+            session_id: active.session_id.clone(),
+            rows,
+            columns,
+        };
+        let Some(sender) = self.adapter_invocation_sender.as_ref() else {
+            return false;
+        };
+        match sender.try_send(request) {
+            Ok(()) => true,
+            Err(TrySendError::Full(_)) => {
+                self.adapter_action_status =
+                    Some("Session resize request queue is full".to_owned());
+                false
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                self.adapter_action_status = Some("Session worker unavailable".to_owned());
+                false
+            }
+        }
     }
 
     fn invoke_selected_adapter_action(&mut self) {
@@ -1975,6 +2446,58 @@ impl Showcase {
                                 Some(format!("Adapter action discovery failed: {error}"))
                         }
                     }
+                }
+            }
+            AdapterInvocationResult::SessionsDiscovered {
+                adapter_id,
+                sessions,
+            } => {
+                if self.adapter_sessions_adapter.as_ref() == Some(&adapter_id) {
+                    match sessions {
+                        Ok(sessions) => {
+                            self.adapter_sessions = sessions;
+                            self.table.set_selected(0);
+                            self.adapter_action_status = Some(format!(
+                                "Discovered {} interactive sessions",
+                                self.adapter_sessions.len()
+                            ));
+                        }
+                        Err(error) => {
+                            self.adapter_action_status =
+                                Some(format!("Session discovery failed: {error}"))
+                        }
+                    }
+                }
+            }
+            AdapterInvocationResult::SessionOpened {
+                adapter_id,
+                session_id,
+            } => match session_id {
+                Ok(session_id) => {
+                    self.host_session(adapter_id, session_id);
+                    self.focus.set_focus(VIEWPORT_FOCUS);
+                    self.adapter_action_status = Some("Interactive session opened".to_owned());
+                }
+                Err(error) => {
+                    self.adapter_action_status = Some(format!("Session open failed: {error}"));
+                }
+            },
+            AdapterInvocationResult::SessionInputForwarded { result } => {
+                if let Err(error) = result {
+                    self.adapter_action_status = Some(format!("Session input failed: {error}"));
+                }
+            }
+            AdapterInvocationResult::SessionResized { result } => {
+                if let Err(error) = result {
+                    self.adapter_action_status = Some(format!("Session resize failed: {error}"));
+                }
+            }
+            AdapterInvocationResult::SessionCloseRequested { result } => {
+                if let Err(error) = result {
+                    if let Some(active) = self.active_session.as_mut() {
+                        active.close_pending = false;
+                    }
+                    self.adapter_action_status = Some(format!("Session close failed: {error}"));
                 }
             }
             AdapterInvocationResult::Started { operation } => match operation {
@@ -2093,6 +2616,8 @@ impl Showcase {
                 changed |= self.drain_adapter_diagnostics_results();
                 changed |= self.drain_adapter_action_results();
                 changed |= self.drain_adapter_invocation_results();
+                changed |= self.drain_session_event_results();
+                self.ensure_session_event_worker();
                 if self.adapter_root.is_some()
                     && now.saturating_duration_since(self.last_operation_refresh)
                         >= OPERATION_POLL_INTERVAL
@@ -2169,6 +2694,22 @@ impl Showcase {
 
         if self.live_search_input.is_some() {
             return self.handle_live_search_key(key);
+        }
+
+        if self.section == Section::Adapters && self.active_session.is_some() {
+            if key.modifiers.alt && matches!(key.code, KeyCode::Char('x' | 'X')) {
+                return Outcome {
+                    quit: false,
+                    redraw: self.request_active_session_close(),
+                };
+            }
+            if self.forward_active_session_input(key) {
+                return Outcome {
+                    quit: false,
+                    redraw: true,
+                };
+            }
+            return Outcome::default();
         }
 
         if self.section == Section::Adapters {
@@ -2357,8 +2898,32 @@ impl Showcase {
                 ) {
                     return Outcome::default();
                 }
+            } else if self.adapter_browser_mode == AdapterBrowserMode::Sessions {
+                match key.code {
+                    KeyCode::Char('h' | 'H') | KeyCode::Escape => {
+                        self.adapter_browser_mode = AdapterBrowserMode::Adapters;
+                        self.table.set_selected(0);
+                        self.focus.set_focus(TABLE_FOCUS);
+                    }
+                    KeyCode::Up => self.table.previous(self.adapter_sessions.len()),
+                    KeyCode::Down => self.table.next(self.adapter_sessions.len()),
+                    KeyCode::Enter | KeyCode::Char(' ') => self.open_selected_adapter_session(
+                        terminal_size().unwrap_or(Size::new(80, 24)),
+                    ),
+                    _ => return Outcome::default(),
+                }
+                return Outcome {
+                    quit: false,
+                    redraw: true,
+                };
             } else if matches!(key.code, KeyCode::Char('a' | 'A')) {
                 self.open_adapter_actions();
+                return Outcome {
+                    quit: false,
+                    redraw: true,
+                };
+            } else if matches!(key.code, KeyCode::Char('h' | 'H')) {
+                self.open_adapter_sessions();
                 return Outcome {
                     quit: false,
                     redraw: true,
@@ -3057,6 +3622,7 @@ impl Showcase {
 
 impl Drop for Showcase {
     fn drop(&mut self) {
+        self.shutdown_sessions();
         if let Some(worker) = self.adapter_invocation_worker.as_mut() {
             worker.stop(&mut self.adapter_invocation_sender);
         }
@@ -3308,41 +3874,83 @@ fn run(output: &mut impl Write, args: ShowcaseArgs, shutdown: &ShutdownSignal) -
         args.adapter_registry_source,
         args.adapter_install_id,
     );
-    loop {
-        if shutdown.requested() {
-            return Ok(());
-        }
-        if runtime.needs_redraw() {
-            let view = showcase_view(terminal_size()?, &mut showcase);
-            runtime.render_with_cursor(output, view.frame, view.cursor)?;
-        }
-        let event = runtime.next_event()?;
-        if shutdown.requested() {
-            return Ok(());
-        }
-        match event {
-            Event::Key(key) => {
-                let outcome = showcase.handle_key(key);
-                if outcome.quit {
-                    return Ok(());
+    let result = (|| {
+        loop {
+            if shutdown.requested() {
+                return Ok(());
+            }
+            if runtime.needs_redraw() {
+                let view = showcase_view(terminal_size()?, &mut showcase);
+                runtime.render_with_cursor(output, view.frame, view.cursor)?;
+            }
+            let event = runtime.next_event()?;
+            if shutdown.requested() {
+                return Ok(());
+            }
+            match event {
+                Event::Key(key) => {
+                    let outcome = showcase.handle_key(key);
+                    if outcome.quit {
+                        return Ok(());
+                    }
+                    if outcome.redraw {
+                        runtime.request_redraw();
+                    }
                 }
-                if outcome.redraw {
+                Event::Mouse(mouse) => {
+                    if showcase.handle_mouse(mouse).redraw {
+                        runtime.request_redraw();
+                    }
+                }
+                Event::Resize(size) => {
+                    showcase.resize_active_session(size);
                     runtime.request_redraw();
                 }
-            }
-            Event::Mouse(mouse) => {
-                if showcase.handle_mouse(mouse).redraw {
-                    runtime.request_redraw();
-                }
-            }
-            Event::Resize(_) => runtime.request_redraw(),
-            Event::Tick(now) => {
-                if showcase.advance(now) {
-                    runtime.request_redraw();
+                Event::Tick(now) => {
+                    if showcase.advance(now) {
+                        runtime.request_redraw();
+                    }
                 }
             }
         }
+    })();
+    showcase.shutdown_sessions();
+    result
+}
+
+/// Converts normalized terminal keys to opaque session input bytes without
+/// interpreting commands, providers, or output text.
+fn session_input_for_key(key: KeyEvent) -> Option<String> {
+    if key.modifiers.ctrl {
+        return match key.code {
+            KeyCode::Char(character) if character.is_ascii_alphabetic() => {
+                Some(((character.to_ascii_lowercase() as u8 - b'a' + 1) as char).to_string())
+            }
+            _ => None,
+        };
     }
+    match key.code {
+        KeyCode::Char(character) => Some(character.to_string()),
+        KeyCode::Enter => Some("\n".to_owned()),
+        KeyCode::Tab => Some("\t".to_owned()),
+        KeyCode::Backspace => Some("\u{7f}".to_owned()),
+        KeyCode::Escape => Some("\u{1b}".to_owned()),
+        KeyCode::Up => Some("\u{1b}[A".to_owned()),
+        KeyCode::Down => Some("\u{1b}[B".to_owned()),
+        KeyCode::Right => Some("\u{1b}[C".to_owned()),
+        KeyCode::Left => Some("\u{1b}[D".to_owned()),
+        _ => None,
+    }
+}
+
+/// Derives the dimensions of the rendered session output area rather than
+/// forwarding the outer DragonsTUI terminal dimensions to the provider.
+fn session_host_dimensions(size: Size) -> Option<(u16, u16)> {
+    let content_height = size.height.saturating_sub(6);
+    let inner_height = content_height.saturating_sub(2);
+    let inner_width = size.width.saturating_sub(2);
+    let output_width = inner_width.saturating_sub(1);
+    (inner_height > 0 && output_width > 0).then_some((inner_height, output_width))
 }
 
 struct View {
@@ -4260,10 +4868,14 @@ fn color_hex(color: Color) -> String {
 }
 
 fn render_adapters(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -> Option<Position> {
+    if showcase.active_session.is_some() {
+        return render_session_host(frame, area, showcase);
+    }
     match showcase.adapter_browser_mode {
         AdapterBrowserMode::Adapters => render_adapter_list(frame, area, showcase),
         AdapterBrowserMode::Capabilities => render_capability_browser(frame, area, showcase),
         AdapterBrowserMode::Actions => render_adapter_actions(frame, area, showcase),
+        AdapterBrowserMode::Sessions => render_adapter_sessions(frame, area, showcase),
         AdapterBrowserMode::StructuredPayload => {
             render_structured_payload_browser(frame, area, showcase)
         }
@@ -5253,6 +5865,96 @@ fn render_adapter_actions(
     None
 }
 
+fn render_adapter_sessions(
+    frame: &mut Frame,
+    area: Rect,
+    showcase: &mut Showcase,
+) -> Option<Position> {
+    let theme = showcase.theme;
+    let inner = panel(
+        frame,
+        area,
+        localized(
+            showcase.language,
+            "Interactive Sessions",
+            "Etkileşimli Oturumlar",
+        ),
+        showcase.focus.current() == Some(TABLE_FOCUS),
+        theme,
+        BorderSet::double(),
+    );
+    showcase.hits.table = inner;
+    if showcase.adapter_sessions.is_empty() {
+        Text::new(localized(
+            showcase.language,
+            "No interactive sessions declared by this adapter.",
+            "Bu adaptör etkileşimli oturum bildirmiyor.",
+        ))
+        .style(Style::new().fg(theme.muted).bg(theme.background))
+        .render(frame, inner);
+        return None;
+    }
+    let lines = showcase
+        .adapter_sessions
+        .iter()
+        .flat_map(|session| {
+            let mut lines = vec![Line::new([
+                Span::styled(&session.label, Style::new().fg(theme.success).bold()),
+                Span::styled(" · ", Style::new().fg(theme.muted)),
+                Span::styled(session.capability.to_string(), Style::new().fg(theme.text)),
+            ])];
+            if let Some(description) = &session.description {
+                lines.push(Line::new([Span::styled(
+                    description,
+                    Style::new().fg(theme.muted),
+                )]));
+            }
+            lines
+        })
+        .collect::<Vec<_>>();
+    RichText::new(lines).render(frame, inner);
+    None
+}
+
+fn render_session_host(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -> Option<Position> {
+    let theme = showcase.theme;
+    let title = if showcase
+        .active_session
+        .as_ref()
+        .is_some_and(|session| session.close_pending)
+    {
+        localized(
+            showcase.language,
+            "Interactive Session · Close requested",
+            "Etkileşimli Oturum · Kapatma istendi",
+        )
+    } else {
+        localized(
+            showcase.language,
+            "Interactive Session",
+            "Etkileşimli Oturum",
+        )
+    };
+    let inner = panel(
+        frame,
+        area,
+        title,
+        showcase.focus.current() == Some(VIEWPORT_FOCUS),
+        theme,
+        BorderSet::double(),
+    );
+    showcase.hits.viewport = inner;
+    let active = showcase.active_session.as_mut()?;
+    active.host.render(
+        frame,
+        inner,
+        Style::new().fg(theme.text).bg(theme.background),
+        Style::new().fg(theme.muted).bg(theme.background),
+        Style::new().fg(theme.secondary).bg(theme.background),
+    );
+    None
+}
+
 fn render_structured_payload_browser(
     frame: &mut Frame,
     area: Rect,
@@ -5982,6 +6684,41 @@ mod tests {
         }
     }
 
+    #[test]
+    fn session_input_encoding_forwards_normalized_keys_without_command_parsing() {
+        assert_eq!(
+            session_input_for_key(key(KeyCode::Char('x'))),
+            Some("x".to_owned())
+        );
+        assert_eq!(
+            session_input_for_key(key(KeyCode::Enter)),
+            Some("\n".to_owned())
+        );
+        assert_eq!(
+            session_input_for_key(key(KeyCode::Backspace)),
+            Some("\u{7f}".to_owned())
+        );
+        assert_eq!(
+            session_input_for_key(key(KeyCode::Up)),
+            Some("\u{1b}[A".to_owned())
+        );
+        assert_eq!(
+            session_input_for_key(key(KeyCode::Escape)),
+            Some("\u{1b}".to_owned())
+        );
+        assert_eq!(
+            session_input_for_key(KeyEvent {
+                code: KeyCode::Char('c'),
+                modifiers: KeyModifiers {
+                    ctrl: true,
+                    ..KeyModifiers::default()
+                },
+            }),
+            Some("\u{3}".to_owned())
+        );
+        assert_eq!(session_input_for_key(key(KeyCode::PageDown)), None);
+    }
+
     fn buffer_row(frame: &Frame, y: u16) -> String {
         (0..frame.buffer().width())
             .filter_map(|x| frame.buffer().get(x, y).map(|cell| cell.character))
@@ -6041,6 +6778,377 @@ mod tests {
             showcase.selected_adapter_action().unwrap().id.as_str(),
             "fixture.destroy.everything"
         );
+    }
+
+    #[test]
+    fn session_surface_renders_only_provider_declared_metadata() {
+        let mut showcase = Showcase::new(Instant::now());
+        showcase.phase = Phase::Showcase;
+        showcase.section = Section::Adapters;
+        showcase.adapter_browser_mode = AdapterBrowserMode::Sessions;
+        showcase.adapter_sessions_adapter = Some(AdapterId::new("provider-a").unwrap());
+        showcase.adapter_sessions = vec![AdapterSession {
+            capability: Capability::new("opaque.session.surface").unwrap(),
+            label: "Interactive session".to_owned(),
+            description: Some("Provider-defined terminal surface".to_owned()),
+        }];
+
+        let rendered = showcase_view(Size::new(120, 32), &mut showcase);
+        for expected in [
+            "Interactive Sessions",
+            "Interactive session",
+            "opaque.session.surface",
+            "Provider-defined terminal surface",
+        ] {
+            assert!(
+                frame_contains(&rendered.frame, expected),
+                "missing {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn session_browser_discovers_the_selected_adapter_through_the_bounded_worker() {
+        let mut showcase = Showcase::new(Instant::now());
+        showcase.phase = Phase::Showcase;
+        showcase.section = Section::Adapters;
+        showcase.adapter_rows = vec![AdapterRow {
+            id: "provider-a".to_owned(),
+            name: "Provider A".to_owned(),
+            version: "1.0.0".to_owned(),
+            state: AdapterViewState::Stopped,
+            protocol: "1".to_owned(),
+            executable: "provider-a".to_owned(),
+            last_error: None,
+        }];
+        let (sender, receiver) = mpsc::sync_channel(1);
+        showcase.adapter_invocation_sender = Some(sender);
+
+        assert!(showcase.handle_key(key(KeyCode::Char('h'))).redraw);
+
+        assert_eq!(showcase.adapter_browser_mode, AdapterBrowserMode::Sessions);
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(AdapterInvocation::DiscoverSessions { adapter_id }) if adapter_id.as_str() == "provider-a"
+        ));
+    }
+
+    #[test]
+    fn selected_session_opens_through_the_bounded_worker_with_explicit_dimensions() {
+        let mut showcase = Showcase::new(Instant::now());
+        showcase.adapter_sessions_adapter = Some(AdapterId::new("provider-a").unwrap());
+        showcase.adapter_sessions = vec![AdapterSession {
+            capability: Capability::new("opaque.session.surface").unwrap(),
+            label: "Interactive session".to_owned(),
+            description: None,
+        }];
+        let (sender, receiver) = mpsc::sync_channel(1);
+        showcase.adapter_invocation_sender = Some(sender);
+
+        showcase.open_selected_adapter_session(Size::new(80, 24));
+
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(AdapterInvocation::OpenSession {
+                adapter_id,
+                capability,
+                rows: 16,
+                columns: 77,
+            }) if adapter_id.as_str() == "provider-a" && capability.as_str() == "opaque.session.surface"
+        ));
+    }
+
+    #[test]
+    fn session_browser_enter_opens_the_selected_declared_surface() {
+        let mut showcase = Showcase::new(Instant::now());
+        showcase.phase = Phase::Showcase;
+        showcase.section = Section::Adapters;
+        showcase.adapter_browser_mode = AdapterBrowserMode::Sessions;
+        showcase.adapter_sessions_adapter = Some(AdapterId::new("provider-a").unwrap());
+        showcase.adapter_sessions = vec![AdapterSession {
+            capability: Capability::new("opaque.session.surface").unwrap(),
+            label: "Interactive session".to_owned(),
+            description: None,
+        }];
+        let (sender, receiver) = mpsc::sync_channel(1);
+        showcase.adapter_invocation_sender = Some(sender);
+
+        assert!(showcase.handle_key(key(KeyCode::Enter)).redraw);
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(AdapterInvocation::OpenSession {
+                adapter_id,
+                capability,
+                ..
+            }) if adapter_id.as_str() == "provider-a" && capability.as_str() == "opaque.session.surface"
+        ));
+    }
+
+    #[test]
+    fn active_session_forwards_normalized_input_through_the_bounded_worker() {
+        let mut showcase = Showcase::new(Instant::now());
+        showcase.phase = Phase::Showcase;
+        showcase.section = Section::Adapters;
+        let adapter_id = AdapterId::new("provider-a").unwrap();
+        let session_id = dragonstui_adapter_host::SessionId::new("session-a").unwrap();
+        showcase.host_session(adapter_id.clone(), session_id.clone());
+        let (sender, receiver) = mpsc::sync_channel(1);
+        showcase.adapter_invocation_sender = Some(sender);
+
+        assert!(showcase.handle_key(key(KeyCode::Char('x'))).redraw);
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(AdapterInvocation::SessionInput {
+                adapter_id: actual_adapter,
+                session_id: actual_session,
+                data,
+            }) if actual_adapter == adapter_id && actual_session == session_id && data == "x"
+        ));
+    }
+
+    #[test]
+    fn hosted_session_applies_only_its_typed_output_events() {
+        let mut showcase = Showcase::new(Instant::now());
+        let adapter_id = AdapterId::new("adapter-a").unwrap();
+        let session_id = dragonstui_adapter_host::SessionId::new("session-a").unwrap();
+        showcase.host_session(adapter_id.clone(), session_id.clone());
+
+        assert!(showcase.apply_session_event(
+            dragonstui_adapter_host::AdapterSessionEvent::Output {
+                adapter_id: adapter_id.clone(),
+                session_id: session_id.clone(),
+                data: "first output".to_owned(),
+            }
+        ));
+        assert!(!showcase.apply_session_event(
+            dragonstui_adapter_host::AdapterSessionEvent::Output {
+                adapter_id,
+                session_id: dragonstui_adapter_host::SessionId::new("other-session").unwrap(),
+                data: "ignored output".to_owned(),
+            }
+        ));
+        assert_eq!(
+            showcase.active_session.as_ref().unwrap().host.lines(),
+            vec!["first output"]
+        );
+        showcase.phase = Phase::Showcase;
+        showcase.section = Section::Adapters;
+        let rendered = showcase_view(Size::new(120, 32), &mut showcase);
+        assert!(frame_contains(&rendered.frame, "Interactive Session"));
+        assert!(frame_contains(&rendered.frame, "first output"));
+    }
+
+    #[test]
+    fn active_session_drains_background_typed_events() {
+        let started = Instant::now();
+        let mut showcase = Showcase::new(started);
+        showcase.phase = Phase::Showcase;
+        showcase.section = Section::Adapters;
+        let adapter_id = AdapterId::new("adapter-a").unwrap();
+        let session_id = SessionId::new("session-a").unwrap();
+        showcase.host_session(adapter_id.clone(), session_id.clone());
+        let (results, result_receiver) = mpsc::sync_channel(1);
+        showcase.session_event_results = Some(result_receiver);
+        results
+            .send(SessionEventMessage::Event(AdapterSessionEvent::Output {
+                adapter_id,
+                session_id,
+                data: "polled output".to_owned(),
+            }))
+            .unwrap();
+
+        assert!(showcase.advance(started + Duration::from_millis(1)));
+        assert_eq!(
+            showcase.active_session.as_ref().unwrap().host.lines(),
+            vec!["polled output"]
+        );
+    }
+
+    #[test]
+    fn session_event_polling_does_not_consume_input_worker_capacity() {
+        let started = Instant::now();
+        let mut showcase = Showcase::new(started);
+        showcase.phase = Phase::Showcase;
+        showcase.section = Section::Adapters;
+        let adapter_id = AdapterId::new("adapter-a").unwrap();
+        let session_id = SessionId::new("session-a").unwrap();
+        showcase.host_session(adapter_id.clone(), session_id.clone());
+        let (sender, receiver) = mpsc::sync_channel(1);
+        showcase.adapter_invocation_sender = Some(sender);
+
+        let _ = showcase.advance(started + Duration::from_millis(1));
+        assert!(showcase.handle_key(key(KeyCode::Char('x'))).redraw);
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(AdapterInvocation::SessionInput {
+                adapter_id: actual_adapter,
+                session_id: actual_session,
+                data,
+            }) if actual_adapter == adapter_id && actual_session == session_id && data == "x"
+        ));
+    }
+
+    #[test]
+    fn active_session_alt_x_requests_typed_close_through_the_bounded_worker() {
+        let mut showcase = Showcase::new(Instant::now());
+        showcase.phase = Phase::Showcase;
+        showcase.section = Section::Adapters;
+        let adapter_id = AdapterId::new("adapter-a").unwrap();
+        let session_id = SessionId::new("session-a").unwrap();
+        showcase.host_session(adapter_id.clone(), session_id.clone());
+        let (sender, receiver) = mpsc::sync_channel(1);
+        showcase.adapter_invocation_sender = Some(sender);
+
+        assert!(
+            showcase
+                .handle_key(KeyEvent {
+                    code: KeyCode::Char('x'),
+                    modifiers: KeyModifiers {
+                        alt: true,
+                        ..KeyModifiers::default()
+                    },
+                })
+                .redraw
+        );
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(AdapterInvocation::CloseSession {
+                adapter_id: actual_adapter,
+                session_id: actual_session,
+            }) if actual_adapter == adapter_id && actual_session == session_id
+        ));
+    }
+
+    #[test]
+    fn close_pending_session_renders_a_typed_lifecycle_status() {
+        let mut showcase = Showcase::new(Instant::now());
+        showcase.phase = Phase::Showcase;
+        showcase.section = Section::Adapters;
+        showcase.host_session(
+            AdapterId::new("adapter-a").unwrap(),
+            SessionId::new("session-a").unwrap(),
+        );
+        showcase.active_session.as_mut().unwrap().close_pending = true;
+
+        let rendered = showcase_view(Size::new(120, 32), &mut showcase);
+
+        assert!(frame_contains(&rendered.frame, "Close requested"));
+    }
+
+    #[test]
+    fn typed_session_exit_returns_to_the_declared_session_browser() {
+        let mut showcase = Showcase::new(Instant::now());
+        showcase.phase = Phase::Showcase;
+        showcase.section = Section::Adapters;
+        showcase.adapter_browser_mode = AdapterBrowserMode::Sessions;
+        showcase.adapter_sessions_adapter = Some(AdapterId::new("adapter-a").unwrap());
+        let adapter_id = AdapterId::new("adapter-a").unwrap();
+        let session_id = SessionId::new("session-a").unwrap();
+        showcase.host_session(adapter_id.clone(), session_id.clone());
+
+        assert!(showcase.apply_session_event(AdapterSessionEvent::Exited {
+            adapter_id,
+            session_id,
+            exit_code: Some(0),
+        }));
+
+        assert!(showcase.active_session.is_none());
+        assert_eq!(showcase.adapter_browser_mode, AdapterBrowserMode::Sessions);
+        assert_eq!(showcase.focus.current(), Some(TABLE_FOCUS));
+        assert_eq!(
+            showcase.adapter_action_status.as_deref(),
+            Some("Interactive session exited with code 0")
+        );
+    }
+
+    #[test]
+    fn typed_session_disconnect_returns_to_the_declared_session_browser() {
+        let mut showcase = Showcase::new(Instant::now());
+        showcase.phase = Phase::Showcase;
+        showcase.section = Section::Adapters;
+        showcase.adapter_browser_mode = AdapterBrowserMode::Sessions;
+        showcase.adapter_sessions_adapter = Some(AdapterId::new("adapter-a").unwrap());
+        let adapter_id = AdapterId::new("adapter-a").unwrap();
+        let session_id = SessionId::new("session-a").unwrap();
+        showcase.host_session(adapter_id.clone(), session_id.clone());
+
+        assert!(
+            showcase.apply_session_event(AdapterSessionEvent::Disconnected {
+                adapter_id,
+                session_id,
+                reason: "adapter process crashed".to_owned(),
+            })
+        );
+
+        assert!(showcase.active_session.is_none());
+        assert_eq!(showcase.adapter_browser_mode, AdapterBrowserMode::Sessions);
+        assert_eq!(showcase.focus.current(), Some(TABLE_FOCUS));
+        assert_eq!(
+            showcase.adapter_action_status.as_deref(),
+            Some("Interactive session disconnected: adapter process crashed")
+        );
+    }
+
+    #[test]
+    fn session_event_worker_stops_and_joins() {
+        let (started, started_receiver) = mpsc::sync_channel(1);
+        let (_results, mut worker) = session_event_worker(move || {
+            let _ = started.try_send(());
+            Ok(Vec::new())
+        });
+
+        started_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        worker.stop();
+
+        assert!(worker.is_finished());
+    }
+
+    #[test]
+    fn session_shutdown_releases_the_active_host_and_joins_its_event_worker() {
+        let mut showcase = Showcase::new(Instant::now());
+        showcase.host_session(
+            AdapterId::new("adapter-a").unwrap(),
+            SessionId::new("session-a").unwrap(),
+        );
+        let (started, started_receiver) = mpsc::sync_channel(1);
+        let (results, worker) = session_event_worker(move || {
+            let _ = started.try_send(());
+            Ok(Vec::new())
+        });
+        showcase.session_event_results = Some(results);
+        showcase.session_event_worker = Some(worker);
+        started_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+
+        showcase.shutdown_sessions();
+
+        assert!(showcase.active_session.is_none());
+        assert!(showcase.session_event_results.is_none());
+        assert!(showcase.session_event_worker.is_none());
+    }
+
+    #[test]
+    fn active_session_resize_uses_the_rendered_host_dimensions() {
+        let mut showcase = Showcase::new(Instant::now());
+        let adapter_id = AdapterId::new("adapter-a").unwrap();
+        let session_id = SessionId::new("session-a").unwrap();
+        showcase.host_session(adapter_id.clone(), session_id.clone());
+        let (sender, receiver) = mpsc::sync_channel(1);
+        showcase.adapter_invocation_sender = Some(sender);
+
+        assert!(showcase.resize_active_session(Size::new(80, 24)));
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(AdapterInvocation::SessionResize {
+                adapter_id: actual_adapter,
+                session_id: actual_session,
+                rows: 16,
+                columns: 77,
+            }) if actual_adapter == adapter_id && actual_session == session_id
+        ));
     }
 
     #[test]

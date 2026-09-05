@@ -9,8 +9,9 @@ use std::{
 };
 
 use dragonstui_adapter_host::{
-    ActionId, AdapterAction, AdapterId, AdapterInfo, Capability, ErrorMessage, Event, Observation,
-    ObservationSeverity, ObservationStatus, PROTOCOL_VERSION, ProtocolMessage, Response,
+    ActionId, AdapterAction, AdapterId, AdapterInfo, AdapterSession, Capability, ErrorMessage,
+    Event, Observation, ObservationSeverity, ObservationStatus, PROTOCOL_VERSION, ProtocolMessage,
+    Response, SessionClose, SessionExit, SessionId, SessionOpened, SessionOutput, SessionResize,
     ShutdownAck,
 };
 use serde_json::{Value, json};
@@ -85,6 +86,11 @@ fn main() {
         ),
         "actions" => protocol_mode(
             MockBehavior::Actions,
+            &options.id,
+            options.action_marker.as_deref(),
+        ),
+        "sessions" => protocol_mode(
+            MockBehavior::Sessions,
             &options.id,
             options.action_marker.as_deref(),
         ),
@@ -232,6 +238,7 @@ fn protocol_mode(
             adapter_id,
             vec!["cap.before", "cap.shared"],
         ),
+        MockBehavior::Sessions => (PROTOCOL_VERSION, adapter_id, vec!["fixture.terminal"]),
         MockBehavior::Normal
         | MockBehavior::Events
         | MockBehavior::LiveEvents
@@ -283,6 +290,15 @@ fn protocol_mode(
     } else {
         Vec::new()
     };
+    let sessions = if behavior == MockBehavior::Sessions {
+        vec![AdapterSession {
+            capability: Capability::new("fixture.terminal").unwrap(),
+            label: "Interactive fixture".to_owned(),
+            description: Some("Deterministic provider-declared session".to_owned()),
+        }]
+    } else {
+        Vec::new()
+    };
     let info = AdapterInfo {
         protocol,
         id: AdapterId::new(id).unwrap(),
@@ -292,6 +308,7 @@ fn protocol_mode(
             .map(|capability| Capability::new(capability).unwrap())
             .collect(),
         actions,
+        sessions,
     };
     emit(&ProtocolMessage::AdapterInfo(info));
 
@@ -398,6 +415,51 @@ fn protocol_mode(
             continue;
         };
         match message {
+            ProtocolMessage::SessionOpen(open) if behavior == MockBehavior::Sessions => {
+                emit(&ProtocolMessage::SessionOpened(SessionOpened {
+                    protocol: PROTOCOL_VERSION,
+                    id: open.id,
+                    session_id: SessionId::new("fixture-session").unwrap(),
+                }));
+            }
+            ProtocolMessage::SessionInput(input) if behavior == MockBehavior::Sessions => {
+                if input.data == "fixture.crash-provider" {
+                    process::exit(26);
+                } else if input.data == "fixture.exit-nonzero" {
+                    emit(&ProtocolMessage::SessionExit(SessionExit {
+                        protocol: PROTOCOL_VERSION,
+                        session_id: input.session_id,
+                        exit_code: Some(7),
+                    }));
+                } else {
+                    emit(&ProtocolMessage::SessionOutput(SessionOutput {
+                        protocol: PROTOCOL_VERSION,
+                        session_id: input.session_id,
+                        data: format!("echo:{}", input.data),
+                    }));
+                }
+            }
+            ProtocolMessage::SessionResize(SessionResize {
+                session_id,
+                rows,
+                columns,
+                ..
+            }) if behavior == MockBehavior::Sessions => {
+                emit(&ProtocolMessage::SessionOutput(SessionOutput {
+                    protocol: PROTOCOL_VERSION,
+                    session_id,
+                    data: format!("resized:{rows}x{columns}"),
+                }));
+            }
+            ProtocolMessage::SessionClose(SessionClose { session_id, .. })
+                if behavior == MockBehavior::Sessions =>
+            {
+                emit(&ProtocolMessage::SessionExit(SessionExit {
+                    protocol: PROTOCOL_VERSION,
+                    session_id,
+                    exit_code: None,
+                }));
+            }
             ProtocolMessage::Request(request) => {
                 if behavior == MockBehavior::CrashOnRequest {
                     process::exit(25);
@@ -658,6 +720,7 @@ enum MockBehavior {
     SemanticEvents,
     ObservabilityEvents,
     Actions,
+    Sessions,
     StressEvents,
     OutOfOrder,
     UnknownResponse,

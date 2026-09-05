@@ -67,6 +67,17 @@ fn handshake_shared_capabilities_mock_reports_generic_capability_contracts() {
 }
 
 #[test]
+fn handshake_exposes_only_provider_declared_session_surfaces() {
+    let runtime = AdapterRuntime::start(manifest("mock"), config("sessions")).unwrap();
+
+    assert_eq!(runtime.sessions().len(), 1);
+    assert_eq!(
+        runtime.sessions()[0].capability.as_str(),
+        "fixture.terminal"
+    );
+}
+
+#[test]
 fn handshake_rejects_incompatible_failed_crashed_and_timeout_adapters() {
     let cases = [
         ("bad-protocol", "incompatible"),

@@ -7,7 +7,8 @@ use std::{
 
 use crate::{
     ActionId, AdapterAction, AdapterDiagnostics, AdapterId, AdapterLiveData, AdapterManager,
-    AdapterOperation, AdapterState, DiscoveryError, LocalAdapterRoot, ManagerError, RpcOutcome,
+    AdapterOperation, AdapterSession, AdapterSessionEvent, AdapterState, Capability,
+    DiscoveryError, LocalAdapterRoot, ManagerError, RpcOutcome, SessionId,
 };
 use serde_json::Value;
 
@@ -90,6 +91,11 @@ impl AdapterController {
         self.manager.actions(id).map_err(ControllerError::Manager)
     }
 
+    /// Returns only the session declarations provided by a running adapter.
+    pub fn sessions(&self, id: &AdapterId) -> Result<Vec<AdapterSession>, ControllerError> {
+        self.manager.sessions(id).map_err(ControllerError::Manager)
+    }
+
     /// Invokes one exact producer-declared action through the existing runtime
     /// request queue and returns its typed generic RPC outcome.
     pub fn invoke_action(
@@ -106,6 +112,59 @@ impl AdapterController {
         self.manager
             .wait_response(id, &request_id, Duration::from_secs(2))
             .map_err(ControllerError::Manager)
+    }
+
+    /// Opens one provider-declared interactive session through the manager-owned
+    /// adapter runtime. The controller remains the lifecycle authority.
+    pub fn open_session(
+        &mut self,
+        id: &AdapterId,
+        capability: &Capability,
+        rows: u16,
+        columns: u16,
+    ) -> Result<SessionId, ControllerError> {
+        self.ensure_discovered(id)?;
+        self.manager
+            .open_session(id, capability, rows, columns, Duration::from_secs(2))
+            .map_err(ControllerError::Manager)
+    }
+
+    pub fn input_session(
+        &mut self,
+        id: &AdapterId,
+        session_id: &SessionId,
+        data: String,
+    ) -> Result<(), ControllerError> {
+        self.manager
+            .input_session(id, session_id, data)
+            .map_err(ControllerError::Manager)
+    }
+
+    pub fn resize_session(
+        &mut self,
+        id: &AdapterId,
+        session_id: &SessionId,
+        rows: u16,
+        columns: u16,
+    ) -> Result<(), ControllerError> {
+        self.manager
+            .resize_session(id, session_id, rows, columns)
+            .map_err(ControllerError::Manager)
+    }
+
+    pub fn close_session(
+        &mut self,
+        id: &AdapterId,
+        session_id: &SessionId,
+    ) -> Result<(), ControllerError> {
+        self.manager
+            .close_session(id, session_id)
+            .map_err(ControllerError::Manager)
+    }
+
+    /// Drains bounded typed session output without reusing observability data.
+    pub fn take_session_events(&mut self) -> Vec<AdapterSessionEvent> {
+        self.manager.take_session_events()
     }
 
     pub fn poll(&mut self, per_adapter_timeout: Duration) {

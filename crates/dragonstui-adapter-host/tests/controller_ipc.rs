@@ -3,20 +3,27 @@ use std::{
     io::{BufRead, BufReader, Write},
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::{
+        Mutex, MutexGuard,
+        atomic::{AtomicUsize, Ordering},
+    },
     thread,
     time::Duration,
 };
 
 use dragonstui_adapter_host::{
-    ActionId, AdapterController, AdapterId, AdapterManagementOutcome, ControllerActionClient,
-    ControllerActionOutcome, ControllerClient, ControllerIpcCommand, ControllerIpcServer,
-    ControllerIpcStatus, ControllerManagementClient, ControllerManagementClientError,
-    ControllerManagementRequest, ControllerManagementResponse, ControllerOperationClient,
-    ObservationKind, OperationState, PROTOCOL_VERSION, local_controller_diagnostics,
+    ActionId, AdapterController, AdapterId, AdapterManagementOutcome, AdapterSessionEvent,
+    ControllerActionClient, ControllerActionOutcome, ControllerClient, ControllerIpcCommand,
+    ControllerIpcServer, ControllerIpcStatus, ControllerManagementClient,
+    ControllerManagementClientError, ControllerManagementRequest, ControllerManagementResponse,
+    ControllerOperationClient, ControllerSessionClient, ObservationKind, OperationState,
+    PROTOCOL_VERSION, local_controller_diagnostics, local_controller_session_client,
 };
 
 static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+// The fixture starts a real copied binary. Serializing only these process-backed
+// cases keeps their handshake deadline independent of test-harness scheduling.
+static MOCK_PROCESS_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn typed_management_transport_round_trips_without_dispatching() {
@@ -43,10 +50,12 @@ fn typed_management_transport_round_trips_without_dispatching() {
 
 struct TempRoot {
     path: PathBuf,
+    _process_test_lock: MutexGuard<'static, ()>,
 }
 
 impl TempRoot {
     fn new() -> Self {
+        let process_test_lock = MOCK_PROCESS_TEST_LOCK.lock().unwrap();
         let nonce = TEMP_COUNTER.fetch_add(1, Ordering::SeqCst);
         let path = std::env::temp_dir().join(format!(
             "dragonstui-controller-ipc-diagnostics-{}-{nonce}",
@@ -64,7 +73,10 @@ impl TempRoot {
             ),
         )
         .unwrap();
-        Self { path }
+        Self {
+            path,
+            _process_test_lock: process_test_lock,
+        }
     }
 
     fn semantic_events() -> Self {
@@ -87,6 +99,19 @@ impl TempRoot {
         fs::write(
             bin.join("mock"),
             "#!/bin/sh\nexec \"$(dirname \"$0\")/mock-fixture\" --mode actions \"$@\"\n",
+        )
+        .unwrap();
+        make_executable(&bin.join("mock"));
+        root
+    }
+
+    fn sessions() -> Self {
+        let root = Self::new();
+        let bin = root.path.join("mock/bin");
+        fs::rename(bin.join("mock"), bin.join("mock-fixture")).unwrap();
+        fs::write(
+            bin.join("mock"),
+            "#!/bin/sh\nexec \"$(dirname \"$0\")/mock-fixture\" --mode sessions \"$@\"\n",
         )
         .unwrap();
         make_executable(&bin.join("mock"));
@@ -215,6 +240,37 @@ fn controller_ipc_returns_live_diagnostics_only_to_authenticated_clients() {
     assert!(live_data.disconnects.is_empty());
 
     client.stop(&id).unwrap();
+    worker.join().unwrap().unwrap();
+}
+
+#[test]
+fn local_session_client_reads_the_authenticated_loopback_endpoint() {
+    let root = TempRoot::sessions();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let controller = AdapterController::new(&root.path, Duration::from_millis(200), 8);
+    let server = ControllerIpcServer::new(listener, controller, "correct-token");
+    let worker = thread::spawn(move || server.serve_forever());
+    let id = AdapterId::new("mock").unwrap();
+    let capability = dragonstui_adapter_host::Capability::new("fixture.terminal").unwrap();
+    let legacy = ControllerClient::new(address, "correct-token");
+
+    fs::create_dir_all(root.path.join(".controller")).unwrap();
+    fs::write(
+        root.path.join(".controller/endpoint.json"),
+        format!(r#"{{"address":"{address}","token":"correct-token"}}"#),
+    )
+    .unwrap();
+    legacy.start(&id).unwrap();
+    let client = local_controller_session_client(&root.path)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        client.open(&id, &capability, 24, 80).unwrap().as_str(),
+        "fixture-session"
+    );
+
+    legacy.shutdown().unwrap();
     worker.join().unwrap().unwrap();
 }
 
@@ -554,6 +610,216 @@ fn authenticated_action_client_preserves_producer_confirmation_policy() {
             ("fixture.inspect".to_owned(), true),
             ("fixture.action.delta".to_owned(), false),
         ]
+    );
+
+    legacy.shutdown().unwrap();
+    worker.join().unwrap().unwrap();
+}
+
+#[test]
+fn authenticated_session_client_opens_provider_declared_session_through_controller() {
+    let root = TempRoot::sessions();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let controller = AdapterController::new(&root.path, Duration::from_millis(200), 8);
+    let server = ControllerIpcServer::new(listener, controller, "correct-token");
+    let worker = thread::spawn(move || server.serve_forever());
+    let id = AdapterId::new("mock").unwrap();
+    let capability = dragonstui_adapter_host::Capability::new("fixture.terminal").unwrap();
+    let legacy = ControllerClient::new(address, "correct-token");
+    let client = ControllerSessionClient::new(address, "correct-token");
+
+    legacy.start(&id).unwrap();
+    assert_eq!(
+        client.open(&id, &capability, 24, 80).unwrap().as_str(),
+        "fixture-session"
+    );
+    assert!(
+        ControllerSessionClient::new(address, "wrong-token")
+            .open(&id, &capability, 24, 80)
+            .unwrap_err()
+            .to_string()
+            .contains("authentication failed")
+    );
+
+    legacy.shutdown().unwrap();
+    worker.join().unwrap().unwrap();
+}
+
+#[test]
+fn authenticated_session_client_discovers_only_provider_declared_session_surfaces() {
+    let root = TempRoot::sessions();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let controller = AdapterController::new(&root.path, Duration::from_millis(200), 8);
+    let server = ControllerIpcServer::new(listener, controller, "correct-token");
+    let worker = thread::spawn(move || server.serve_forever());
+    let id = AdapterId::new("mock").unwrap();
+    let legacy = ControllerClient::new(address, "correct-token");
+    let client = ControllerSessionClient::new(address, "correct-token");
+
+    legacy.start(&id).unwrap();
+    let sessions = client.sessions(&id).unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].capability.as_str(), "fixture.terminal");
+    assert_eq!(sessions[0].label, "Interactive fixture");
+
+    legacy.shutdown().unwrap();
+    worker.join().unwrap().unwrap();
+}
+
+#[test]
+fn authenticated_session_input_returns_provider_output_through_controller() {
+    let root = TempRoot::sessions();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let controller = AdapterController::new(&root.path, Duration::from_millis(200), 8);
+    let server = ControllerIpcServer::new(listener, controller, "correct-token");
+    let worker = thread::spawn(move || server.serve_forever());
+    let id = AdapterId::new("mock").unwrap();
+    let capability = dragonstui_adapter_host::Capability::new("fixture.terminal").unwrap();
+    let legacy = ControllerClient::new(address, "correct-token");
+    let client = ControllerSessionClient::new(address, "correct-token");
+
+    legacy.start(&id).unwrap();
+    let session = client.open(&id, &capability, 24, 80).unwrap();
+    client.input(&id, &session, "alpha").unwrap();
+    assert_eq!(
+        client.events().unwrap(),
+        vec![AdapterSessionEvent::Output {
+            adapter_id: id.clone(),
+            session_id: session,
+            data: "echo:alpha".to_owned(),
+        }]
+    );
+
+    legacy.shutdown().unwrap();
+    worker.join().unwrap().unwrap();
+}
+
+#[test]
+fn authenticated_session_resize_reaches_provider_through_controller() {
+    let root = TempRoot::sessions();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let controller = AdapterController::new(&root.path, Duration::from_millis(200), 8);
+    let server = ControllerIpcServer::new(listener, controller, "correct-token");
+    let worker = thread::spawn(move || server.serve_forever());
+    let id = AdapterId::new("mock").unwrap();
+    let capability = dragonstui_adapter_host::Capability::new("fixture.terminal").unwrap();
+    let legacy = ControllerClient::new(address, "correct-token");
+    let client = ControllerSessionClient::new(address, "correct-token");
+
+    legacy.start(&id).unwrap();
+    let session = client.open(&id, &capability, 24, 80).unwrap();
+    client.resize(&id, &session, 10, 40).unwrap();
+    assert_eq!(
+        client.events().unwrap(),
+        vec![AdapterSessionEvent::Output {
+            adapter_id: id.clone(),
+            session_id: session,
+            data: "resized:10x40".to_owned(),
+        }]
+    );
+
+    legacy.shutdown().unwrap();
+    worker.join().unwrap().unwrap();
+}
+
+#[test]
+fn authenticated_session_close_surfaces_provider_exit_through_controller() {
+    let root = TempRoot::sessions();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let controller = AdapterController::new(&root.path, Duration::from_millis(200), 8);
+    let server = ControllerIpcServer::new(listener, controller, "correct-token");
+    let worker = thread::spawn(move || server.serve_forever());
+    let id = AdapterId::new("mock").unwrap();
+    let capability = dragonstui_adapter_host::Capability::new("fixture.terminal").unwrap();
+    let legacy = ControllerClient::new(address, "correct-token");
+    let client = ControllerSessionClient::new(address, "correct-token");
+
+    legacy.start(&id).unwrap();
+    let session = client.open(&id, &capability, 24, 80).unwrap();
+    client.close(&id, &session).unwrap();
+    assert_eq!(
+        client.events().unwrap(),
+        vec![AdapterSessionEvent::Exited {
+            adapter_id: id,
+            session_id: session,
+            exit_code: None,
+        }]
+    );
+
+    legacy.shutdown().unwrap();
+    worker.join().unwrap().unwrap();
+}
+
+#[test]
+fn authenticated_session_surfaces_nonzero_provider_exit_without_output_inference() {
+    let root = TempRoot::sessions();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let controller = AdapterController::new(&root.path, Duration::from_millis(200), 8);
+    let server = ControllerIpcServer::new(listener, controller, "correct-token");
+    let worker = thread::spawn(move || server.serve_forever());
+    let id = AdapterId::new("mock").unwrap();
+    let capability = dragonstui_adapter_host::Capability::new("fixture.terminal").unwrap();
+    let legacy = ControllerClient::new(address, "correct-token");
+    let client = ControllerSessionClient::new(address, "correct-token");
+
+    legacy.start(&id).unwrap();
+    let session = client.open(&id, &capability, 24, 80).unwrap();
+    client.input(&id, &session, "fixture.exit-nonzero").unwrap();
+    assert_eq!(
+        client.events().unwrap(),
+        vec![AdapterSessionEvent::Exited {
+            adapter_id: id,
+            session_id: session,
+            exit_code: Some(7),
+        }]
+    );
+
+    legacy.shutdown().unwrap();
+    worker.join().unwrap().unwrap();
+}
+
+#[test]
+fn authenticated_session_surfaces_provider_disconnect_with_the_owned_session_identity() {
+    let root = TempRoot::sessions();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let controller = AdapterController::new(&root.path, Duration::from_millis(200), 8);
+    let server = ControllerIpcServer::new(listener, controller, "correct-token");
+    let worker = thread::spawn(move || server.serve_forever());
+    let id = AdapterId::new("mock").unwrap();
+    let capability = dragonstui_adapter_host::Capability::new("fixture.terminal").unwrap();
+    let legacy = ControllerClient::new(address, "correct-token");
+    let client = ControllerSessionClient::new(address, "correct-token");
+
+    legacy.start(&id).unwrap();
+    let session = client.open(&id, &capability, 24, 80).unwrap();
+    client
+        .input(&id, &session, "fixture.crash-provider")
+        .unwrap();
+    let mut events = Vec::new();
+    for _ in 0..8 {
+        events = client.events().unwrap();
+        if !events.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert!(
+        matches!(
+            events.as_slice(),
+            [AdapterSessionEvent::Disconnected {
+                adapter_id,
+                session_id,
+                reason,
+            }] if adapter_id == &id && session_id == &session && reason == "adapter process crashed"
+        ),
+        "{events:?}"
     );
 
     legacy.shutdown().unwrap();
