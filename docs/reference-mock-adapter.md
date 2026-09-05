@@ -2,7 +2,7 @@
 
 The existing `dragonstui-adapter-host-mock` binary has a combined `--mode reference` provider. One external process exposes the contracts implemented through M65: generic RPC, typed observations, declared actions and interactive echo sessions. Docker, Git, a network service and credentials for an external provider are not required.
 
-This is deliberately a **fixture provider**. It does not execute input as shell commands, provide a terminal emulator, deploy anything, or implement a domain adapter. Protocol v1 is unchanged. An external-adapter conformance runner (M67) and SDK specification stabilization (M68) are separate work.
+This is deliberately a **fixture provider**. It does not execute input as shell commands, provide a terminal emulator, deploy anything, or implement a domain adapter. Protocol v1 is unchanged. The separate [M67 conformance runner](adapter-conformance.md) can exercise this provider through an explicit example profile; SDK specification stabilization (M68) remains separate work.
 
 ## Build and create an isolated adapter root
 

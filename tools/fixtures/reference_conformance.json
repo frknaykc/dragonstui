@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "requests": [
+    {"name": "echo", "operation": "test.echo", "payload": {"text": "M67", "nested": [1, true, null]}, "expect": "response", "response_payload": {"text": "M67", "nested": [1, true, null]}},
+    {"name": "stream", "operation": "test.stream", "payload": {}, "expect": "response", "response_payload": {"streamed": true}},
+    {"name": "declared-error", "operation": "test.fail", "payload": {}, "expect": "error", "error_code": "test_failed"},
+    {"name": "alpha", "operation": "test.echo", "action": "fixture.action.alpha", "payload": {}, "expect": "response", "response_payload": {"outcome": "accepted"}},
+    {"name": "confirmed", "operation": "test.echo", "action": "fixture.inspect", "confirmed": true, "payload": {}, "expect": "response", "response_payload": {"outcome": "confirmed"}},
+    {"name": "delayed", "operation": "test.echo", "action": "fixture.action.delta", "payload": {}, "expect": "response", "response_payload": {"outcome": "delayed"}}
+  ],
+  "session": {
+    "capability": "fixture.terminal", "rows": 24, "columns": 80,
+    "input": "conformance", "expect_output_contains": "echo:conformance",
+    "resize": {"rows": 30, "columns": 100}, "exit_code": null
+  },
+  "events": {"minimum": 16, "observation_types": ["log", "metric", "status", "event", "error"], "require_generic": true}
+}
