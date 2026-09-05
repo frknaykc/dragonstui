@@ -1,5 +1,7 @@
 # DragonsTUI Adapter Protocol v1
 
+For implementation guidance, exact identifier/numeric bounds, default/null behavior and lifecycle acceptance across Rust/Go/Python, see the [Adapter SDK Specification](adapter-sdk-specification.md). It documents the existing v1 implementation; it does not introduce a new protocol or SDK package.
+
 Protocol v1 is newline-delimited JSON over a supervised adapter child process's stdin and stdout. Exactly one JSON object is emitted per line. The host writes `hello`, `request`, `session_open`, `session_input`, `session_resize`, `session_close`, and `shutdown`; adapter stdout returns `adapter_info`, `response`, `error`, `event`, `session_opened`, `session_output`, `session_exit`, and `shutdown_ack`. Adapter stderr is diagnostics only and is never interpreted as protocol.
 
 Every envelope has an explicit numeric `protocol` field. The M24–M34 host supports `1`; compatibility is established during handshake rather than assumed from a static manifest.

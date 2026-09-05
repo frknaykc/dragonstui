@@ -76,4 +76,4 @@ The real Rust provider test requires a built debug mock or `DRAGONSTUI_CONFORMAN
 
 The Unix Rust integration test invokes `python3` and compares the Python parser/validator with the actual `serde_json::from_str::<ProtocolMessage>` implementation over a finite corpus. It is a test-time Python requirement, not a runtime dependency of the host or core framework. Recognized duplicate typed fields are rejected while opaque/additive duplicates retain the codec's tolerated behavior. Number decoding follows the current default serde_json feature configuration, including negative zero and overflow behavior; dependency/feature changes require rerunning parity, not assuming compatibility. The corpus is regression coverage, not proof over every JSON input.
 
-M68 language SDK/specification work and M69–M71 stress, recovery and host security-limit work remain separate milestones.
+The [M68 SDK specification](adapter-sdk-specification.md) documents language implementation guidance and existing contract boundaries; it does not publish SDK libraries. M69–M71 stress, recovery and host security-limit work remain separate milestones.
