@@ -10994,9 +10994,32 @@ mod tests {
         .unwrap();
         let (start_ready, start_started) = mpsc::channel();
         let (release_start, start_release) = mpsc::channel();
+        let (stop_daemon, daemon_stop) = mpsc::channel();
+        listener.set_nonblocking(true).unwrap();
         let daemon = thread::spawn(move || {
-            for _ in 0..3 {
-                let (mut stream, _) = listener.accept().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            // Refreshes may coalesce: request count is not a shutdown signal.
+            loop {
+                match daemon_stop.try_recv() {
+                    Ok(()) | Err(mpsc::TryRecvError::Disconnected) => break,
+                    Err(mpsc::TryRecvError::Empty) => {}
+                }
+                assert!(Instant::now() < deadline, "fixture shutdown timed out");
+                let (mut stream, _) = match listener.accept() {
+                    Ok(connection) => connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(1));
+                        continue;
+                    }
+                    Err(error) => panic!("fixture accept failed: {error}"),
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(1)))
+                    .unwrap();
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(1)))
+                    .unwrap();
                 let mut request = String::new();
                 BufReader::new(&stream).read_line(&mut request).unwrap();
                 if request.contains("\"operation\":\"diagnostics\"") {
@@ -11004,7 +11027,7 @@ mod tests {
                 } else {
                     assert!(request.contains("\"operation\":\"start\""));
                     start_ready.send(()).unwrap();
-                    start_release.recv().unwrap();
+                    start_release.recv_timeout(Duration::from_secs(2)).unwrap();
                     stream.write_all(b"{\"status\":{\"Management\":{\"result\":\"lifecycle\",\"outcome\":{\"Started\":{\"id\":\"adapter-a\"}}}},\"error\":null}\n").unwrap();
                 }
             }
@@ -11042,6 +11065,7 @@ mod tests {
 
         release_start.send(()).unwrap();
         drop(showcase);
+        stop_daemon.send(()).unwrap();
         daemon.join().unwrap();
         std::fs::remove_dir_all(root).unwrap();
         assert!(conflict_visible, "conflict result was not rendered");
