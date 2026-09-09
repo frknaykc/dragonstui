@@ -1,0 +1,865 @@
+{
+  "platform": "macOS-26.6.2-arm64-arm-64bit",
+  "rustc": "rustc 1.95.0 (59807616e 2026-04-14)\nbinary: rustc\ncommit-hash: 59807616e1fa2540724bfbac14d7976d7e4a3860\ncommit-date: 2026-04-14\nhost: aarch64-apple-darwin\nrelease: 1.95.0\nLLVM version: 22.1.2",
+  "source_sha256": {
+    "crates/dragonstui-adapter-host/src/runtime.rs": "ee4d4dc0b126153d649aa4399fdaece013b4e545f03f929c195fd550fe0a21f8",
+    "crates/dragonstui-adapter-host/src/registry.rs": "50486fe29c661b33ff8c99bd93b329fb038ee10b3fc52b6601fbb875dd871a3d",
+    "crates/dragonstui-adapter-host/src/protocol.rs": "538a7417518d74a0b33130bd2ed35affca813818bb0787b7f70bda08e0439c92",
+    "crates/dragonstui-adapter-host/src/controller.rs": "c567df8f85db8bd4804546f85f9068cd0e53bebca1135e3ec41f9615a87a7010",
+    "crates/dragonstui-adapter-host/src/discovery.rs": "41bd8481e32ecb6acbca403be479f0ad81c6f73ff3e5f1aeabfd646aa2dc9b66",
+    "crates/dragonstui-adapter-host/src/lib.rs": "e37a939be91a91d7f40280bded765c03cc359f44fd1dc0b96c7f924c4927bef4",
+    "crates/dragonstui-adapter-host/src/limits.rs": "f334978256d841604177186d1949b96808d91e95d7744ad48cd67a033f26e73a",
+    "crates/dragonstui-adapter-host/src/manifest.rs": "69108974b0442835f1369ca61cf470bca3ed93cd8c4524e5d7939b29832b7712",
+    "crates/dragonstui-adapter-host/src/manager.rs": "a3d30a539128d563952e743dbc070f68102a81189ee4a3044f8e5361ae2e8ab0",
+    "crates/dragonstui-adapter-host/src/controller_ipc.rs": "d9c5c93da5745f103c30c7008f84003e62b009db3e64cdfdc6ddbaa832655876",
+    "crates/dragonstui-adapter-host/src/process.rs": "27a9bf673588d9b633b3db7b90f7e119e0e596e14bc63e5b5ed0363530f1c1f2",
+    "crates/dragonstui-adapter-host/src/management.rs": "6ba4fb19bb6769d92f93f75df2abd57a5f90ed186eaaf665ae08ebf72d83a9b9",
+    "crates/dragonstui-adapter-host/src/operations.rs": "2bdbe47e5a9c051a3b66a4b3fdf6cad624c14110b82169a3c308ac7795201c39",
+    "crates/dragonstui-adapter-host/src/installer.rs": "9a7d8e3c735d9e784a783df264e143bccfb6a252125e6237e7dc843c83f58d8a",
+    "crates/dragonstui-adapter-host/src/capabilities.rs": "e0e16e7e38ed1dbbab1088df68ac2d75ae954c0396506527f64be4750231bedc",
+    "crates/dragonstui-adapter-host/src/bin/dragonstui_adapter_host_mock.rs": "8949525494e7b1fb3e5f723e1d99e3d9c55d71326a45c2fbbd572d7e5b1e4650",
+    "crates/dragonstui-adapter-host/src/bin/dragonstui_adapter.rs": "4962b6f3e7d555c435a5c1bd8b7f120447eda22cb995bb70089d351f1cfd313d",
+    "crates/dragonstui-adapter-host/tests/performance.rs": "aaf2f2b03e3ab65886249e4fedef38c5737ca4372e498251484f41bcab6a21c0",
+    "Cargo.lock": "d390a619ddd4ac3cd77db22c3ff6f67fe1de51fdc50966e3b6921c02f5348132",
+    "Cargo.toml": "ef188e5429bb5ad2f1283869347b45cba87b6ff61ad3f41c2b4aef2898acfb5a",
+    "crates/dragonstui-adapter-host/Cargo.toml": "d1133745579418fb99a34a59de496611ee21e6e21f2347d1269d4c22a7373041"
+  },
+  "runs": [
+    [
+      {
+        "case": "serde",
+        "decode_ns_per_message": 997,
+        "encode_ns_per_message": 367,
+        "iterations": 1000,
+        "payload_bytes": 64,
+        "wire_bytes": 162
+      },
+      {
+        "case": "serde",
+        "decode_ns_per_message": 1906,
+        "encode_ns_per_message": 2588,
+        "iterations": 1000,
+        "payload_bytes": 4096,
+        "wire_bytes": 4194
+      },
+      {
+        "case": "serde",
+        "decode_ns_per_message": 6254,
+        "encode_ns_per_message": 19633,
+        "iterations": 1000,
+        "payload_bytes": 65536,
+        "wire_bytes": 65634
+      },
+      {
+        "adapters": 1,
+        "case": "idle_poll",
+        "iterations": 100,
+        "ns_per_poll": 615,
+        "per_adapter_timeout_ms": 0
+      },
+      {
+        "adapters": 1,
+        "case": "idle_poll",
+        "iterations": 100,
+        "ns_per_poll": 1257804,
+        "per_adapter_timeout_ms": 1
+      },
+      {
+        "adapters": 1,
+        "case": "test.echo",
+        "completed_per_adapter": [
+          100
+        ],
+        "dropped_events": 0,
+        "elapsed_seconds": 0.004152958,
+        "events": 0,
+        "events_per_second": 0.0,
+        "payload_bytes": 64,
+        "poll_calls": 2203,
+        "poll_total_ns": 2950806,
+        "rounds": 100,
+        "rpc_completed": 100,
+        "rpc_max_us": 111,
+        "rpc_p50_us": 41,
+        "rpc_p95_us": 59,
+        "rpc_per_second": 24079.222568588462
+      },
+      {
+        "adapters": 1,
+        "case": "test.echo",
+        "completed_per_adapter": [
+          100
+        ],
+        "dropped_events": 0,
+        "elapsed_seconds": 0.0034645,
+        "events": 0,
+        "events_per_second": 0.0,
+        "payload_bytes": 4096,
+        "poll_calls": 3032,
+        "poll_total_ns": 2429111,
+        "rounds": 100,
+        "rpc_completed": 100,
+        "rpc_max_us": 71,
+        "rpc_p50_us": 30,
+        "rpc_p95_us": 48,
+        "rpc_per_second": 28864.19396738346
+      },
+      {
+        "adapters": 1,
+        "case": "test.stream",
+        "completed_per_adapter": [
+          100
+        ],
+        "dropped_events": 0,
+        "elapsed_seconds": 0.013242666,
+        "events": 12900,
+        "events_per_second": 974124.0925354457,
+        "payload_bytes": 0,
+        "poll_calls": 22411,
+        "poll_total_ns": 8702813,
+        "rounds": 100,
+        "rpc_completed": 100,
+        "rpc_max_us": 595,
+        "rpc_p50_us": 112,
+        "rpc_p95_us": 230,
+        "rpc_per_second": 7551.349554538338
+      },
+      {
+        "adapters": 4,
+        "case": "idle_poll",
+        "iterations": 100,
+        "ns_per_poll": 863,
+        "per_adapter_timeout_ms": 0
+      },
+      {
+        "adapters": 4,
+        "case": "idle_poll",
+        "iterations": 100,
+        "ns_per_poll": 5042822,
+        "per_adapter_timeout_ms": 1
+      },
+      {
+        "adapters": 4,
+        "case": "test.echo",
+        "completed_per_adapter": [
+          100,
+          100,
+          100,
+          100
+        ],
+        "dropped_events": 0,
+        "elapsed_seconds": 0.003187917,
+        "events": 0,
+        "events_per_second": 0.0,
+        "payload_bytes": 64,
+        "poll_calls": 1596,
+        "poll_total_ns": 1965898,
+        "rounds": 100,
+        "rpc_completed": 400,
+        "rpc_max_us": 57,
+        "rpc_p50_us": 23,
+        "rpc_p95_us": 30,
+        "rpc_per_second": 125473.78115553196
+      },
+      {
+        "adapters": 4,
+        "case": "test.echo",
+        "completed_per_adapter": [
+          100,
+          100,
+          100,
+          100
+        ],
+        "dropped_events": 0,
+        "elapsed_seconds": 0.004036792,
+        "events": 0,
+        "events_per_second": 0.0,
+        "payload_bytes": 4096,
+        "poll_calls": 1621,
+        "poll_total_ns": 1992345,
+        "rounds": 100,
+        "rpc_completed": 400,
+        "rpc_max_us": 45,
+        "rpc_p50_us": 29,
+        "rpc_p95_us": 36,
+        "rpc_per_second": 99088.58321161952
+      },
+      {
+        "adapters": 4,
+        "case": "test.stream",
+        "completed_per_adapter": [
+          100,
+          100,
+          100,
+          100
+        ],
+        "dropped_events": 0,
+        "elapsed_seconds": 0.090273833,
+        "events": 51600,
+        "events_per_second": 571594.2071497064,
+        "payload_bytes": 0,
+        "poll_calls": 14179,
+        "poll_total_ns": 77401589,
+        "rounds": 100,
+        "rpc_completed": 400,
+        "rpc_max_us": 1541,
+        "rpc_p50_us": 849,
+        "rpc_p95_us": 1118,
+        "rpc_per_second": 4430.962846121755
+      },
+      {
+        "adapters": 8,
+        "case": "idle_poll",
+        "iterations": 100,
+        "ns_per_poll": 1745,
+        "per_adapter_timeout_ms": 0
+      },
+      {
+        "adapters": 8,
+        "case": "idle_poll",
+        "iterations": 100,
+        "ns_per_poll": 10037000,
+        "per_adapter_timeout_ms": 1
+      },
+      {
+        "adapters": 8,
+        "case": "test.echo",
+        "completed_per_adapter": [
+          100,
+          100,
+          100,
+          100,
+          100,
+          100,
+          100,
+          100
+        ],
+        "dropped_events": 0,
+        "elapsed_seconds": 0.008267416,
+        "events": 0,
+        "events_per_second": 0.0,
+        "payload_bytes": 64,
+        "poll_calls": 597,
+        "poll_total_ns": 4275442,
+        "rounds": 100,
+        "rpc_completed": 800,
+        "rpc_max_us": 462,
+        "rpc_p50_us": 40,
+        "rpc_p95_us": 154,
+        "rpc_per_second": 96765.42223108164
+      },
+      {
+        "adapters": 8,
+        "case": "test.echo",
+        "completed_per_adapter": [
+          100,
+          100,
+          100,
+          100,
+          100,
+          100,
+          100,
+          100
+        ],
+        "dropped_events": 0,
+        "elapsed_seconds": 0.0080335,
+        "events": 0,
+        "events_per_second": 0.0,
+        "payload_bytes": 4096,
+        "poll_calls": 523,
+        "poll_total_ns": 1996411,
+        "rounds": 100,
+        "rpc_completed": 800,
+        "rpc_max_us": 92,
+        "rpc_p50_us": 43,
+        "rpc_p95_us": 70,
+        "rpc_per_second": 99582.99620339826
+      },
+      {
+        "adapters": 8,
+        "case": "test.stream",
+        "completed_per_adapter": [
+          100,
+          100,
+          100,
+          100,
+          100,
+          100,
+          100,
+          100
+        ],
+        "dropped_events": 0,
+        "elapsed_seconds": 0.21962325,
+        "events": 103200,
+        "events_per_second": 469895.60531501105,
+        "payload_bytes": 0,
+        "poll_calls": 14419,
+        "poll_total_ns": 193281411,
+        "rounds": 100,
+        "rpc_completed": 800,
+        "rpc_max_us": 3487,
+        "rpc_p50_us": 1939,
+        "rpc_p95_us": 3254,
+        "rpc_per_second": 3642.601591589233
+      }
+    ],
+    [
+      {
+        "case": "serde",
+        "decode_ns_per_message": 403,
+        "encode_ns_per_message": 164,
+        "iterations": 1000,
+        "payload_bytes": 64,
+        "wire_bytes": 162
+      },
+      {
+        "case": "serde",
+        "decode_ns_per_message": 880,
+        "encode_ns_per_message": 1336,
+        "iterations": 1000,
+        "payload_bytes": 4096,
+        "wire_bytes": 4194
+      },
+      {
+        "case": "serde",
+        "decode_ns_per_message": 6330,
+        "encode_ns_per_message": 19312,
+        "iterations": 1000,
+        "payload_bytes": 65536,
+        "wire_bytes": 65634
+      },
+      {
+        "adapters": 1,
+        "case": "idle_poll",
+        "iterations": 100,
+        "ns_per_poll": 305,
+        "per_adapter_timeout_ms": 0
+      },
+      {
+        "adapters": 1,
+        "case": "idle_poll",
+        "iterations": 100,
+        "ns_per_poll": 1260501,
+        "per_adapter_timeout_ms": 1
+      },
+      {
+        "adapters": 1,
+        "case": "test.echo",
+        "completed_per_adapter": [
+          100
+        ],
+        "dropped_events": 0,
+        "elapsed_seconds": 0.003943083,
+        "events": 0,
+        "events_per_second": 0.0,
+        "payload_bytes": 64,
+        "poll_calls": 2206,
+        "poll_total_ns": 2797766,
+        "rounds": 100,
+        "rpc_completed": 100,
+        "rpc_max_us": 95,
+        "rpc_p50_us": 41,
+        "rpc_p95_us": 56,
+        "rpc_per_second": 25360.866104010493
+      },
+      {
+        "adapters": 1,
+        "case": "test.echo",
+        "completed_per_adapter": [
+          100
+        ],
+        "dropped_events": 0,
+        "elapsed_seconds": 0.00330575,
+        "events": 0,
+        "events_per_second": 0.0,
+        "payload_bytes": 4096,
+        "poll_calls": 3202,
+        "poll_total_ns": 2281899,
+        "rounds": 100,
+        "rpc_completed": 100,
+        "rpc_max_us": 125,
+        "rpc_p50_us": 30,
+        "rpc_p95_us": 43,
+        "rpc_per_second": 30250.321409664975
+      },
+      {
+        "adapters": 1,
+        "case": "test.stream",
+        "completed_per_adapter": [
+          100
+        ],
+        "dropped_events": 0,
+        "elapsed_seconds": 0.021578125,
+        "events": 12900,
+        "events_per_second": 597827.6611151339,
+        "payload_bytes": 0,
+        "poll_calls": 23704,
+        "poll_total_ns": 13577505,
+        "rounds": 100,
+        "rpc_completed": 100,
+        "rpc_max_us": 413,
+        "rpc_p50_us": 223,
+        "rpc_p95_us": 347,
+        "rpc_per_second": 4634.322954380883
+      },
+      {
+        "adapters": 4,
+        "case": "idle_poll",
+        "iterations": 100,
+        "ns_per_poll": 1284,
+        "per_adapter_timeout_ms": 0
+      },
+      {
+        "adapters": 4,
+        "case": "idle_poll",
+        "iterations": 100,
+        "ns_per_poll": 5004161,
+        "per_adapter_timeout_ms": 1
+      },
+      {
+        "adapters": 4,
+        "case": "test.echo",
+        "completed_per_adapter": [
+          100,
+          100,
+          100,
+          100
+        ],
+        "dropped_events": 0,
+        "elapsed_seconds": 0.00594425,
+        "events": 0,
+        "events_per_second": 0.0,
+        "payload_bytes": 64,
+        "poll_calls": 1256,
+        "poll_total_ns": 4058044,
+        "rounds": 100,
+        "rpc_completed": 400,
+        "rpc_max_us": 228,
+        "rpc_p50_us": 42,
+        "rpc_p95_us": 98,
+        "rpc_per_second": 67291.92076376331
+      },
+      {
+        "adapters": 4,
+        "case": "test.echo",
+        "completed_per_adapter": [
+          100,
+          100,
+          100,
+          100
+        ],
+        "dropped_events": 0,
+        "elapsed_seconds": 0.005298833,
+        "events": 0,
+        "events_per_second": 0.0,
+        "payload_bytes": 4096,
+        "poll_calls": 1606,
+        "poll_total_ns": 2664036,
+        "rounds": 100,
+        "rpc_completed": 400,
+        "rpc_max_us": 108,
+        "rpc_p50_us": 34,
+        "rpc_p95_us": 59,
+        "rpc_per_second": 75488.31978663981
+      },
+      {
+        "adapters": 4,
+        "case": "test.stream",
+        "completed_per_adapter": [
+          100,
+          100,
+          100,
+          100
+        ],
+        "dropped_events": 0,
+        "elapsed_seconds": 0.106463125,
+        "events": 51600,
+        "events_per_second": 484674.85807879484,
+        "payload_bytes": 0,
+        "poll_calls": 14613,
+        "poll_total_ns": 90945480,
+        "rounds": 100,
+        "rpc_completed": 400,
+        "rpc_max_us": 1602,
+        "rpc_p50_us": 911,
+        "rpc_p95_us": 1537,
+        "rpc_per_second": 3757.169442471278
+      },
+      {
+        "adapters": 8,
+        "case": "idle_poll",
+        "iterations": 100,
+        "ns_per_poll": 1799,
+        "per_adapter_timeout_ms": 0
+      },
+      {
+        "adapters": 8,
+        "case": "idle_poll",
+        "iterations": 100,
+        "ns_per_poll": 10028154,
+        "per_adapter_timeout_ms": 1
+      },
+      {
+        "adapters": 8,
+        "case": "test.echo",
+        "completed_per_adapter": [
+          100,
+          100,
+          100,
+          100,
+          100,
+          100,
+          100,
+          100
+        ],
+        "dropped_events": 0,
+        "elapsed_seconds": 0.005682667,
+        "events": 0,
+        "events_per_second": 0.0,
+        "payload_bytes": 64,
+        "poll_calls": 1000,
+        "poll_total_ns": 2729960,
+        "rounds": 100,
+        "rpc_completed": 800,
+        "rpc_max_us": 150,
+        "rpc_p50_us": 26,
+        "rpc_p95_us": 58,
+        "rpc_per_second": 140778.96874830077
+      },
+      {
+        "adapters": 8,
+        "case": "test.echo",
+        "completed_per_adapter": [
+          100,
+          100,
+          100,
+          100,
+          100,
+          100,
+          100,
+          100
+        ],
+        "dropped_events": 0,
+        "elapsed_seconds": 0.007056625,
+        "events": 0,
+        "events_per_second": 0.0,
+        "payload_bytes": 4096,
+        "poll_calls": 1199,
+        "poll_total_ns": 3110995,
+        "rounds": 100,
+        "rpc_completed": 800,
+        "rpc_max_us": 215,
+        "rpc_p50_us": 33,
+        "rpc_p95_us": 90,
+        "rpc_per_second": 113368.64294191627
+      },
+      {
+        "adapters": 8,
+        "case": "test.stream",
+        "completed_per_adapter": [
+          100,
+          100,
+          100,
+          100,
+          100,
+          100,
+          100,
+          100
+        ],
+        "dropped_events": 0,
+        "elapsed_seconds": 0.269487917,
+        "events": 103200,
+        "events_per_second": 382948.52381080965,
+        "payload_bytes": 0,
+        "poll_calls": 18304,
+        "poll_total_ns": 239299306,
+        "rounds": 100,
+        "rpc_completed": 800,
+        "rpc_max_us": 6227,
+        "rpc_p50_us": 2641,
+        "rpc_p95_us": 3236,
+        "rpc_per_second": 2968.5932078357337
+      }
+    ],
+    [
+      {
+        "case": "serde",
+        "decode_ns_per_message": 403,
+        "encode_ns_per_message": 146,
+        "iterations": 1000,
+        "payload_bytes": 64,
+        "wire_bytes": 162
+      },
+      {
+        "case": "serde",
+        "decode_ns_per_message": 798,
+        "encode_ns_per_message": 1375,
+        "iterations": 1000,
+        "payload_bytes": 4096,
+        "wire_bytes": 4194
+      },
+      {
+        "case": "serde",
+        "decode_ns_per_message": 6279,
+        "encode_ns_per_message": 17676,
+        "iterations": 1000,
+        "payload_bytes": 65536,
+        "wire_bytes": 65634
+      },
+      {
+        "adapters": 1,
+        "case": "idle_poll",
+        "iterations": 100,
+        "ns_per_poll": 590,
+        "per_adapter_timeout_ms": 0
+      },
+      {
+        "adapters": 1,
+        "case": "idle_poll",
+        "iterations": 100,
+        "ns_per_poll": 1257785,
+        "per_adapter_timeout_ms": 1
+      },
+      {
+        "adapters": 1,
+        "case": "test.echo",
+        "completed_per_adapter": [
+          100
+        ],
+        "dropped_events": 0,
+        "elapsed_seconds": 0.003093625,
+        "events": 0,
+        "events_per_second": 0.0,
+        "payload_bytes": 64,
+        "poll_calls": 2307,
+        "poll_total_ns": 2178354,
+        "rounds": 100,
+        "rpc_completed": 100,
+        "rpc_max_us": 104,
+        "rpc_p50_us": 26,
+        "rpc_p95_us": 69,
+        "rpc_per_second": 32324.538365186472
+      },
+      {
+        "adapters": 1,
+        "case": "test.echo",
+        "completed_per_adapter": [
+          100
+        ],
+        "dropped_events": 0,
+        "elapsed_seconds": 0.0038465,
+        "events": 0,
+        "events_per_second": 0.0,
+        "payload_bytes": 4096,
+        "poll_calls": 3239,
+        "poll_total_ns": 2689153,
+        "rounds": 100,
+        "rpc_completed": 100,
+        "rpc_max_us": 141,
+        "rpc_p50_us": 38,
+        "rpc_p95_us": 45,
+        "rpc_per_second": 25997.66021058105
+      },
+      {
+        "adapters": 1,
+        "case": "test.stream",
+        "completed_per_adapter": [
+          100
+        ],
+        "dropped_events": 0,
+        "elapsed_seconds": 0.017927333,
+        "events": 12900,
+        "events_per_second": 719571.6172617533,
+        "payload_bytes": 0,
+        "poll_calls": 19725,
+        "poll_total_ns": 11717622,
+        "rounds": 100,
+        "rpc_completed": 100,
+        "rpc_max_us": 350,
+        "rpc_p50_us": 132,
+        "rpc_p95_us": 330,
+        "rpc_per_second": 5578.074552416692
+      },
+      {
+        "adapters": 4,
+        "case": "idle_poll",
+        "iterations": 100,
+        "ns_per_poll": 1079,
+        "per_adapter_timeout_ms": 0
+      },
+      {
+        "adapters": 4,
+        "case": "idle_poll",
+        "iterations": 100,
+        "ns_per_poll": 5062445,
+        "per_adapter_timeout_ms": 1
+      },
+      {
+        "adapters": 4,
+        "case": "test.echo",
+        "completed_per_adapter": [
+          100,
+          100,
+          100,
+          100
+        ],
+        "dropped_events": 0,
+        "elapsed_seconds": 0.005473083,
+        "events": 0,
+        "events_per_second": 0.0,
+        "payload_bytes": 64,
+        "poll_calls": 1227,
+        "poll_total_ns": 3599727,
+        "rounds": 100,
+        "rpc_completed": 400,
+        "rpc_max_us": 404,
+        "rpc_p50_us": 35,
+        "rpc_p95_us": 72,
+        "rpc_per_second": 73084.95047489688
+      },
+      {
+        "adapters": 4,
+        "case": "test.echo",
+        "completed_per_adapter": [
+          100,
+          100,
+          100,
+          100
+        ],
+        "dropped_events": 0,
+        "elapsed_seconds": 0.006323041,
+        "events": 0,
+        "events_per_second": 0.0,
+        "payload_bytes": 4096,
+        "poll_calls": 954,
+        "poll_total_ns": 2520892,
+        "rounds": 100,
+        "rpc_completed": 400,
+        "rpc_max_us": 148,
+        "rpc_p50_us": 37,
+        "rpc_p95_us": 77,
+        "rpc_per_second": 63260.700033417466
+      },
+      {
+        "adapters": 4,
+        "case": "test.stream",
+        "completed_per_adapter": [
+          100,
+          100,
+          100,
+          100
+        ],
+        "dropped_events": 0,
+        "elapsed_seconds": 0.105942,
+        "events": 51600,
+        "events_per_second": 487058.9567876763,
+        "payload_bytes": 0,
+        "poll_calls": 14928,
+        "poll_total_ns": 88124109,
+        "rounds": 100,
+        "rpc_completed": 400,
+        "rpc_max_us": 2216,
+        "rpc_p50_us": 946,
+        "rpc_p95_us": 1575,
+        "rpc_per_second": 3775.6508278114443
+      },
+      {
+        "adapters": 8,
+        "case": "idle_poll",
+        "iterations": 100,
+        "ns_per_poll": 3462,
+        "per_adapter_timeout_ms": 0
+      },
+      {
+        "adapters": 8,
+        "case": "idle_poll",
+        "iterations": 100,
+        "ns_per_poll": 10035293,
+        "per_adapter_timeout_ms": 1
+      },
+      {
+        "adapters": 8,
+        "case": "test.echo",
+        "completed_per_adapter": [
+          100,
+          100,
+          100,
+          100,
+          100,
+          100,
+          100,
+          100
+        ],
+        "dropped_events": 0,
+        "elapsed_seconds": 0.007763625,
+        "events": 0,
+        "events_per_second": 0.0,
+        "payload_bytes": 64,
+        "poll_calls": 685,
+        "poll_total_ns": 4009492,
+        "rounds": 100,
+        "rpc_completed": 800,
+        "rpc_max_us": 237,
+        "rpc_p50_us": 45,
+        "rpc_p95_us": 100,
+        "rpc_per_second": 103044.64731359384
+      },
+      {
+        "adapters": 8,
+        "case": "test.echo",
+        "completed_per_adapter": [
+          100,
+          100,
+          100,
+          100,
+          100,
+          100,
+          100,
+          100
+        ],
+        "dropped_events": 0,
+        "elapsed_seconds": 0.007749792,
+        "events": 0,
+        "events_per_second": 0.0,
+        "payload_bytes": 4096,
+        "poll_calls": 799,
+        "poll_total_ns": 2342319,
+        "rounds": 100,
+        "rpc_completed": 800,
+        "rpc_max_us": 91,
+        "rpc_p50_us": 41,
+        "rpc_p95_us": 74,
+        "rpc_per_second": 103228.5769734207
+      },
+      {
+        "adapters": 8,
+        "case": "test.stream",
+        "completed_per_adapter": [
+          100,
+          100,
+          100,
+          100,
+          100,
+          100,
+          100,
+          100
+        ],
+        "dropped_events": 0,
+        "elapsed_seconds": 0.2774135,
+        "events": 103200,
+        "events_per_second": 372007.85109592724,
+        "payload_bytes": 0,
+        "poll_calls": 15879,
+        "poll_total_ns": 243343117,
+        "rounds": 100,
+        "rpc_completed": 800,
+        "rpc_max_us": 3434,
+        "rpc_p50_us": 2770,
+        "rpc_p95_us": 3315,
+        "rpc_per_second": 2883.7817914412963
+      }
+    ]
+  ],
+  "measured_harness_source": "//! Opt-in measurements: no timing thresholds, network, or installed providers.\nuse std::{\n    fs,\n    hint::black_box,\n    path::PathBuf,\n    time::{Duration, Instant, SystemTime, UNIX_EPOCH},\n};\n\nuse dragonstui_adapter_host::{\n    AdapterId, AdapterManager, AdapterRuntimeConfig, AdapterState, Capability, LocalAdapterRoot,\n    PROTOCOL_VERSION, ProtocolMessage, Request, RequestId, RpcOutcome,\n};\nuse serde_json::json;\n\nstruct FixtureRoot(PathBuf);\nimpl Drop for FixtureRoot {\n    fn drop(&mut self) {\n        let _ = fs::remove_dir_all(&self.0);\n    }\n}\n\nfn percentile(samples: &[u64], percent: usize) -> u64 {\n    samples[(samples.len() - 1) * percent / 100]\n}\n\n#[test]\nfn percentile_uses_observed_values() {\n    assert_eq!(percentile(&[7], 95), 7);\n    assert_eq!(percentile(&[1, 2, 3, 4, 5], 50), 3);\n    assert_eq!(percentile(&[1, 2, 3, 4, 5], 100), 5);\n}\n\n#[test]\n#[ignore = \"opt-in release measurements; run with --release --ignored --nocapture\"]\nfn adapter_host_performance_matrix() {\n    assert!(!cfg!(debug_assertions), \"measure a release build\");\n    for bytes in [64, 4096, 65536] {\n        let message = ProtocolMessage::Request(Request {\n            protocol: PROTOCOL_VERSION,\n            id: RequestId::new(\"measurement-1\").unwrap(),\n            operation: Capability::new(\"test.echo\").unwrap(),\n            action: None,\n            payload: json!({\"text\": \"x\".repeat(bytes)}),\n        });\n        let wire = serde_json::to_vec(&message).unwrap();\n        assert_eq!(\n            serde_json::from_slice::<ProtocolMessage>(&wire).unwrap(),\n            message\n        );\n        let iterations = 1000;\n        let start = Instant::now();\n        for _ in 0..iterations {\n            black_box(serde_json::to_vec(black_box(&message)).unwrap());\n        }\n        let encode_ns = start.elapsed().as_nanos() / iterations;\n        let start = Instant::now();\n        for _ in 0..iterations {\n            black_box(serde_json::from_slice::<ProtocolMessage>(black_box(&wire)).unwrap());\n        }\n        println!(\n            \"M72_RESULT {}\",\n            json!({\n                \"case\": \"serde\", \"payload_bytes\": bytes, \"wire_bytes\": wire.len(),\n                \"iterations\": iterations, \"encode_ns_per_message\": encode_ns,\n                \"decode_ns_per_message\": start.elapsed().as_nanos() / iterations\n            })\n        );\n    }\n    for count in [1, 4, 8] {\n        measure_manager(count);\n    }\n}\n\nfn measure_manager(count: usize) {\n    let nonce = SystemTime::now()\n        .duration_since(UNIX_EPOCH)\n        .unwrap()\n        .as_nanos();\n    let root = FixtureRoot(std::env::temp_dir().join(format!(\n        \"dragonstui-m72-{}-{nonce}-{count}\",\n        std::process::id()\n    )));\n    fs::create_dir(&root.0).unwrap();\n    let executable = PathBuf::from(env!(\"CARGO_BIN_EXE_dragonstui-adapter-host-mock\"));\n    let ids: Vec<_> = (0..count)\n        .map(|i| AdapterId::new(format!(\"perf-{i}\")).unwrap())\n        .collect();\n    for id in &ids {\n        let directory = root.0.join(id.as_str());\n        fs::create_dir(&directory).unwrap();\n        fs::copy(&executable, directory.join(\"mock\")).unwrap();\n        fs::write(\n            directory.join(\"adapter.json\"),\n            json!({\n                \"id\": id.as_str(), \"name\": \"Performance fixture\", \"version\": \"1.0.0\",\n                \"protocol_version\": PROTOCOL_VERSION, \"executable\": \"mock\"\n            })\n            .to_string(),\n        )\n        .unwrap();\n    }\n    // Manager drops before the fixture root, including on assertion failure.\n    let mut manager = AdapterManager::new(Duration::from_millis(300), 32);\n    assert_eq!(\n        manager\n            .discover(LocalAdapterRoot::new(&root.0))\n            .unwrap()\n            .len(),\n        count\n    );\n    for id in &ids {\n        manager\n            .start_with_config(\n                id,\n                AdapterRuntimeConfig::new(&executable)\n                    .arg(\"--id\")\n                    .arg(id.as_str())\n                    .arg(\"--mode\")\n                    .arg(\"stress-requests\")\n                    .event_rate_limit(10_000_000)\n                    .ingress_queue_capacity(8)\n                    .event_queue_capacity(8)\n                    .response_queue_capacity(4),\n            )\n            .unwrap();\n    }\n    let echo = Capability::new(\"test.echo\").unwrap();\n    // Warm-up RPC provides an ordered stdout barrier and excludes startup events.\n    for id in &ids {\n        let request = manager\n            .request(id, echo.clone(), json!(null), Duration::from_secs(10))\n            .unwrap();\n        let deadline = Instant::now() + Duration::from_secs(10);\n        loop {\n            manager.poll(Duration::ZERO);\n            manager.take_events();\n            if let Some(outcome) = manager.take_response(id, &request) {\n                assert_eq!(outcome, RpcOutcome::Response(json!(null)));\n                break;\n            }\n            assert!(Instant::now() < deadline, \"warm-up deadline\");\n        }\n    }\n    for timeout_ms in [0, 1] {\n        let start = Instant::now();\n        for _ in 0..100 {\n            manager.poll(Duration::from_millis(timeout_ms));\n            assert!(manager.take_events().is_empty());\n        }\n        println!(\n            \"M72_RESULT {}\",\n            json!({\n                \"case\": \"idle_poll\", \"adapters\": count, \"per_adapter_timeout_ms\": timeout_ms,\n                \"iterations\": 100, \"ns_per_poll\": start.elapsed().as_nanos() / 100\n            })\n        );\n    }\n    for (operation, bytes) in [(\"test.echo\", 64), (\"test.echo\", 4096), (\"test.stream\", 0)] {\n        let capability = Capability::new(operation).unwrap();\n        let payload = json!({\"text\": \"x\".repeat(bytes)});\n        let expected = if operation == \"test.stream\" {\n            json!({\"streamed\": true})\n        } else {\n            payload.clone()\n        };\n        let rounds = 100;\n        let initial_drops = manager.dropped_event_count();\n        let mut events = 0;\n        let mut poll_calls = 0;\n        let mut poll_ns = 0;\n        let mut latencies = Vec::with_capacity(rounds * count);\n        let mut per_adapter = vec![0; count];\n        let start = Instant::now();\n        for _ in 0..rounds {\n            let mut pending = Vec::with_capacity(count);\n            for (index, id) in ids.iter().enumerate() {\n                let sent = Instant::now();\n                let request = manager\n                    .request(\n                        id,\n                        capability.clone(),\n                        payload.clone(),\n                        Duration::from_secs(10),\n                    )\n                    .unwrap();\n                pending.push((index, request, sent));\n            }\n            let deadline = Instant::now() + Duration::from_secs(10);\n            while !pending.is_empty() {\n                let poll_start = Instant::now();\n                manager.poll(Duration::ZERO);\n                poll_ns += poll_start.elapsed().as_nanos();\n                poll_calls += 1;\n                assert!(manager.event_queue_len() <= 32);\n                let batch = manager.take_events();\n                assert!(batch.iter().all(|event| ids.contains(&event.adapter_id)));\n                events += batch.len();\n                pending.retain(|(index, request, sent)| {\n                    if let Some(outcome) = manager.take_response(&ids[*index], request) {\n                        assert_eq!(outcome, RpcOutcome::Response(expected.clone()));\n                        per_adapter[*index] += 1;\n                        latencies.push(sent.elapsed().as_micros() as u64);\n                        false\n                    } else {\n                        true\n                    }\n                });\n                assert!(Instant::now() < deadline, \"measurement RPC deadline\");\n            }\n        }\n        let elapsed = start.elapsed().as_secs_f64();\n        assert!(manager.take_events().is_empty());\n        assert_eq!(manager.dropped_event_count(), initial_drops);\n        assert_eq!(\n            events,\n            if operation == \"test.stream\" {\n                count * rounds * 129\n            } else {\n                0\n            }\n        );\n        assert_eq!(per_adapter, vec![rounds; count]);\n        latencies.sort_unstable();\n        println!(\n            \"M72_RESULT {}\",\n            json!({\n                \"case\": operation, \"adapters\": count, \"payload_bytes\": bytes, \"rounds\": rounds,\n                \"completed_per_adapter\": per_adapter, \"rpc_completed\": latencies.len(),\n                \"events\": events, \"dropped_events\": 0, \"elapsed_seconds\": elapsed,\n                \"rpc_per_second\": latencies.len() as f64 / elapsed,\n                \"events_per_second\": events as f64 / elapsed,\n                \"rpc_p50_us\": percentile(&latencies, 50), \"rpc_p95_us\": percentile(&latencies, 95),\n                \"rpc_max_us\": latencies.last().unwrap(), \"poll_calls\": poll_calls, \"poll_total_ns\": poll_ns\n            })\n        );\n    }\n    for id in &ids {\n        let diagnostics = manager.diagnostics(id).unwrap();\n        assert_eq!(diagnostics.state, AdapterState::Running);\n        assert_eq!(diagnostics.pending_request_count, 0);\n        assert_eq!(diagnostics.response_queue_len, 0);\n        manager.stop(id).unwrap();\n        assert_eq!(manager.state(id), Some(AdapterState::Stopped));\n        assert!(manager.diagnostics(id).unwrap().pid.is_none());\n    }\n    println!(\"M72_CLEANUP {}\", json!({\"stopped_adapters\": count}));\n}\n",
+  "post_measurement_note": "Delivery adds only a Clippy lint allowance and its explanation to the measured harness; no executable behavior changed. The exact measured harness is embedded for reproducibility."
+}

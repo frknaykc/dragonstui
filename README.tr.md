@@ -125,6 +125,8 @@ Harici geliştiriciler, Rust/Go/Python taşınabilirlik notlarını da içeren [
 
 [Adapter host sınırları](docs/adapter-limits.md); protokol/manifest okumalarını, akış hızı ihlalinde sonlandırmayı, istek kabulünü, timeout ve executable path sınırlarını açıklar. Uyumluluk ve uygulama sınırları da bu belgede yer alır.
 
+[Adapter host performansı](docs/adapter-performance.md); serialization, RPC, streaming ve scheduling için isteğe bağlı release ölçüm matrisini, yerel ham sonuçları ve ölçüm sınırlarını içerir.
+
 Ayrıntılar:
 
 - [Adapter host mimarisi](docs/architecture/adapter-host.md)
@@ -151,6 +153,7 @@ DragonsTUI aktif geliştirme aşamasındadır ve henüz 1.0 sürümüne ulaşmam
 | Çoklu adapter stres testleri | Tamamlandı (M69; release ölçüm matrisi, yerel kontroller ve uzak CI başarılı) |
 | Çökme ve kurtarma sağlamlaştırması | Tamamlandı (M70; yerel kurtarma regresyonları ve gerekli kontroller doğrulandı) |
 | Protokol ve güvenlik sınırları | Tamamlandı (M71; yerel limit regresyonları, gerekli kontroller ve bağımsız inceleme doğrulandı) |
+| Adapter host performansı | Tamamlandı (M72; release başlangıç ölçümleri, yerel kontroller ve bağımsız inceleme doğrulandı; üretim optimizasyonu iddiası yok) |
 
 Adapter dağıtımı ve yönetimi; registry/kurulum/güncelleme/kaldırma bütünlük sınırlarını, CLI ve TUI yönetimini, tipli ve kimlik doğrulamalı controller IPC’sini, adapter bazında yaşam döngüsü çakışma korumasını, gerçek PTY kabul testlerini ve M43 yetenek keşfini kapsar.
 
