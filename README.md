@@ -1,5 +1,9 @@
 # DragonsTUI
 
+![DragonsTUI banner](assets/lastbanner.png)
+
+**English** | [Türkçe](README.tr.md)
+
 An explicit immediate-mode Rust terminal UI framework with a process-isolated, capability-driven adapter host for interactive developer tooling.
 
 [![CI](https://github.com/frknaykc/dragonstui/actions/workflows/ci.yml/badge.svg)](https://github.com/frknaykc/dragonstui/actions/workflows/ci.yml)
@@ -7,7 +11,6 @@ An explicit immediate-mode Rust terminal UI framework with a process-isolated, c
 [![Rust 2024](https://img.shields.io/badge/Rust-2024-dea584?logo=rust)](Cargo.toml)
 [![GitHub stars](https://img.shields.io/github/stars/frknaykc/dragonstui?style=flat)](https://github.com/frknaykc/dragonstui/stargazers)
 
-![DragonsTUI showcase](assets/dragonstui-showcase.png)
 
 DragonsTUI is for terminal applications that need direct control over rendering, state, input routing, and terminal output. The core framework stays dependency-light and explicit; the optional adapter host adds supervised external processes, generic capabilities, diagnostics, and local management tooling without embedding domain-specific integrations into the UI engine.
 
@@ -42,7 +45,9 @@ There is no retained component tree, virtual DOM, automatic event bubbling, or f
 
 ### Main showcase
 
-The hero image above shows the showcase Overview after the splash transition.
+![DragonsTUI showcase Overview](assets/dragonstui-showcase.png)
+
+The Overview screen appears after the splash transition.
 
 ### Widgets
 
@@ -129,7 +134,7 @@ Read the details:
 
 ## Project Status
 
-DragonsTUI is under active development and remains pre-1.0. The core framework, adapter-host foundations, distribution, observability, actions and developer-tooling views are implemented. Phase 9 builds the reference adapter ecosystem before external conformance tooling and SDK stabilization.
+DragonsTUI is under active development and remains pre-1.0. The core framework, adapter-host foundations, distribution, observability, actions and developer-tooling views are implemented. The reference mock, conformance suite and SDK specification are complete through M68; M69–M71 add stress coverage, crash recovery and protocol/resource limits. The SDK specification does not include published language SDKs.
 
 | Area | Status |
 | --- | --- |
