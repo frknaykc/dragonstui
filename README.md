@@ -132,6 +132,8 @@ The [multi-adapter stress harness](docs/adapter-stress-testing.md) checks bounde
 
 [Adapter release readiness](docs/adapter-release-readiness.md) records the M74 source audit, controller/CLI boundary fixes, local package verification and remaining release/platform limits. It is not a public release announcement.
 
+[Release packaging](docs/release-packaging.md) defines the v0.1.0 macOS ARM64/Linux x86_64 bundles, SHA-256 verification, isolated package smoke tests and tag-gated GitHub Release workflow. R1 prepares and tests the pipeline without publishing; the first public release remains an R6 action.
+
 Read the details:
 
 - [Adapter host architecture](docs/architecture/adapter-host.md)

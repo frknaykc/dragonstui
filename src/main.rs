@@ -26,6 +26,19 @@ const SPLASH_DURATION: Duration = Duration::from_millis(1_000);
 mod agent_process;
 
 fn main() -> io::Result<()> {
+    match std::env::args().nth(1).as_deref() {
+        Some("--version" | "-V") => {
+            println!("dragons_tui {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        Some("--help" | "-h") => {
+            println!(
+                "dragons_tui — DragonsTUI dashboard\n\nUsage: dragons_tui [--version | --help]\nRun without arguments in an interactive terminal. Press q or Ctrl+C to exit."
+            );
+            return Ok(());
+        }
+        _ => {}
+    }
     let shutdown = ShutdownSignal::install()?;
     let mut output = stdout();
     let mut terminal = TerminalGuard::enter(&mut output)?;

@@ -4273,6 +4273,13 @@ fn output_lines() -> Vec<String> {
 fn main() -> io::Result<()> {
     if std::env::args()
         .skip(1)
+        .any(|argument| argument == "--version" || argument == "-V")
+    {
+        println!("dragonstui-showcase {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    if std::env::args()
+        .skip(1)
         .any(|argument| argument == "--help" || argument == "-h")
     {
         println!(

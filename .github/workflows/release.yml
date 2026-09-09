@@ -1,0 +1,165 @@
+name: Release packaging
+
+on:
+  push:
+    branches: [master, main]
+    tags: ['v*']
+    paths:
+      - '.github/workflows/release.yml'
+      - 'Cargo.*'
+      - 'src/**'
+      - 'crates/**'
+      - 'tools/*release*'
+      - 'tools/pty_smoke.py'
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/release.yml'
+      - 'Cargo.*'
+      - 'src/**'
+      - 'crates/**'
+      - 'tools/*release*'
+      - 'tools/pty_smoke.py'
+
+permissions:
+  contents: read
+
+jobs:
+  metadata:
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - id: version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import os, re, tomllib
+          from pathlib import Path
+          version = tomllib.loads(Path('Cargo.toml').read_text())['package']['version']
+          host = tomllib.loads(Path('crates/dragonstui-adapter-host/Cargo.toml').read_text())['package']['version']
+          assert re.fullmatch(r'\d+\.\d+\.\d+', version), 'Stable numeric version required'
+          assert host == version, 'Workspace version mismatch'
+          if os.environ['REF_TYPE'] == 'tag':
+              assert os.environ['REF_NAME'] == f'v{version}', 'Tag/version mismatch'
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'version={version}\n')
+          PY
+      - name: Packaging regression tests
+        run: python3 -m unittest discover -s tools -p test_release_package.py -v
+
+  quality:
+    needs: metadata
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Required delivery gates (also run for tags)
+        run: |
+          cargo fmt --check
+          cargo check --locked --workspace
+          cargo test --locked --workspace --features adapter-showcase
+          cargo clippy --locked --workspace --all-targets -- -D warnings
+          cargo check --locked --features adapter-showcase --bin dragonstui-showcase
+          cargo clippy --locked --features adapter-showcase --bin dragonstui-showcase -- -D warnings
+          python3 -m unittest discover -s tools -p test_adapter_stress.py -v
+          python3 -m unittest discover -s tools -p test_ecosystem_fixture.py -v
+          python3 -m unittest discover -s tools -p 'test_reference_mock*.py'
+          python3 -m unittest discover -s tools -p test_showcase_pty_smoke.py
+          python3 -m unittest discover -s tools -p test_pty_smoke.py
+
+  build:
+    needs: metadata
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            platform: macos-arm64
+            target: aarch64-apple-darwin
+          - runner: ubuntu-22.04
+            platform: linux-x86_64
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '14.0'
+      VERSION: ${{ needs.metadata.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build from fresh checkout without a build cache
+        run: cargo build --locked --release --workspace --features adapter-showcase --bins --target '${{ matrix.target }}'
+      - name: Package and checksum
+        run: python3 tools/release_package.py build --version "$VERSION" --platform '${{ matrix.platform }}' --bin-dir 'target/${{ matrix.target }}/release' --output target/dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.platform }}
+          path: target/dist/*
+          if-no-files-found: error
+
+  smoke:
+    needs: [metadata, build]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            platform: macos-arm64
+          - runner: ubuntu-22.04
+            platform: linux-x86_64
+    runs-on: ${{ matrix.runner }}
+    env:
+      VERSION: ${{ needs.metadata.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-${{ matrix.platform }}
+          path: incoming
+      - name: Verify downloaded package on separate runner (no Rust build)
+        run: |
+          python3 tools/release_package.py verify --version "$VERSION" --platform '${{ matrix.platform }}' \
+            --archive "incoming/dragonstui-v$VERSION-${{ matrix.platform }}.tar.gz" \
+            --checksum "incoming/dragonstui-v$VERSION-${{ matrix.platform }}.tar.gz.sha256"
+
+  publish:
+    # Push/PR/manual dry-runs never create a release. Only an intentional version tag can publish.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [metadata, quality, smoke]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.metadata.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+      - name: Verify all assets before publishing
+        working-directory: dist
+        run: |
+          test "$(printf '%s\n' *.tar.gz | wc -l)" -eq 2
+          sha256sum --check *.sha256
+      - name: Publish version tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release create "v$VERSION" dist/* --verify-tag --title "DragonsTUI v$VERSION" --generate-notes

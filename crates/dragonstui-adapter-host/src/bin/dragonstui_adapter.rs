@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Parser)]
 #[command(
     name = "dragonstui-adapter",
+    version,
     about = "Manage DragonsTUI external adapters",
     long_about = "Manage DragonsTUI external adapters without entering alternate-screen TUI mode.\n\nThe adapter root defaults to ./adapters; override it with --root."
 )]

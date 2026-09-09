@@ -90,6 +90,10 @@ fn parse_options() -> MockOptions {
     };
     let mut seen = HashSet::new();
     while let Some(arg) = args.next() {
+        if arg == "--version" || arg == "-V" {
+            println!("dragonstui-adapter-host-mock {}", env!("CARGO_PKG_VERSION"));
+            process::exit(0);
+        }
         if arg == "--help" || arg == "-h" {
             println!(
                 "dragonstui-adapter-host-mock [--mode MODE] [--id ID]\n\

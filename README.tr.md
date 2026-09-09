@@ -131,6 +131,8 @@ Harici geliştiriciler, Rust/Go/Python taşınabilirlik notlarını da içeren [
 
 [Adapter yayın hazırlığı](docs/adapter-release-readiness.md); M74 kaynak denetimini, controller/CLI sınır düzeltmelerini, yerel paket doğrulamasını ve kalan yayın/platform sınırlarını kaydeder. Kamuya açık bir sürüm duyurusu değildir.
 
+[Release paketleme](docs/release-packaging.md); v0.1.0 macOS ARM64/Linux x86_64 paketlerini, SHA-256 doğrulamasını, izole paket smoke testlerini ve tag koşullu GitHub Release akışını tanımlar. R1 sistemi yayın yapmadan hazırlayıp test eder; ilk kamuya açık sürüm R6'ya bırakılmıştır.
+
 Ayrıntılar:
 
 - [Adapter host mimarisi](docs/architecture/adapter-host.md)
