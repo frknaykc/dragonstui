@@ -473,6 +473,8 @@ fn adapter_action_worker_with_live_poll_pause(
 }
 
 const ACTION_REQUEST_CHANNEL_CAPACITY: usize = 1;
+/// Unsent opaque UTF-8 input retained per hosted session, not per key.
+const SESSION_PENDING_INPUT_CAPACITY: usize = 4096;
 /// Matches the controller's maximum simultaneously owned provider sessions.
 const UNCLAIMED_SESSION_CLOSE_CAPACITY: usize = 8;
 const OPERATION_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -1918,6 +1920,10 @@ struct HostedSession {
     session_id: SessionId,
     host: SessionHost,
     close_pending: bool,
+    // Owned by this host instance: never transferred to a replacement session.
+    pending_input: String,
+    pending_resize: Option<(u16, u16)>,
+    close_queued: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -2091,6 +2097,9 @@ impl Showcase {
             session_id,
             host,
             close_pending: false,
+            pending_input: String::new(),
+            pending_resize: None,
+            close_queued: false,
         });
         true
     }
@@ -2689,82 +2698,131 @@ impl Showcase {
         let Some(data) = session_input_for_key(key) else {
             return false;
         };
-        let Some(active) = self.active_session.as_ref() else {
+        let Some(active) = self.active_session.as_mut() else {
             return false;
         };
         if active.close_pending || active.host.state() != SessionHostState::Running {
             return false;
         }
-        self.queue_adapter_invocation(AdapterInvocation::SessionInput {
-            adapter_id: active.adapter_id.clone(),
-            session_id: active.session_id.clone(),
-            data,
-        });
+        if active.pending_input.len() + data.len() > SESSION_PENDING_INPUT_CAPACITY {
+            self.adapter_action_status = Some(format!(
+                "Session input overflow: rejected {} bytes ({} byte pending limit)",
+                data.len(),
+                SESSION_PENDING_INPUT_CAPACITY
+            ));
+            return true;
+        }
+        active.pending_input.push_str(&data);
+        self.flush_active_session_requests();
         true
     }
 
     fn request_active_session_close(&mut self) -> bool {
-        let Some(active) = self.active_session.as_ref() else {
+        let Some(active) = self.active_session.as_mut() else {
             return false;
         };
         if active.close_pending || active.host.state() != SessionHostState::Running {
             return false;
         }
-        let request = AdapterInvocation::CloseSession {
-            adapter_id: active.adapter_id.clone(),
-            session_id: active.session_id.clone(),
-        };
-        let Some(sender) = self.adapter_invocation_sender.as_ref() else {
-            return false;
-        };
-        match sender.try_send(request) {
-            Ok(()) => {
-                if let Some(active) = self.active_session.as_mut() {
-                    active.close_pending = true;
-                }
-                self.adapter_action_status = Some("Session close requested".to_owned());
-                true
-            }
-            Err(TrySendError::Full(_)) => {
-                self.adapter_action_status = Some("Session close request queue is full".to_owned());
-                false
-            }
-            Err(TrySendError::Disconnected(_)) => {
-                self.adapter_action_status = Some("Session worker unavailable".to_owned());
-                false
-            }
-        }
+        // Close supersedes only locally unsent work; accepted worker effects are never replayed.
+        active.pending_input.clear();
+        active.pending_resize = None;
+        active.close_pending = true;
+        active.close_queued = true;
+        self.adapter_action_status = Some("Session close queued".to_owned());
+        self.flush_active_session_requests();
+        true
     }
 
     fn resize_active_session(&mut self, size: Size) -> bool {
-        let Some((rows, columns)) = session_host_dimensions(size) else {
+        let Some(dimensions) = session_host_dimensions(size) else {
             return false;
         };
-        let Some(active) = self.active_session.as_ref() else {
+        let Some(active) = self.active_session.as_mut() else {
             return false;
         };
         if active.close_pending || active.host.state() != SessionHostState::Running {
             return false;
         }
-        let request = AdapterInvocation::SessionResize {
-            adapter_id: active.adapter_id.clone(),
-            session_id: active.session_id.clone(),
-            rows,
-            columns,
-        };
-        let Some(sender) = self.adapter_invocation_sender.as_ref() else {
+        // Intermediate geometry is superseded, unlike ordered input bytes.
+        active.pending_resize = Some(dimensions);
+        self.flush_active_session_requests();
+        true
+    }
+
+    fn flush_active_session_requests(&mut self) -> bool {
+        let Some(active) = self.active_session.as_mut() else {
             return false;
         };
-        match sender.try_send(request) {
-            Ok(()) => true,
-            Err(TrySendError::Full(_)) => {
-                self.adapter_action_status =
-                    Some("Session resize request queue is full".to_owned());
+        if active.host.state() != SessionHostState::Running {
+            active.pending_input.clear();
+            active.pending_resize = None;
+            active.close_queued = false;
+            return false;
+        }
+        if active.close_pending {
+            active.pending_input.clear();
+            active.pending_resize = None;
+        }
+        // Cleanup has priority over input/resize, but an explicit active close may proceed.
+        if !active.close_queued
+            && !self.unclaimed_session_closes.is_empty()
+            && self.unclaimed_session_close_in_flight.is_none()
+        {
+            return false;
+        }
+        let request = if active.close_queued {
+            AdapterInvocation::CloseSession {
+                adapter_id: active.adapter_id.clone(),
+                session_id: active.session_id.clone(),
+            }
+        } else if let Some((rows, columns)) = active.pending_resize.take() {
+            AdapterInvocation::SessionResize {
+                adapter_id: active.adapter_id.clone(),
+                session_id: active.session_id.clone(),
+                rows,
+                columns,
+            }
+        } else if !active.pending_input.is_empty() {
+            AdapterInvocation::SessionInput {
+                adapter_id: active.adapter_id.clone(),
+                session_id: active.session_id.clone(),
+                data: std::mem::take(&mut active.pending_input),
+            }
+        } else {
+            return false;
+        };
+        let result = match self.adapter_invocation_sender.as_ref() {
+            Some(sender) => sender.try_send(request),
+            None => Err(TrySendError::Disconnected(request)),
+        };
+        match result {
+            Ok(()) => {
+                if active.close_queued {
+                    active.close_queued = false;
+                    self.adapter_action_status = Some("Session close requested".to_owned());
+                }
+                true
+            }
+            Err(TrySendError::Full(request)) => {
+                match request {
+                    AdapterInvocation::SessionInput { data, .. } => active.pending_input = data,
+                    AdapterInvocation::SessionResize { rows, columns, .. } => {
+                        active.pending_resize = Some((rows, columns))
+                    }
+                    _ => {}
+                }
                 false
             }
             Err(TrySendError::Disconnected(_)) => {
-                self.adapter_action_status = Some("Session worker unavailable".to_owned());
-                false
+                active.pending_input.clear();
+                active.pending_resize = None;
+                active.close_queued = false;
+                active.close_pending = false;
+                self.adapter_action_status = Some(
+                    "Session worker unavailable: unsent session requests discarded".to_owned(),
+                );
+                true
             }
         }
     }
@@ -2978,6 +3036,7 @@ impl Showcase {
                 }
             }
         }
+        self.flush_active_session_requests();
         true
     }
 
@@ -3076,6 +3135,7 @@ impl Showcase {
                 changed |= self.retry_pending_session_discovery();
                 changed |= self.retry_unclaimed_session_close();
                 changed |= self.drain_session_event_results();
+                changed |= self.flush_active_session_requests();
                 self.ensure_session_event_worker();
                 if self.adapter_root.is_some()
                     && !self.operation_refresh_in_flight
@@ -3105,8 +3165,12 @@ impl Showcase {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Outcome {
-        if matches!(key.code, KeyCode::Char(character) if is_quit_key(character))
-            || (key.modifiers.ctrl && matches!(key.code, KeyCode::Char('c' | 'C')))
+        let session_owns_input = self.phase == Phase::Showcase
+            && self.section == Section::Adapters
+            && self.active_session.is_some();
+        if !session_owns_input
+            && (matches!(key.code, KeyCode::Char(character) if is_quit_key(character))
+                || (key.modifiers.ctrl && matches!(key.code, KeyCode::Char('c' | 'C'))))
         {
             return Outcome {
                 quit: true,
@@ -7893,6 +7957,229 @@ mod tests {
         ));
     }
 
+    fn backpressured_session() -> (Showcase, Receiver<AdapterInvocation>) {
+        let mut showcase = Showcase::new(Instant::now());
+        showcase.phase = Phase::Showcase;
+        showcase.host_session(
+            AdapterId::new("provider-a").unwrap(),
+            SessionId::new("session-a").unwrap(),
+        );
+        let (sender, requests) = mpsc::sync_channel(ACTION_REQUEST_CHANNEL_CAPACITY);
+        sender.try_send(AdapterInvocation::Operations).unwrap();
+        showcase.adapter_invocation_sender = Some(sender);
+        (showcase, requests)
+    }
+
+    #[test]
+    fn session_pending_input_is_bounded_without_splitting_utf8() {
+        let (mut showcase, requests) = backpressured_session();
+        for _ in 0..SESSION_PENDING_INPUT_CAPACITY / 3 {
+            showcase.forward_active_session_input(key(KeyCode::Char('界')));
+        }
+        showcase.forward_active_session_input(key(KeyCode::Char('界')));
+        let pending = &showcase.active_session.as_ref().unwrap().pending_input;
+        assert_eq!(pending.len(), SESSION_PENDING_INPUT_CAPACITY - 1);
+        assert_eq!(pending, &"界".repeat(SESSION_PENDING_INPUT_CAPACITY / 3));
+        assert!(
+            showcase
+                .adapter_action_status
+                .as_ref()
+                .unwrap()
+                .contains("overflow")
+        );
+        requests.try_recv().unwrap();
+        showcase.flush_active_session_requests();
+        assert!(
+            matches!(requests.try_recv(), Ok(AdapterInvocation::SessionInput { data, .. }) if data.len() == SESSION_PENDING_INPUT_CAPACITY - 1)
+        );
+        assert!(
+            showcase
+                .active_session
+                .as_ref()
+                .unwrap()
+                .pending_input
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn session_queued_close_discards_unsent_input_and_resize_and_is_not_retried() {
+        let (mut showcase, requests) = backpressured_session();
+        showcase.forward_active_session_input(key(KeyCode::Char('x')));
+        showcase.resize_active_session(Size::new(80, 24));
+        assert!(showcase.request_active_session_close());
+        assert!(!showcase.forward_active_session_input(key(KeyCode::Char('y'))));
+        assert!(!showcase.resize_active_session(Size::new(90, 30)));
+        let active = showcase.active_session.as_ref().unwrap();
+        assert!(active.pending_input.is_empty());
+        assert!(active.pending_resize.is_none());
+        assert!(active.close_pending && active.close_queued);
+        requests.try_recv().unwrap();
+        showcase.flush_active_session_requests();
+        assert!(matches!(
+            requests.try_recv(),
+            Ok(AdapterInvocation::CloseSession { .. })
+        ));
+        let (results, receiver) = mpsc::sync_channel(1);
+        showcase.adapter_invocation_results = Some(receiver);
+        results
+            .send(AdapterInvocationResult::SessionCloseRequested {
+                adapter_id: AdapterId::new("provider-a").unwrap(),
+                session_id: SessionId::new("session-a").unwrap(),
+                result: Err("uncertain remote effect".to_owned()),
+            })
+            .unwrap();
+        showcase.drain_adapter_invocation_results();
+        showcase.flush_active_session_requests();
+        assert!(requests.try_recv().is_err());
+    }
+
+    #[test]
+    fn session_pending_work_cannot_replay_to_replacement_even_with_reused_identity() {
+        for (provider, closing) in [
+            ("provider-a", false),
+            ("provider-b", false),
+            ("provider-a", true),
+        ] {
+            let (mut showcase, requests) = backpressured_session();
+            showcase.forward_active_session_input(key(KeyCode::Char('x')));
+            showcase.resize_active_session(Size::new(80, 24));
+            if closing {
+                showcase.request_active_session_close();
+            }
+            assert!(showcase.apply_session_event(AdapterSessionEvent::Exited {
+                adapter_id: AdapterId::new("provider-a").unwrap(),
+                session_id: SessionId::new("session-a").unwrap(),
+                exit_code: Some(0),
+            }));
+            showcase.host_session(
+                AdapterId::new(provider).unwrap(),
+                SessionId::new("session-a").unwrap(),
+            );
+            requests.try_recv().unwrap();
+            showcase.flush_active_session_requests();
+            assert!(requests.try_recv().is_err());
+            showcase.forward_active_session_input(key(KeyCode::Char('n')));
+            assert!(
+                matches!(requests.try_recv(), Ok(AdapterInvocation::SessionInput { adapter_id, data, .. }) if adapter_id.as_str() == provider && data == "n")
+            );
+        }
+    }
+
+    #[test]
+    fn session_resize_retains_only_latest_and_results_flush_without_replaying_failed_input() {
+        let (mut showcase, requests) = backpressured_session();
+        showcase.forward_active_session_input(key(KeyCode::Char('é')));
+        showcase.resize_active_session(Size::new(80, 24));
+        showcase.resize_active_session(Size::new(100, 40));
+        requests.try_recv().unwrap();
+        let (results, receiver) = mpsc::sync_channel(1);
+        showcase.adapter_invocation_results = Some(receiver);
+        results
+            .send(AdapterInvocationResult::SessionInputForwarded {
+                result: Err("failed previously sent input".to_owned()),
+            })
+            .unwrap();
+        showcase.drain_adapter_invocation_results();
+        assert!(matches!(
+            requests.try_recv(),
+            Ok(AdapterInvocation::SessionResize {
+                rows: 32,
+                columns: 97,
+                ..
+            })
+        ));
+        results
+            .send(AdapterInvocationResult::SessionResized {
+                result: Err("failed resize".to_owned()),
+            })
+            .unwrap();
+        showcase.drain_adapter_invocation_results();
+        assert!(
+            matches!(requests.try_recv(), Ok(AdapterInvocation::SessionInput { data, .. }) if data == "é")
+        );
+        showcase.flush_active_session_requests();
+        assert!(requests.try_recv().is_err());
+    }
+
+    #[test]
+    fn session_pending_input_does_not_starve_queued_cleanup() {
+        let (mut showcase, requests) = backpressured_session();
+        showcase.forward_active_session_input(key(KeyCode::Char('x')));
+        showcase.queue_unclaimed_session_close(
+            AdapterId::new("provider-b").unwrap(),
+            SessionId::new("stale").unwrap(),
+        );
+        requests.try_recv().unwrap();
+        assert!(!showcase.flush_active_session_requests());
+        assert!(requests.try_recv().is_err());
+        assert!(showcase.retry_unclaimed_session_close());
+        assert!(
+            matches!(requests.try_recv(), Ok(AdapterInvocation::CloseSession { session_id, .. }) if session_id.as_str() == "stale")
+        );
+        showcase.flush_active_session_requests();
+        assert!(
+            matches!(requests.try_recv(), Ok(AdapterInvocation::SessionInput { data, .. }) if data == "x")
+        );
+    }
+
+    #[test]
+    fn session_worker_disconnect_discards_pending_with_explicit_status() {
+        let (mut showcase, requests) = backpressured_session();
+        showcase.forward_active_session_input(key(KeyCode::Char('x')));
+        showcase.resize_active_session(Size::new(80, 24));
+        drop(requests);
+        showcase.flush_active_session_requests();
+        let active = showcase.active_session.as_ref().unwrap();
+        assert!(active.pending_input.is_empty());
+        assert!(active.pending_resize.is_none());
+        assert!(
+            showcase
+                .adapter_action_status
+                .as_ref()
+                .unwrap()
+                .contains("unavailable")
+        );
+        let (sender, requests) = mpsc::sync_channel(1);
+        showcase.adapter_invocation_sender = Some(sender);
+        showcase.flush_active_session_requests();
+        assert!(requests.try_recv().is_err());
+    }
+
+    #[test]
+    fn session_input_burst_survives_full_queue_in_utf8_order() {
+        let started = Instant::now();
+        let mut showcase = Showcase::new(started);
+        showcase.phase = Phase::Showcase;
+        showcase.section = Section::Adapters;
+        showcase.host_session(
+            AdapterId::new("provider-a").unwrap(),
+            SessionId::new("session-a").unwrap(),
+        );
+        let (sender, requests) = mpsc::sync_channel(ACTION_REQUEST_CHANNEL_CAPACITY);
+        showcase.adapter_invocation_sender = Some(sender);
+        let text = "printf 'héllo 世界 burst test'\n";
+        for character in text.chars() {
+            showcase.handle_key(key(KeyCode::Char(character)));
+        }
+        let mut received = String::new();
+        for _ in 0..3 {
+            if let Ok(AdapterInvocation::SessionInput {
+                adapter_id,
+                session_id,
+                data,
+            }) = requests.try_recv()
+            {
+                assert_eq!(adapter_id.as_str(), "provider-a");
+                assert_eq!(session_id.as_str(), "session-a");
+                received.push_str(&data);
+            }
+            showcase.advance(started + Duration::from_millis(1));
+        }
+        assert_eq!(received.as_bytes(), text.as_bytes());
+        assert!(requests.try_recv().is_err());
+    }
+
     #[test]
     fn active_session_forwards_normalized_input_through_the_bounded_worker() {
         let mut showcase = Showcase::new(Instant::now());
@@ -7913,6 +8200,58 @@ mod tests {
                 data,
             }) if actual_adapter == adapter_id && actual_session == session_id && data == "x"
         ));
+    }
+
+    #[test]
+    fn active_session_owns_quit_characters_and_ctrl_c_until_closed() {
+        let mut showcase = Showcase::new(Instant::now());
+        showcase.phase = Phase::Showcase;
+        showcase.section = Section::Adapters;
+        let adapter_id = AdapterId::new("provider-a").unwrap();
+        let session_id = SessionId::new("session-a").unwrap();
+        showcase.host_session(adapter_id.clone(), session_id.clone());
+        let (sender, receiver) = mpsc::sync_channel(1);
+        showcase.adapter_invocation_sender = Some(sender);
+
+        for (character, ctrl, expected) in [
+            ('q', false, "q"),
+            ('Q', false, "Q"),
+            ('c', true, "\u{3}"),
+            ('C', true, "\u{3}"),
+        ] {
+            let event = KeyEvent {
+                code: KeyCode::Char(character),
+                modifiers: KeyModifiers {
+                    ctrl,
+                    ..KeyModifiers::default()
+                },
+            };
+            let outcome = showcase.handle_key(event);
+            assert!(!outcome.quit, "session input must not quit the showcase");
+            assert!(outcome.redraw);
+            assert!(matches!(
+                receiver.try_recv(),
+                Ok(AdapterInvocation::SessionInput {
+                    adapter_id: actual_adapter,
+                    session_id: actual_session,
+                    data,
+                }) if actual_adapter == adapter_id && actual_session == session_id && data == expected
+            ));
+        }
+
+        showcase.active_session = None;
+        assert!(showcase.handle_key(key(KeyCode::Char('q'))).quit);
+        assert!(
+            showcase
+                .handle_key(KeyEvent {
+                    code: KeyCode::Char('c'),
+                    modifiers: KeyModifiers {
+                        ctrl: true,
+                        ..KeyModifiers::default()
+                    },
+                })
+                .quit
+        );
     }
 
     #[test]

@@ -46,8 +46,9 @@ adapter. You do not need to set up Hermes just to explore the showcase.
    the demonstration modal. Follow the visible prompts for the active overlay.
 5. Press `8` to open **Adapters**. An empty list is normal on a fresh installation.
 
-Use `q` or `Ctrl+C` to exit and restore the terminal. Ordinary letters can be
-captured by a focused editor/session, so leave that mode first or use `Ctrl+C`.
+Use `q` or `Ctrl+C` to exit and restore the terminal outside an active adapter
+session. A hosted session owns those keys: `q` is text and `Ctrl+C` reaches the
+remote process. Close it with `Alt+X` first, then quit the showcase.
 A larger terminal makes the panels easier to read; the README screenshots use
 160 × 48 cells, not a mandatory minimum.
 
@@ -117,7 +118,11 @@ that no process exists. `C` switches between adapter and capability browsing.
 The Capability Browser lists reported contracts/providers; it does not invoke
 capabilities. What other live views/actions expose depends on the provider.
 
-No trusted domain provider available? The [reference mock guide](reference-mock-adapter.md)
+For real container data and a text shell, follow the optional
+[Docker adapter guide](docker-adapter.md). It requires Python, Docker access and
+an explicitly bound container; installing DragonsTUI alone does not enable it.
+
+For a service-free exercise, the [reference mock guide](reference-mock-adapter.md)
 provides a separate, isolated source-checkout exercise. It uses fixture data and
 echo sessions, not a real service or shell. Installing the mock executable on
 PATH alone does not register an adapter. Do not invent a registry URL to fill

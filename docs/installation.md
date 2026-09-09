@@ -179,10 +179,11 @@ credentials, and persistent data; those are not managed by these UI settings.
 
 ## Adapters are optional and require trust
 
-No Docker, Git, PostgreSQL, Kubernetes, process, port, logs, database, or other
-domain adapter is bundled. Installing the four binaries neither installs a
-provider into your adapter root nor downloads one automatically. There is no
-default registry to configure for an empty first run.
+The four native binary bundles do not include domain providers. Installing
+them neither installs a provider into your adapter root nor downloads one
+automatically. There is no default registry for an empty first run. A reviewed
+source checkout includes a separately installed [Docker adapter](docker-adapter.md)
+with its own Python/Docker requirements and explicit container binding.
 
 To add a provider, first choose and review a trusted registry (a local registry
 file or HTTPS URL), its publisher, and the provider's own requirements. See

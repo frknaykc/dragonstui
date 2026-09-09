@@ -463,9 +463,13 @@ def shutdown_controller(endpoint: dict[str, str]) -> None:
     require(address.startswith("127.0.0.1:"), "controller endpoint was not loopback")
     _, port = address.rsplit(":", 1)
     with socket.create_connection(("127.0.0.1", int(port)), timeout=2) as stream:
-        stream.sendall(json.dumps({"token": token, "command": "Shutdown"}).encode("utf-8") + b"\n")
-        response = stream.recv(4096)
-    require(b"Completed" in response, "controller daemon did not acknowledge shutdown")
+        stream.sendall(json.dumps({"token": token, "command": {"command": "shutdown"}}).encode("utf-8") + b"\n")
+        with stream.makefile("rb") as reader:
+            response = reader.readline(65537)
+    require(len(response) <= 65536 and response.endswith(b"\n"),
+            "controller shutdown response exceeded its frame bound or was incomplete")
+    require(json.loads(response).get("status") == "Completed",
+            "controller daemon did not acknowledge shutdown")
 
 
 def assert_no_fixture_processes(root: Path) -> None:

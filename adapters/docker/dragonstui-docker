@@ -1,0 +1,719 @@
+#!/usr/bin/env python3
+"""Standalone Docker CLI provider for DragonsTUI protocol v1 (Python 3.10+).
+
+Inherits PATH and Docker context/TLS/host environment deliberately. Never executes
+host shell strings. Interactive sessions require Linux /proc and /bin/sh inside
+the target; they are TERM=dumb text shells, not a terminal emulator. SIGKILL,
+daemon/network loss and hostile shell code cannot offer guaranteed remote cleanup.
+"""
+import argparse
+import codecs
+import concurrent.futures
+import fcntl
+import json
+import math
+import os
+import queue
+import re
+import select
+import signal
+import struct
+import subprocess
+import sys
+import termios
+import threading
+import time
+import uuid
+
+VERSION = "0.1.0"
+FRAME_LIMIT = 65536
+COMMAND_LIMIT = 131072
+REQUEST_LIMIT = 4096
+PENDING_LIMIT = 8
+FULL_ID = re.compile(r"[0-9a-f]{64}\Z")
+REQUEST_ID = re.compile(r"[A-Za-z0-9._:-]{1,128}\Z")
+READS = ("docker.list", "docker.inspect", "docker.logs", "docker.metrics")
+MUTATIONS = ("docker.start", "docker.stop", "docker.restart")
+
+
+class ProviderError(Exception):
+    pass
+
+
+def stop_cli(proc):
+    """Reap an owned CLI; macOS may deny killpg while its group is exiting."""
+    if proc.poll() is None:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except PermissionError:
+            # Popen retains authority over this exact unreaped child PID.
+            if proc.poll() is None:
+                proc.kill()
+        except ProcessLookupError:
+            pass
+    return proc.wait(timeout=1)
+
+
+def json_load(text):
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError("duplicate JSON key")
+            result[key] = value
+        return result
+    value = json.loads(text, object_pairs_hook=pairs,
+                       parse_constant=lambda _: (_ for _ in ()).throw(ValueError("nonfinite JSON")))
+    # Reject invalid Unicode and nonfinite floats recursively, including payloads.
+    def check(item):
+        if isinstance(item, str):
+            item.encode("utf-8", "strict")
+        elif isinstance(item, float) and not math.isfinite(item):
+            raise ValueError("nonfinite JSON")
+        elif isinstance(item, dict):
+            for k, v in item.items():
+                check(k)
+                check(v)
+        elif isinstance(item, list):
+            for v in item:
+                check(v)
+    check(value)
+    return value
+
+
+def geometry(message):
+    values = (message.get("rows"), message.get("columns"))
+    if any(type(v) is not int or not 1 <= v <= 65535 for v in values):
+        raise ProviderError("rows and columns must be integers in 1..65535")
+    return values
+
+
+def quantity(text):
+    match = re.fullmatch(r"\s*([0-9]+(?:\.[0-9]+)?)\s*([kMGTPE]?i?B|B)\s*", text)
+    if not match:
+        raise ProviderError("Docker returned an invalid byte quantity")
+    unit = match[2]
+    power = {"B": 0, "kB": 1, "MB": 2, "GB": 3, "TB": 4, "PB": 5, "EB": 6,
+             "KiB": 1, "MiB": 2, "GiB": 3, "TiB": 4, "PiB": 5, "EiB": 6}.get(unit)
+    if power is None:
+        raise ProviderError("Docker returned an unsupported byte unit")
+    return float(match[1]) * (1024 if "i" in unit else 1000) ** power
+
+
+class Docker:
+    def __init__(self, binary, timeout, stopping, context=None):
+        self.binary, self.timeout, self.stopping = binary, timeout, stopping
+        self.argv = [binary] + (["--context", context] if context else [])
+
+    def run(self, args, cleanup=False, limit=COMMAND_LIMIT, merge_stderr=False, timeout=None):
+        """Bound both pipes and wall time; never communicate() an unbounded stream."""
+        try:
+            proc = subprocess.Popen([*self.argv, *args], stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    shell=False, start_new_session=True)
+        except OSError as exc:
+            raise ProviderError("Docker CLI could not be started") from exc
+        buffers = {proc.stdout: bytearray(), proc.stderr: bytearray()}
+        active = list(buffers)
+        merged = bytearray()
+        deadline = time.monotonic() + (self.timeout if timeout is None else min(timeout, self.timeout))
+        try:
+            for pipe in active:
+                os.set_blocking(pipe.fileno(), False)
+            while active:
+                if (self.stopping.is_set() and not cleanup) or time.monotonic() >= deadline:
+                    raise ProviderError("Docker command cancelled or timed out; outcome may be uncertain")
+                readable, _, _ = select.select(active, [], [], 0.05)
+                for pipe in readable:
+                    data = os.read(pipe.fileno(), 8192)
+                    if not data:
+                        active.remove(pipe)
+                        continue
+                    buffers[pipe].extend(data)
+                    if merge_stderr:
+                        merged.extend(data)
+                    if sum(map(len, buffers.values())) > limit:
+                        raise ProviderError("Docker command output limit exceeded")
+            remaining = max(0.01, deadline - time.monotonic())
+            code = proc.wait(timeout=remaining)
+            if code:
+                # Docker errors may contain environment/credentials or container logs.
+                raise ProviderError("Docker command failed (exit %d); check Docker access and target state" % code)
+            return bytes(merged if merge_stderr else buffers[proc.stdout]).decode("utf-8", "replace")
+        except subprocess.TimeoutExpired as exc:
+            raise ProviderError("Docker command timed out; outcome may be uncertain") from exc
+        finally:
+            try:
+                stop_cli(proc)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise ProviderError("Local Docker CLI termination could not be verified") from exc
+            finally:
+                for pipe in buffers:
+                    pipe.close()
+
+    def resolve(self, selector):
+        if not selector or selector.startswith("-") or len(selector) > 256 or any(c.isspace() for c in selector):
+            raise ProviderError("invalid container selector")
+        result = self.run(["container", "inspect", "--format", "{{.Id}}", selector]).strip()
+        if not FULL_ID.fullmatch(result):
+            raise ProviderError("container selector did not resolve to exactly one full ID")
+        return result
+
+    def listing(self):
+        text = self.run(["container", "ls", "--all", "--no-trunc", "--format", "{{json .}}"])
+        rows = []
+        lines = text.splitlines()
+        for line in lines[:100]:
+            item = json_load(line)
+            rows.append({key: str(item.get(key, ""))[:256]
+                         for key in ("ID", "Names", "Image", "State", "Status", "Ports")})
+        while rows and len(json.dumps(rows, ensure_ascii=True)) > 20000:
+            rows.pop()
+        return {"containers": rows, "truncated": len(lines) > len(rows)}
+
+    def inspect(self, target):
+        # Projection happens INSIDE Docker: raw Config.Env/labels/mount paths never
+        # cross this subprocess pipe, let alone enter protocol events or errors.
+        template = ('{"id":{{json .Id}},"name":{{json .Name}},"image_id":{{json .Image}},'
+                    '"created":{{json .Created}},"state":{"status":{{json .State.Status}},'
+                    '"running":{{json .State.Running}},"paused":{{json .State.Paused}},'
+                    '"restarting":{{json .State.Restarting}},"exit_code":{{json .State.ExitCode}}}}')
+        return json_load(self.run(["container", "inspect", "--format", template, target]))
+
+    def metrics(self, target):
+        lines = self.run(["container", "stats", "--no-stream", "--no-trunc", "--format", "{{json .}}", target]).splitlines()
+        if len(lines) != 1:
+            raise ProviderError("Docker returned no unique metrics sample")
+        item = json_load(lines[0])
+        result = {}
+        for source, name in (("CPUPerc", "cpu_percent"), ("MemPerc", "memory_percent")):
+            value = item.get(source, "")
+            if not re.fullmatch(r"[0-9]+(?:\.[0-9]+)?%", value):
+                raise ProviderError("Docker returned an invalid percentage")
+            result[name] = {"value": float(value[:-1]), "unit": "%"}
+        for source, names in (("MemUsage", ("memory_bytes", "memory_limit_bytes")),
+                              ("NetIO", ("network_rx_bytes", "network_tx_bytes")),
+                              ("BlockIO", ("block_read_bytes", "block_write_bytes"))):
+            parts = item.get(source, "").split("/")
+            if len(parts) != 2:
+                raise ProviderError("Docker returned an invalid metrics pair")
+            for name, part in zip(names, parts):
+                result[name] = {"value": quantity(part), "unit": "bytes"}
+        pids = item.get("PIDs", "")
+        if not re.fullmatch(r"[0-9]+", pids):
+            raise ProviderError("Docker returned an invalid process count")
+        result["processes"] = {"value": int(pids), "unit": "count"}
+        return {"container": target, "metrics": result}
+
+
+# The startup shell identifies itself before exec (PID/starttime survive exec).
+# Cleanup validates Linux procfs starttime, avoiding PID reuse and name matching.
+# No files are created and no container-wide kill/stop is used for session close.
+START_SCRIPT = ('IFS= read -r s < /proc/$$/stat || exit 125; '
+                'printf "\\036DRAGONSTUI:%s:%s:%s\\037\\n" "$1" "$$" "$s"; '
+                'exec /bin/sh -i +m')
+CLEAN_SCRIPT = '''pid=$1; expected=$2; pgid=$3; sid=$4
+# Only a dedicated exec session/process-group leader is an admissible anchor.
+case "$pid:$expected:$pgid:$sid" in *[!0-9:]*|'') exit 1;; esac
+[ "$pid" -gt 1 ] && [ "$pid" = "$pgid" ] && [ "$pid" = "$sid" ] || exit 1
+members() {
+  for path in /proc/[0-9]*/stat; do
+    IFS= read -r s < "$path" 2>/dev/null || continue
+    s=${s##*) }; set -- $s
+    [ "$3" = "$pgid" ] && [ "$4" = "$sid" ] || continue
+    [ "$1" = Z ] || return 0
+  done
+  return 1
+}
+if [ -r "/proc/$pid/stat" ]; then
+  IFS= read -r s < "/proc/$pid/stat" || exit 1
+  s=${s##*) }; set -- $s
+  [ "$3" = "$pgid" ] && [ "$4" = "$sid" ] || exit 1
+  shift 19
+  [ "$1" = "$expected" ] || exit 1
+  # Negative PID targets only the verified dedicated group, including ordinary jobs.
+  # BusyBox ash kill does not accept --; the explicit signal disambiguates PGID.
+  kill -KILL "-$pgid" || exit 1
+else
+  # Never signal an unanchored/reused group after a natural shell exit.
+  members && exit 1
+  exit 0
+fi
+n=0
+while [ "$n" -lt 12 ]; do
+  members || exit 0
+  sleep 0.05
+  n=$((n + 1))
+done
+exit 1
+'''
+
+
+class Session:
+    def __init__(self, provider, request):
+        self.provider, self.request = provider, request
+        self.id = "exec-" + uuid.uuid4().hex
+        self.stop = threading.Event()
+        self.input = queue.Queue(maxsize=32)
+        self.size = geometry(request)
+        self.thread = threading.Thread(target=self.run, name="docker-pty")
+        self.opened = False
+        self.failed_cleanup = False
+
+    def cleanup_remote(self, identity):
+        pid, starttime, pgid, sid = identity
+        try:
+            self.provider.docker.run(["exec", self.provider.target, "/bin/sh", "-c", CLEAN_SCRIPT,
+                                      "dragonstui-cleanup", pid, starttime, pgid, sid], cleanup=True, timeout=1.2)
+            return True
+        except ProviderError:
+            # A stopped/removed container also proves the exec cannot be running.
+            try:
+                state = self.provider.docker.run(["container", "inspect", "--format",
+                                                   "{{.State.Running}}", self.provider.target], cleanup=True, timeout=0.25).strip()
+                if state == "false":
+                    return True
+            except ProviderError:
+                pass
+            return False
+
+    def run(self):
+        proc, master, slave, identity = None, None, None, None
+        exit_code = None
+        try:
+            master, slave = os.openpty()
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", *self.size, 0, 0))
+            proc = subprocess.Popen([*self.provider.docker.argv, "exec", "-it", "--env", "TERM=dumb",
+                                     self.provider.target, "/bin/sh", "-c", START_SCRIPT,
+                                     "dragonstui-session", self.id], stdin=slave, stdout=slave, stderr=slave,
+                                    shell=False, start_new_session=True)
+            os.close(slave)
+            slave = None
+            os.set_blocking(master, False)
+            startup = bytearray()
+            deadline = time.monotonic() + self.provider.docker.timeout
+            # Do not abort startup on close: capture immutable remote identity first.
+            while identity is None:
+                if self.stop.is_set() or self.provider.stopping.is_set():
+                    deadline = min(deadline, time.monotonic() + 0.15)
+                if time.monotonic() > deadline:
+                    raise ProviderError("exec startup timed out; remote cleanup could not be verified")
+                ready, _, _ = select.select([master], [], [], 0.05)
+                if not ready:
+                    continue
+                chunk = os.read(master, 4096)
+                if not chunk:
+                    raise ProviderError("exec ended before remote identity was established")
+                startup.extend(chunk)
+                if len(startup) > 16384:
+                    raise ProviderError("exec startup output limit exceeded")
+                marker = re.search(rb"\x1eDRAGONSTUI:" + self.id.encode() + rb":([0-9]+):([^\x1f]+)\x1f\r?\n", startup)
+                if marker:
+                    stat = marker[2].decode("ascii")
+                    fields = stat.rsplit(") ", 1)[1].split()
+                    identity = (marker[1].decode(), fields[19], fields[2], fields[3])
+                    if (not all(v.isdigit() for v in identity) or int(identity[0]) <= 1
+                            or identity[0] != identity[2] or identity[0] != identity[3]):
+                        raise ProviderError("invalid remote process identity")
+                    remainder = startup[marker.end():]
+            # Docker CLI has no controlling local terminal (start_new_session).
+            # Explicit notification is required even for the initial remote size.
+            os.kill(proc.pid, signal.SIGWINCH)
+            self.opened = True
+            self.provider.emit("session_opened", id=self.request["id"], session_id=self.id)
+            decoder = codecs.getincrementaldecoder("utf-8")("replace")
+            if remainder:
+                self.provider.emit("session_output", session_id=self.id, data=decoder.decode(remainder))
+            pending, last_size = bytearray(), self.size
+            while not self.stop.is_set() and not self.provider.stopping.is_set():
+                if self.size != last_size:
+                    last_size = self.size
+                    fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", *last_size, 0, 0))
+                    os.kill(proc.pid, signal.SIGWINCH)
+                if not pending:
+                    try:
+                        pending.extend(self.input.get_nowait())
+                    except queue.Empty:
+                        pass
+                readable, writable, _ = select.select([master], [master] if pending else [], [], 0.05)
+                if writable:
+                    try:
+                        del pending[:os.write(master, pending)]
+                    except BlockingIOError:
+                        pass
+                if readable:
+                    try:
+                        chunk = os.read(master, 4096)
+                    except OSError:
+                        break
+                    if not chunk:
+                        break
+                    data = decoder.decode(chunk)
+                    if data:
+                        self.provider.emit("session_output", session_id=self.id, data=data)
+                if proc.poll() is not None and not readable:
+                    break
+        except (OSError, ValueError, IndexError, ProviderError) as exc:
+            self.provider.error(self.request["id"] if not self.opened else None,
+                                "exec_failed", str(exc) if isinstance(exc, ProviderError) else "exec PTY failed")
+        finally:
+            if identity is not None:
+                if not self.cleanup_remote(identity):
+                    self.failed_cleanup = True
+                    self.provider.cleanup_failed = True
+                    self.provider.error(None, "cleanup_unverified", "Remote exec shell termination could not be verified")
+            elif proc is not None:
+                self.failed_cleanup = True
+                self.provider.cleanup_failed = True
+                self.provider.error(None, "cleanup_unverified", "Remote exec identity unavailable; shell termination is unverified")
+            if proc is not None:
+                try:
+                    exit_code = stop_cli(proc)
+                except (OSError, subprocess.TimeoutExpired):
+                    self.failed_cleanup = True
+                    self.provider.cleanup_failed = True
+                    self.provider.error(None, "cleanup_unverified", "Local exec CLI termination could not be verified")
+            for fd in (master, slave):
+                if fd is not None:
+                    os.close(fd)
+            if self.opened and not self.failed_cleanup:
+                self.provider.emit("session_exit", session_id=self.id, exit_code=exit_code)
+
+
+class Provider:
+    def __init__(self, options):
+        self.options = options
+        self.stopping = threading.Event()
+        self.docker = Docker(options.docker_bin, options.command_timeout, self.stopping, options.context)
+        self.target = self.docker.resolve(options.container) if options.container else None
+        self.output = queue.Queue(maxsize=64)
+        self.seen = set()
+        self.pool = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="docker-rpc")
+        self.pending = set()
+        self.session = None
+        self.cleanup_failed = False
+        self.handshaken = False
+        self.ack = False
+        self.actions = {"docker.list": "docker.list"}
+        if self.target:
+            self.actions.update({operation: operation for operation in (*READS[1:], *MUTATIONS)})
+
+    def emit(self, message_type, **fields):
+        data = (json.dumps(dict(type=message_type, protocol=1, **fields), ensure_ascii=True,
+                           allow_nan=False, separators=(",", ":")) + "\n").encode()
+        if len(data) > FRAME_LIMIT:
+            raise ProviderError("protocol output frame limit exceeded")
+        try:
+            self.output.put(data, timeout=0.5)
+        except queue.Full:
+            self.stopping.set()
+
+    def error(self, rid, code, message):
+        self.emit("error", id=rid, code=code, message=message[:512])
+
+    def info(self):
+        target = self.target or "none"
+        descriptions = {"list": "List up to 100 containers (read-only)",
+                        "inspect": "Read safe state projection; no environment, labels or mounts",
+                        "logs": "Explicitly read the last 50 log lines; application logs may contain secrets",
+                        "metrics": "Read one actual Docker stats sample",
+                        "start": "Start the bound container", "stop": "Stop the bound container (1 second grace)",
+                        "restart": "Restart the bound container (1 second grace)"}
+        self.emit("adapter_info", id="docker", version=VERSION,
+                  capabilities=list(READS) + (list(MUTATIONS) + ["docker.exec"] if self.target else []),
+                  actions=[dict(id=name, label=operation.removeprefix("docker.").capitalize() + (" " + target[:12] if operation != "docker.list" else " containers"),
+                                operation=operation, description=descriptions[operation.removeprefix("docker.")] + ("; target=" + target if operation != "docker.list" else ""),
+                                confirmation_required=operation in MUTATIONS)
+                           for name, operation in self.actions.items()],
+                  sessions=[dict(capability="docker.exec", label="Shell " + target[:12],
+                                 description="Interactive /bin/sh, TERM=dumb; target=" + target +
+                                 "; Linux /proc required. Close kills the verified shell process group, not deliberately detached jobs.")]
+                  if self.target else [])
+
+    def target_for(self, payload):
+        target = payload.get("container", self.target)
+        if not isinstance(target, str) or not FULL_ID.fullmatch(target):
+            raise ProviderError("a full 64-character container ID is required without --container")
+        return target
+
+    def request(self, message):
+        rid = message["id"]
+        try:
+            operation = message.get("operation")
+            action = message.get("action")
+            if "payload" not in message:
+                raise ProviderError("request payload is required")
+            payload = message["payload"]
+            if payload is None:
+                payload = {}
+            if not isinstance(payload, dict):
+                raise ProviderError("payload must be null or an object")
+            if action is not None:
+                if not isinstance(action, str) or self.actions.get(action) != operation:
+                    raise ProviderError("action must match a declared operation")
+                if payload:
+                    raise ProviderError("declared actions accept only null or empty payload; target is immutable")
+            allowed = {"container", "tail"} if operation == "docker.logs" else ({"container"} if operation in READS[1:] else set())
+            if set(payload) - allowed:
+                raise ProviderError("unsupported payload fields")
+            if operation in MUTATIONS:
+                if not self.target or action is None:
+                    raise ProviderError("mutations require a declared target-bound action")
+                args = ["container", operation.split(".")[1]]
+                if operation != "docker.start":
+                    args += ["--time", "1"]
+                self.docker.run([*args, self.target])
+                result = {"container": self.target, "operation": operation, "completed": True}
+            elif operation == "docker.list":
+                result = self.docker.listing()
+            elif operation == "docker.inspect":
+                result = self.docker.inspect(self.target_for(payload))
+            elif operation == "docker.metrics":
+                result = self.docker.metrics(self.target_for(payload))
+            elif operation == "docker.logs":
+                tail = payload.get("tail", 50)
+                if type(tail) is not int or not 1 <= tail <= 200:
+                    raise ProviderError("tail must be an integer in 1..200")
+                target = self.target_for(payload)
+                # docker logs emits application stderr on CLI stderr. Merge explicitly
+                # only for logs, using a dedicated bounded reader below.
+                result = self.logs(target, tail)
+            else:
+                raise ProviderError("unsupported operation")
+            self.emit("response", id=rid, payload=result)
+            self.observe(operation, result)
+        except (ProviderError, ValueError, TypeError, KeyError) as exc:
+            self.error(rid, "operation_failed", str(exc) if isinstance(exc, ProviderError) else "invalid Docker response")
+
+    def logs(self, target, tail):
+        # CLI stderr is data for `logs`; the common runner keeps diagnostics private.
+        # --details is deliberately absent (it can expose configured env/labels).
+        text = self.docker.run(["container", "logs", "--tail", str(tail), target], limit=24000, merge_stderr=True)
+        return {"container": target, "tail": tail, "text": text[:6000], "truncated": len(text) > 6000}
+
+    def observe(self, operation, result):
+        if operation == "docker.metrics":
+            for name, metric in result["metrics"].items():
+                self.emit("event", stream=result["container"], kind="sample", payload={"container": result["container"]},
+                          observation=dict(type="metric", name=name, **metric))
+        elif operation == "docker.logs":
+            # A Log observation is one display row, not a raw terminal stream.
+            # Keep a bounded recent projection; the RPC retains its bounded text.
+            for line in result["text"].splitlines()[-32:]:
+                safe = "".join("\\u%04x" % ord(c) if ord(c) < 32 or 127 <= ord(c) < 160 else c
+                               for c in line)
+                self.emit("event", stream=result["container"], kind="logs", payload={"tail": result["tail"]},
+                          observation=dict(type="log", text=safe))
+        else:
+            self.emit("event", stream="containers", kind=operation, payload=result,
+                      observation=dict(type="event", title=operation, detail=json.dumps(result, ensure_ascii=True)[:8192]))
+        if operation == "docker.list":
+            for item in result["containers"][:32]:
+                self.emit("event", stream="containers", kind="state", payload=item,
+                          observation=dict(type="status", entity=item["ID"], check="running",
+                                           status="ok" if item["State"] == "running" else "warning"))
+
+    def poll(self):
+        try:
+            self.observe("docker.list", self.docker.listing())
+            if self.target and not self.stopping.is_set():
+                self.observe("docker.metrics", self.docker.metrics(self.target))
+        except (ProviderError, ValueError, TypeError, KeyError):
+            if not self.stopping.is_set():
+                self.emit("event", stream="docker", kind="unavailable", payload={},
+                          observation=dict(type="status", entity=self.target or "docker", check="poll", status="unknown"))
+
+    def admit_id(self, message):
+        rid = message.get("id")
+        if not isinstance(rid, str) or not REQUEST_ID.fullmatch(rid):
+            raise ProviderError("invalid request ID")
+        if rid in self.seen:
+            raise ProviderError("duplicate request ID; not executed again")
+        if len(self.seen) >= REQUEST_LIMIT:
+            raise ProviderError("request lifetime admission limit reached; restart provider")
+        self.seen.add(rid)  # Never evict: replay must not re-run a mutation.
+        return rid
+
+    def handle(self, message):
+        if not isinstance(message, dict) or type(message.get("protocol")) is not int or message["protocol"] != 1:
+            raise ProviderError("unsupported protocol")
+        kind = message.get("type")
+        if kind == "shutdown":
+            self.ack = True
+            self.stopping.set()
+            return
+        if not self.handshaken:
+            if kind != "hello" or not isinstance(message.get("host_version"), str):
+                raise ProviderError("hello required before operations")
+            self.info()
+            self.handshaken = True
+        elif kind == "request":
+            self.admit_id(message)
+            if len(self.pending) >= PENDING_LIMIT:
+                raise ProviderError("request worker capacity reached")
+            self.pending.add(self.pool.submit(self.request, message))
+        elif kind == "session_open":
+            self.admit_id(message)
+            if not self.target or message.get("capability") != "docker.exec":
+                raise ProviderError("session capability is not declared")
+            if self.session and (self.session.thread.is_alive() or self.session.failed_cleanup):
+                raise ProviderError("one session at a time; previous session must be verified closed")
+            self.session = Session(self, message)
+            self.session.thread.start()
+        elif kind in ("session_input", "session_resize", "session_close"):
+            session = self.session
+            if not session or message.get("session_id") != session.id or not session.thread.is_alive():
+                raise ProviderError("unknown active session")
+            if kind == "session_close":
+                session.stop.set()
+            elif session.stop.is_set() or not session.opened:
+                raise ProviderError("session is not accepting input")
+            elif kind == "session_resize":
+                session.size = geometry(message)
+            else:
+                data = message.get("data")
+                if not isinstance(data, str) or len(data.encode("utf-8")) > 4096:
+                    raise ProviderError("session input must be text of at most 4096 bytes")
+                try:
+                    session.input.put_nowait(data.encode("utf-8"))
+                except queue.Full:
+                    raise ProviderError("session input capacity reached")
+        else:
+            raise ProviderError("unexpected message type")
+
+    def run(self):
+        for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            signal.signal(sig, lambda *_: self.stopping.set())
+        stdin, stdout = sys.stdin.fileno(), sys.stdout.fileno()
+        os.set_blocking(stdin, False)
+        os.set_blocking(stdout, False)
+        incoming, outgoing = bytearray(), bytearray()
+        next_poll = time.monotonic() + self.options.poll_interval
+        poll_future = None
+        stalled = None
+        ack_sent = False
+        try:
+            while True:
+                self.pending = {f for f in self.pending if not f.done()}
+                if self.stopping.is_set():
+                    if self.session:
+                        self.session.stop.set()
+                    for future in self.pending:
+                        future.cancel()
+                    alive = self.session and self.session.thread.is_alive()
+                    if not self.pending and not alive and (poll_future is None or poll_future.done()):
+                        if self.ack and not ack_sent and not self.cleanup_failed:
+                            self.emit("shutdown_ack")
+                            ack_sent = True
+                        if not outgoing and self.output.empty():
+                            break
+                elif self.handshaken and self.options.poll_interval and time.monotonic() >= next_poll:
+                    if (poll_future is None or poll_future.done()) and len(self.pending) < PENDING_LIMIT:
+                        poll_future = self.pool.submit(self.poll)
+                        next_poll = time.monotonic() + self.options.poll_interval
+                if not outgoing:
+                    try:
+                        outgoing.extend(self.output.get_nowait())
+                    except queue.Empty:
+                        pass
+                reads = [] if self.stopping.is_set() else [stdin]
+                readable, writable, _ = select.select(reads, [stdout] if outgoing else [], [], 0.03)
+                if outgoing:
+                    stalled = stalled or time.monotonic()
+                    if time.monotonic() - stalled > 2:
+                        self.stopping.set()
+                        outgoing.clear()
+                        while not self.output.empty():
+                            try:
+                                self.output.get_nowait()
+                            except queue.Empty:
+                                break
+                        # Broken/backpressured peer must not prevent resource cleanup.
+                if writable and outgoing:
+                    try:
+                        written = os.write(stdout, outgoing)
+                        del outgoing[:written]
+                        stalled = None
+                    except (BrokenPipeError, OSError):
+                        self.stopping.set()
+                        outgoing.clear()
+                if readable:
+                    chunk = os.read(stdin, 8192)
+                    if not chunk:
+                        self.stopping.set()
+                        continue
+                    incoming.extend(chunk)
+                    while b"\n" in incoming and not self.stopping.is_set():
+                        raw, _, rest = incoming.partition(b"\n")
+                        incoming = bytearray(rest)
+                        message = None
+                        try:
+                            if len(raw) + 1 > FRAME_LIMIT:
+                                raise ProviderError("input frame limit exceeded")
+                            message = json_load(raw.decode("utf-8"))
+                            self.handle(message)
+                        except (ProviderError, ValueError, UnicodeError, RecursionError) as exc:
+                            rid = message.get("id") if isinstance(message, dict) else None
+                            if not isinstance(rid, str) or not REQUEST_ID.fullmatch(rid):
+                                rid = None
+                            self.error(rid, "invalid_request", str(exc) if isinstance(exc, ProviderError) else "malformed JSON frame")
+                    if len(incoming) >= FRAME_LIMIT:
+                        self.error(None, "frame_too_large", "input frame limit exceeded")
+                        self.stopping.set()
+        finally:
+            self.stopping.set()
+            if self.session:
+                self.session.stop.set()
+                self.session.thread.join()
+            self.pool.shutdown(wait=True, cancel_futures=True)
+        return 1 if self.cleanup_failed else 0
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--docker-bin", help="trusted Docker CLI executable (PATH resolved)")
+    parser.add_argument("--context", help="explicit Docker context; otherwise inherit Docker environment")
+    parser.add_argument("--container", help="bind actions/sessions to name or ID resolved once at startup")
+    parser.add_argument("--poll-interval", type=float, help="list/status polling seconds, 0 disables (default: 5)")
+    parser.add_argument("--command-timeout", type=float, default=8.0, help="bounded Docker command seconds (default: 8)")
+    options = parser.parse_args()
+    config_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "docker-config.json")
+    try:
+        try:
+            with open(config_path, "rb") as handle:
+                content = handle.read(8193)
+            if len(content) > 8192:
+                raise ValueError("configuration size limit exceeded")
+            config = json_load(content.decode("utf-8"))
+        except FileNotFoundError:
+            config = {}
+        if not isinstance(config, dict) or set(config) - {"container", "context", "docker_bin", "poll_interval"}:
+            raise ValueError("unknown configuration key")
+        for key, value in config.items():
+            if key == "poll_interval":
+                if type(value) not in (int, float) or not (value == 0 or 1 <= value <= 3600):
+                    raise ValueError("invalid poll interval")
+            elif not isinstance(value, str) or not value or len(value) > 4096 or "\x00" in value:
+                raise ValueError("configuration values must be nonempty bounded strings")
+            if getattr(options, key) is None:
+                setattr(options, key, value)
+        options.docker_bin = options.docker_bin or "docker"
+        if options.poll_interval is None:
+            options.poll_interval = 5.0
+        if options.context is not None and (not options.context or options.context.startswith("-") or len(options.context) > 256):
+            raise ValueError("invalid Docker context")
+    except (OSError, ValueError, UnicodeError):
+        parser.error("invalid docker-config.json or context; expected string keys container/context/docker_bin and numeric poll_interval (0 or 1..3600)")
+    if not math.isfinite(options.poll_interval) or not (options.poll_interval == 0 or 1 <= options.poll_interval <= 3600):
+        parser.error("--poll-interval must be 0 or 1..3600")
+    if not math.isfinite(options.command_timeout) or not 0.1 <= options.command_timeout <= 30:
+        parser.error("--command-timeout must be 0.1..30")
+    try:
+        return Provider(options).run()
+    except (ProviderError, OSError) as exc:
+        print("dragonstui-docker: " + str(exc), file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -2,12 +2,14 @@ import ast
 import contextlib
 import importlib.util
 import io
+import json
 import os
 import pty
 import select
 import tempfile
 import threading
 import unittest
+from unittest.mock import MagicMock, patch
 from pathlib import Path
 
 
@@ -19,6 +21,18 @@ SPEC = importlib.util.spec_from_file_location(
 assert SPEC is not None and SPEC.loader is not None
 HARNESS = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(HARNESS)
+
+
+class ControllerShutdownTests(unittest.TestCase):
+    def test_shutdown_uses_typed_command_and_reads_complete_bounded_response(self):
+        connection = MagicMock()
+        stream = connection.__enter__.return_value
+        stream.makefile.return_value = io.BytesIO(b'{"status":"Completed"}\n')
+        with patch.object(HARNESS.socket, "create_connection", return_value=connection):
+            HARNESS.shutdown_controller({"address": "127.0.0.1:12345", "token": "fixture-token"})
+        request = json.loads(stream.sendall.call_args.args[0])
+        self.assertEqual(request, {"token": "fixture-token", "command": {"command": "shutdown"}})
+        stream.recv.assert_not_called()
 
 
 class ElapsedPollBudgetTests(unittest.TestCase):

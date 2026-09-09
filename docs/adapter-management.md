@@ -4,7 +4,7 @@
 
 Adapter distribution and lifecycle management live in the independent `dragonstui-adapter-host` workspace crate. The core `dragons_tui` framework has no mandatory registry, HTTP, checksum, installer, or CLI dependency. The showcase connects to the host only behind its optional `adapter-showcase` feature.
 
-No Docker, Git, PostgreSQL, Kubernetes, process, port, logs, database, or other domain adapter is included in this repository.
+The optional [Docker adapter](docker-adapter.md) is included as a separately installed Python executable in the source checkout, not in the four native binary bundles. No Git, PostgreSQL, Kubernetes, process, port or database adapter is bundled.
 
 ## Registry and installation
 
