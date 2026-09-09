@@ -25,6 +25,11 @@ jobs:
         run: cargo test --workspace --features adapter-showcase
       - name: Stress harness tests
         run: python3 -m unittest discover -s tools -p test_adapter_stress.py -v
+      - name: Ecosystem harness tests
+        run: |
+          python3 -m unittest discover -s tools -p test_ecosystem_fixture.py -v
+          python3 -m unittest discover -s tools -p 'test_reference_mock*.py'
+          python3 -m unittest discover -s tools -p test_showcase_pty_smoke.py
       - name: Workspace clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Showcase check

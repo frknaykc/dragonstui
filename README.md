@@ -128,6 +128,8 @@ The [multi-adapter stress harness](docs/adapter-stress-testing.md) checks bounde
 
 [Adapter host performance](docs/adapter-performance.md) provides an opt-in release measurement matrix for serialization, RPC, streaming and scheduling, with local raw results and explicit measurement limits.
 
+[Adapter ecosystem showcase](docs/adapter-ecosystem-showcase.md) follows an isolated registry CLI install through real TUI observations, actions, provider crash, explicit restart and diagnostics, with reconstructed PTY frames and reproducible acceptance commands.
+
 Read the details:
 
 - [Adapter host architecture](docs/architecture/adapter-host.md)

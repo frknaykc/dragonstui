@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="920" viewBox="0 0 1440 920">
+<title>M73 crashed — reconstructed PTY text, not an emulator screenshot</title>
+<rect width="1440" height="920" fill="#151515"/>
+<g fill="#dddddd" font-family="monospace" font-size="14" xml:space="preserve">
+<text x="10" y="18">╭─  DragonsTUI Showcase · v0.1.0 ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮</text>
+<text x="10" y="34">│                                                                                                                                   ⠹ Dragonfire immediate mode│</text>
+<text x="10" y="50">│1 Overview 2 Widgets 3 Data 4 Graphics 5 Input 6 Interaction 7 Settings 8 Adapters                                                                            │</text>
+<text x="10" y="66">╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯</text>
+<text x="10" y="82">╔═ Adapters════════════════════════════════════════════════════════════════════════════════════╗║╭─ Adapter╭─ Notifications───────────────────────────────────╮╮</text>
+<text x="10" y="98">║NAME                             VERSION    STATE                PROTOCOLSOURCE               ║║│Adapter I│Adapter connection lost                           ││</text>
+<text x="10" y="114">║Reference Mock                   1.0.0      Stopped              1       Installed            ║║│Name:    │reference: adapter process crashed                ││</text>
+<text x="10" y="130">║                                                                                              ║║│Installed╰──────────────────────────────────────────────────╯│</text>
+<text x="10" y="146">║                                                                                              ║║│Runtime version:        1.0.0                                │</text>
+<text x="10" y="162">║                                                                                              ║║│Protocol:               1                                    │</text>
+<text x="10" y="178">║                                                                                              ║║│State:                  crashed                              │</text>
+<text x="10" y="194">║                                                                                              ║║│PID:                    61989                                │</text>
+<text x="10" y="210">║                                                                                              ║║│Uptime:                 25.454s                              │</text>
+<text x="10" y="226">║                                                                                              ║║│Executable path:        /private/var/folders/h3/lvl9_1sx3n15 │</text>
+<text x="10" y="242">║                                                                                              ║║│Capabilities:           test.echo, test.stream, test.fail, t │</text>
+<text x="10" y="258">║                                                                                              ║║│Pending requests:       0                                    │</text>
+<text x="10" y="274">║                                                                                              ║║│Event queue usage:      0/128                                │</text>
+<text x="10" y="290">║                                                                                              ║║│Dropped events:         0                                    │</text>
+<text x="10" y="306">║                                                                                              ║║│Live events received:   17 · Retained live history: 16/16    │</text>
+<text x="10" y="322">║                                                                                              ║║│Visible live history:   16                                   │</text>
+<text x="10" y="338">║                                                                                              ║║│Live query:             all                                  │</text>
+<text x="10" y="354">║                                                                                              ║║│Live view:              FOLLOW                               │</text>
+<text x="10" y="370">║                                                                                              ║║│Visible selection:      reference · adapter process crashed  │</text>
+<text x="10" y="386">║                                                                                              ║║│Last live adapter:      reference                            │</text>
+<text x="10" y="402">║                                                                                              ║║│Last live stream:       observations                         │</text>
+<text x="10" y="418">║                                                                                              ║║│Last live kind:         fixture / metric                     │</text>
+<text x="10" y="434">║                                                                                              ║║│Last live payload:      {&quot;sequence&quot;:1}                       │</text>
+<text x="10" y="450">║                                                                                              ║║│Last disconnect:        reference: adapter process crashed   │</text>
+<text x="10" y="466">║                                                                                              ║↔│Last error:             adapter stdout closed                │</text>
+<text x="10" y="482">║                                                                                              ║║│stderr diagnostic tail: --                                   │</text>
+<text x="10" y="498">║                                                                                              ║║│                                                             │</text>
+<text x="10" y="514">║                                                                                              ║║│                                                             │</text>
+<text x="10" y="530">║                                                                                              ║║│                                                             │</text>
+<text x="10" y="546">║                                                                                              ║║│                                                             │</text>
+<text x="10" y="562">║                                                                                              ║║│                                                             │</text>
+<text x="10" y="578">║                                                                                              ║║│                                                             │</text>
+<text x="10" y="594">║                                                                                              ║║│                                                             │</text>
+<text x="10" y="610">║                                                                                              ║║│                                                             │</text>
+<text x="10" y="626">║                                                                                              ║║│                                                             │</text>
+<text x="10" y="642">║                                                                                              ║║│                                                             │</text>
+<text x="10" y="658">║                                                                                              ║║│                                                             │</text>
+<text x="10" y="674">║                                                                                              ║║│                                                             │</text>
+<text x="10" y="690">║                                                                                              ║║│                                                             │</text>
+<text x="10" y="706">║                                                                                              ║║│                                                             │</text>
+<text x="10" y="722">║                                                                                              ║║│                                                             │</text>
+<text x="10" y="738">║                                                                                              ║║│                                                             │</text>
+<text x="10" y="754">║                                                                                              ║║│                                                             │</text>
+<text x="10" y="770">║                                                                                              ║║│                                                             │</text>
+<text x="10" y="786">║                                                                                              ║║│                                                             │</text>
+<text x="10" y="802">║                                                                                              ║║│                                                             │</text>
+<text x="10" y="818">║                                                                                              ║║│                                                             │</text>
+<text x="10" y="834">║Interactive session disconnected: adapter process crashed                                     ║║│                                                             │</text>
+<text x="10" y="850">╚══════════════════════════════════════════════════════════════════════════════════════════════╝║╰─────────────────────────────────────────────────────────────╯</text>
+<text x="10" y="866">C capabilities · Tab focus · Ctrl+P commands · q quit</text>
+</g></svg>

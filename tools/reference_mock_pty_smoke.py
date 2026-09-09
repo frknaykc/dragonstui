@@ -18,6 +18,7 @@ import time
 
 import showcase_pty_smoke as h
 from reference_mock_fixture import create_fixture
+from ecosystem_fixture import install_fixture, query
 
 
 def assert_ansi_restored(output: bytearray) -> None:
@@ -70,7 +71,7 @@ def stop_showcase(process: subprocess.Popen | None, master: int | None, output: 
     process.wait(timeout=2.0)
 
 
-def run(controller: Path, mock: Path, showcase: Path, exit_mode: str) -> dict:
+def run(controller: Path, mock: Path, showcase: Path, exit_mode: str, *, ecosystem: bool = False) -> dict:
     binaries = {name: path.resolve(strict=True) for name, path in
                 (("controller", controller), ("mock", mock), ("showcase", showcase))}
     for name, path in binaries.items():
@@ -85,8 +86,13 @@ def run(controller: Path, mock: Path, showcase: Path, exit_mode: str) -> dict:
     output = bytearray()
     control = root / ".reference-control"
     checks = []
+    frames = {}
     try:
-        create_fixture(root, binaries["mock"], gated=True)
+        if ecosystem:
+            control = install_fixture(root, binaries["mock"], binaries["controller"])
+            checks.append("registry CLI installation, matching artifact and provenance, no marker side effects")
+        else:
+            create_fixture(root, binaries["mock"], gated=True)
         daemon = subprocess.Popen(
             [str(binaries["controller"]), "--root", str(root), "controller-daemon"],
             env={**os.environ, "DRAGONSTUI_CONTROLLER_TOKEN": secrets.token_hex(32)},
@@ -137,6 +143,8 @@ def run(controller: Path, mock: Path, showcase: Path, exit_mode: str) -> dict:
         current("Static benchmark context")
         send(b"8")
         current("Reference Mock")
+        if ecosystem:
+            frames["installed"] = h.visible_text(output)
         send(b"s")
         current('Completed: Started { id: AdapterId("reference") }')
         h.wait_for_property(master, output, "Live events received:", "8", 5.0, "first reference batch absent")
@@ -146,6 +154,8 @@ def run(controller: Path, mock: Path, showcase: Path, exit_mode: str) -> dict:
         send(b"o")
         current("Observability · Logs")
         current("fixture log startup")
+        if ecosystem:
+            frames["logs"] = h.visible_text(output)
         for key, title, sample in (
             (b"2", "Metrics", "fixture.value"),
             (b"3", "Heatmap", "▓"),
@@ -156,6 +166,8 @@ def run(controller: Path, mock: Path, showcase: Path, exit_mode: str) -> dict:
             send(key)
             current(f"Observability · {title}")
             current(sample)
+            if ecosystem:
+                frames[title.lower()] = h.visible_text(output)
             if title == "Heatmap":
                 current("░")
                 current("▒")
@@ -170,6 +182,8 @@ def run(controller: Path, mock: Path, showcase: Path, exit_mode: str) -> dict:
         expected = ["fixture.action.alpha"]
         actions(expected)
         terminal_operation("Alpha · succeeded", "Operation succeeded")
+        if ecosystem:
+            frames["action"] = h.visible_text(output)
         send(b"\x1b[B\r")
         expected.append("fixture.destroy.everything")
         actions(expected)
@@ -240,6 +254,31 @@ def run(controller: Path, mock: Path, showcase: Path, exit_mode: str) -> dict:
         send(b"\r")
         h.wait_for_session_host(master, output, 2.0, "outer-exit session did not open")
         sessions(["fixture-session"])
+        if ecosystem:
+            before = query(endpoint, {"command": "diagnostics", "id": "reference"})["Diagnostics"]
+            h.require(before["state"] == "running" and before["pid"] is not None, "provider not running before crash")
+            query(endpoint, {"command": "input_session", "id": "reference",
+                             "session_id": "fixture-session", "data": "fixture.crash-provider"})
+            h.wait_for_session_browser(master, output, 3.0, "provider crash did not close hosted UI")
+            send(b"h")
+            h.wait_for_property(master, output, "State:", "crashed", 4.0, "crashed diagnostics absent")
+            crashed = query(endpoint, {"command": "diagnostics", "id": "reference"})["Diagnostics"]
+            h.require(crashed["state"] == "crashed" and crashed["last_error"], "missing authoritative crash reason")
+            frames["crashed"] = h.visible_text(output)
+            send(b"r")
+            current('Completed: Restarted { id: AdapterId("reference") }')
+            h.wait_for_property(master, output, "State:", "running", 4.0, "restarted diagnostics absent")
+            after = query(endpoint, {"command": "diagnostics", "id": "reference"})["Diagnostics"]
+            h.require(after["state"] == "running" and after["pid"] is not None
+                      and after["pid"] != before["pid"] and after["last_error"] is None,
+                      "restart did not produce a healthy fresh provider")
+            frames["restarted"] = h.visible_text(output)
+            checks.append("provider crash with authoritative reason, TUI explicit restart and fresh running PID")
+            send(b"h")
+            h.wait_for_session_browser(master, output, 3.0, "restarted sessions absent")
+            send(b"\r")
+            h.wait_for_session_host(master, output, 3.0, "restarted session did not open")
+            sessions(["fixture-session"])
         if exit_mode in ("q", "ctrl-c"):
             send(b"q" if exit_mode == "q" else b"\x03")
         else:
@@ -287,7 +326,7 @@ def run(controller: Path, mock: Path, showcase: Path, exit_mode: str) -> dict:
     h.require(identities == {name: hashlib.sha256(path.read_bytes()).hexdigest()
                             for name, path in binaries.items()}, "binaries changed during acceptance")
     return {"status": "passed", "exit": exit_mode, "binary_sha256": identities,
-            "session_terminal_evidence": terminal_evidence, "checks": checks}
+            "session_terminal_evidence": terminal_evidence, "checks": checks, "ecosystem_frames": frames}
 
 
 def main() -> int:
@@ -296,8 +335,9 @@ def main() -> int:
     parser.add_argument("--mock", type=Path, required=True)
     parser.add_argument("--showcase", type=Path, required=True)
     parser.add_argument("--exit", choices=("q", "ctrl-c", "sigterm", "sighup"), default="q")
+    parser.add_argument("--ecosystem", action="store_true", help="M73 registry installation and provider crash/restart flow")
     args = parser.parse_args()
-    print(json.dumps(run(args.controller, args.mock, args.showcase, args.exit), indent=2))
+    print(json.dumps(run(args.controller, args.mock, args.showcase, args.exit, ecosystem=args.ecosystem), indent=2))
     return 0
 
 
