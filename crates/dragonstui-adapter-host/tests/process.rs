@@ -10,6 +10,30 @@ fn mock_executable() -> PathBuf {
     PathBuf::from(std::env::var("CARGO_BIN_EXE_dragonstui-adapter-host-mock").unwrap())
 }
 
+#[cfg(unix)]
+#[test]
+fn provider_environment_excludes_reserved_controller_bootstrap_key() {
+    let mut process = AdapterProcess::start(
+        AdapterProcessConfig::new("/bin/sh")
+            .arg("-c")
+            .arg("test -z \"${DRAGONSTUI_CONTROLLER_TOKEN+x}\"")
+            .env("DRAGONSTUI_CONTROLLER_TOKEN", "fixture-only"),
+    )
+    .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if let ProcessStatus::Exited { success, .. } = process.status() {
+            assert!(
+                success,
+                "reserved bootstrap key reached provider environment"
+            );
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "fixture did not exit");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 #[test]
 fn process_uses_piped_protocol_stdout_and_keeps_stderr_as_diagnostics() {
     let config = AdapterProcessConfig::new(mock_executable())

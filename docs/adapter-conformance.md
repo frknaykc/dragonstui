@@ -31,7 +31,7 @@ The executable is resolved before launch; remaining arguments are passed literal
 | --- | --- | --- |
 | JSON Lines / wire types | Always, for received frames | Adapter-origin message direction, protocol 1, typed fields, identifiers, option/default behavior, observations and correlation/order. Unknown additive fields remain accepted. |
 | Handshake | Always | Expected adapter ID; nonempty version and optional exact expected version; unique nonempty capability list. Wire versions are not forced into a new SemVer policy. |
-| Declarations | Always | Decode actions/sessions; check their capability references against advertised capabilities, as required by the existing v1 document. This suite check is distinct from the runtime's more permissive wire handshake. |
+| Declarations | Always in the first cycle | Decode actions/sessions; check their capability references against advertised capabilities, as required by the existing v1 document. This suite check is distinct from the runtime's more permissive wire handshake. The restart cycle repeats wire decoding, but not these capability cross-reference checks. |
 | RPC / actions | Profile `requests` | Unique IDs; pipelined requests allow out-of-order replies. Assert response/error/either and optional payload/error-code equality. No unsolicited unknown/duplicate reply IDs. A global error without an ID is valid and counted without retaining its message. |
 | Confirmation intent | Profile action | An action declaring `confirmation_required` needs profile `confirmed: true`. Ambiguous action identities cannot be selected. This is explicit noninteractive test intent, not UI-dialog verification, permission or authorization. |
 | Events | Profile `events` | Minimum event count and optional typed observation kinds/generic event requirement. All received events are decoded even without an event scenario. No domain/payload heuristics. |
@@ -61,8 +61,8 @@ Stdout contains one JSON result with `schema_version`, `status`, `scope: request
 | Exit | Meaning |
 | --- | --- |
 | 0 | All requested checks passed; inspect `skipped` for untested surfaces. |
-| 1 | Protocol/scenario/deadline/cleanup failure. Inspect the check name and stable code; not every failure is a wire violation. |
-| 2 | CLI/profile configuration error. |
+| 1 | Protocol/scenario/deadline/cleanup failure, including declaration-dependent `profile_*` errors detected after handshake. Inspect the check name and stable code; not every failure is a wire violation. |
+| 2 | CLI/profile configuration error detected before provider launch. |
 | 128 + signal | Catchable interruption; JSON status `interrupted` and cleanup evidence. |
 
 ## Maintaining the suite

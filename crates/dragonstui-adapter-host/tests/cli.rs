@@ -6,6 +6,7 @@ use std::{
 };
 
 use dragonstui_adapter_host::ControllerClient;
+use sha2::{Digest, Sha256};
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -209,6 +210,25 @@ fn cli_returns_a_nonzero_exit_code_for_an_unknown_adapter() {
 }
 
 #[test]
+fn cli_rejects_nonlocal_endpoint_without_replacing_it() {
+    let root = temp_path("endpoint-policy");
+    let path = root.join(".controller/endpoint.json");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let fixture = br#"{"address":"192.0.2.1:1","token":"fixture-only"}"#;
+    fs::write(&path, fixture).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_dragonstui-adapter"))
+        .arg("--root")
+        .arg(&root)
+        .args(["start", "mock"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("must use a loopback address"));
+    assert!(fs::read(&path).unwrap() == fixture);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn cli_lifecycle_command_autostarts_an_authenticated_controller_and_leaves_no_daemon() {
     let root = temp_path("controller-store");
     let binary = env!("CARGO_BIN_EXE_dragonstui-adapter");
@@ -305,6 +325,102 @@ fn cli_start_stop_restart_and_live_state_share_the_persistent_controller() {
         .unwrap();
     assert!(info.status.success());
     assert!(String::from_utf8_lossy(&info.stdout).contains("State: running"));
+
+    // Registry preparation failure must not stop the controller-owned adapter.
+    let failed_update = Command::new(binary)
+        .arg("--root")
+        .arg(&root)
+        .args(["update", "mock", "--registry"])
+        .arg(root.join("missing-registry.json"))
+        .output()
+        .unwrap();
+    assert!(!failed_update.status.success());
+    let after_failure = Command::new(binary)
+        .arg("--root")
+        .arg(&root)
+        .args(["info", "mock"])
+        .output()
+        .unwrap();
+    assert!(after_failure.status.success());
+    assert!(String::from_utf8_lossy(&after_failure.stdout).contains("State: running"));
+
+    let registry_path = root.join("replacement-registry.json");
+    let (os, architecture) = current_platform();
+    let mut registry = serde_json::json!({"adapters": [{
+        "id": "mock", "name": "Mock", "releases": [{
+            "version": "2.0.0", "protocol_version": 1, "artifacts": [{
+                "os": os, "architecture": architecture,
+                "source": format!("file://{}", executable.display()),
+                "sha256": "0".repeat(64), "executable": "bin/mock"
+            }]
+        }]
+    }]});
+    fs::write(&registry_path, serde_json::to_vec(&registry).unwrap()).unwrap();
+    let checksum_failure = Command::new(binary)
+        .arg("--root")
+        .arg(&root)
+        .args(["update", "mock", "--registry"])
+        .arg(&registry_path)
+        .output()
+        .unwrap();
+    assert!(!checksum_failure.status.success());
+    let after_checksum = Command::new(binary)
+        .arg("--root")
+        .arg(&root)
+        .args(["info", "mock"])
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&after_checksum.stdout).contains("State: running"));
+    registry["adapters"][0]["releases"][0]["artifacts"][0]["sha256"] = serde_json::json!(format!(
+        "{:x}",
+        Sha256::digest(fs::read(&executable).unwrap())
+    ));
+    fs::write(&registry_path, serde_json::to_vec(&registry).unwrap()).unwrap();
+
+    // A failed maintenance status check must preserve both files and runtime state.
+    // Only this test-owned endpoint is changed; the actual credential is never logged.
+    let endpoint_path = root.join(".controller/endpoint.json");
+    let original = fs::read(&endpoint_path).unwrap();
+    let mut endpoint: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    endpoint["token"] = serde_json::json!("fixture-invalid-credential");
+    fs::write(&endpoint_path, serde_json::to_vec(&endpoint).unwrap()).unwrap();
+    let failed_remove = Command::new(binary)
+        .arg("--root")
+        .arg(&root)
+        .args(["remove", "mock", "--yes"])
+        .output()
+        .unwrap();
+    let failed_update = Command::new(binary)
+        .arg("--root")
+        .arg(&root)
+        .args(["update", "mock", "--registry"])
+        .arg(&registry_path)
+        .output()
+        .unwrap();
+    let failed_start = run_lifecycle_command(binary, &root, "start");
+    assert!(fs::read(&endpoint_path).unwrap() == serde_json::to_vec(&endpoint).unwrap());
+    fs::write(&endpoint_path, original).unwrap();
+    assert!(!failed_remove.status.success());
+    assert!(!failed_update.status.success());
+    assert!(!failed_start.status.success());
+    assert!(root.join("mock/adapter.json").is_file());
+    assert!(!root.join(".staging").exists());
+
+    let update = Command::new(binary)
+        .arg("--root")
+        .arg(&root)
+        .args(["update", "mock", "--registry"])
+        .arg(&registry_path)
+        .output()
+        .unwrap();
+    assert!(
+        update.status.success(),
+        "{}",
+        String::from_utf8_lossy(&update.stderr)
+    );
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join("mock/adapter.json")).unwrap()).unwrap();
+    assert_eq!(manifest["version"], "2.0.0");
 
     shutdown_controller(&root);
     let _ = fs::remove_dir_all(root);

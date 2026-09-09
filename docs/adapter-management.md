@@ -10,7 +10,7 @@ No Docker, Git, PostgreSQL, Kubernetes, process, port, logs, database, or other 
 
 A provider-neutral `Registry` document contains adapter entries, releases, and exact `os`/`architecture` artifacts. The supported normalized platform names are `macos`, `linux`, and `windows`, with `aarch64` and `x86_64` architectures. Artifact sources are local `file://` paths or HTTPS URLs; the model does not depend on GitHub.
 
-Installation selects an explicit requested version or the latest compatible SemVer release, then selects an exact platform artifact. It streams bytes through a configurable cap (default 64 MiB), computes SHA-256 while writing private staging output, validates expected size and digest, and atomically installs the discoverable manifest/executable layout. Partial or failed staging does not become an installed adapter.
+Installation selects an explicit requested version or the highest parseable SemVer release, then requires an exact platform artifact in that release. It does not fall back to an older release for platform compatibility or filter releases by protocol compatibility. It streams bytes through a configurable cap (default 64 MiB), computes SHA-256 while writing non-discoverable staging output, validates expected size and digest, and publishes the initial manifest/executable directory with a rename. Staging permissions follow the local filesystem creation policy; hidden staging is not a permission sandbox. Partial or failed verification does not become an installed adapter.
 
 **Install does not start an adapter.** Execution requires a separate explicit lifecycle command.
 
@@ -22,7 +22,9 @@ SHA-256 verifies that downloaded bytes match the registry metadata. It does **no
 
 ## Update and remove
 
-Update stages and validates the replacement before atomic installation, preserving the existing installed version when download or verification fails. Update and remove first unregister controller-owned runtime state, so they stop a running adapter and clear lifecycle, capability, and diagnostic state. Remove is limited to a direct adapter directory beneath the configured local root.
+Update selects the highest parseable SemVer release newer than the installed version, then requires its exact platform artifact. Both the CLI and embedding management coordinator stage and validate the replacement before unregistering runtime state, preserving the installed version and running provider on download or verification failure. Update and remove unregister controller-owned state before filesystem mutation. CLI maintenance aborts on controller status/authentication/transport errors or unexpected responses; only an absent endpoint or an explicit missing-state reply permits proceeding without unregister.
+
+Replacement uses two renames (installed directory to backup, then staging to installed directory), with best-effort rollback if the second rename fails. It is not a single atomic exchange, crash-durable transaction or cross-client maintenance lock. CLI update leaves the adapter stopped after unregister, including a commit failure; restart is explicit. The embedding `AdapterManagement` coordinator separately attempts to restore a previously running adapter after commit or commit failure. Remove is limited to a direct adapter directory beneath the configured local root.
 
 ## CLI
 
@@ -40,7 +42,9 @@ dragonstui-adapter stop <id>
 dragonstui-adapter restart <id>
 ```
 
-Lifecycle calls use a controller daemon with authenticated loopback JSON Lines IPC. Its token is stored only in a private endpoint file and is not put in command-line arguments or CLI output.
+Start/stop/restart use `ControllerManagementClient` and the authoritative daemon over authenticated loopback JSON Lines IPC. All CLI endpoint-file paths validate a loopback address before connecting. The token is bootstrapped through `DRAGONSTUI_CONTROLLER_TOKEN` and retained in daemon memory/environment and the endpoint file, not command-line arguments or CLI output. Provider launches explicitly remove that reserved environment key, including configured overrides. This is not isolation from same-user filesystem access.
+
+On Unix, endpoint temporary files are created exclusively with mode `0600` before credential bytes are written, then renamed into place. Non-Unix permission behavior follows the operating system's creation policy; no Windows ACL guarantee is claimed. A failed probe of an existing controller preserves its endpoint and fails rather than spawning a competing daemon. If the endpoint is genuinely stale, confirm the original daemon has stopped before explicitly removing that local state; never remove it merely because an authentication error or timeout occurred.
 
 ## Showcase adapter section
 

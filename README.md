@@ -130,6 +130,8 @@ The [multi-adapter stress harness](docs/adapter-stress-testing.md) checks bounde
 
 [Adapter ecosystem showcase](docs/adapter-ecosystem-showcase.md) follows an isolated registry CLI install through real TUI observations, actions, provider crash, explicit restart and diagnostics, with reconstructed PTY frames and reproducible acceptance commands.
 
+[Adapter release readiness](docs/adapter-release-readiness.md) records the M74 source audit, controller/CLI boundary fixes, local package verification and remaining release/platform limits. It is not a public release announcement.
+
 Read the details:
 
 - [Adapter host architecture](docs/architecture/adapter-host.md)

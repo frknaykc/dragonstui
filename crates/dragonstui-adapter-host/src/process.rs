@@ -121,6 +121,8 @@ impl AdapterProcess {
         for (key, value) in config.envs {
             command.env(key, value);
         }
+        // Reserved daemon bootstrap credential is never a provider environment setting.
+        command.env_remove("DRAGONSTUI_CONTROLLER_TOKEN");
 
         let mut child = retry_transient_spawn(|| command.spawn()).map_err(ProcessError::Spawn)?;
         let stdout = child

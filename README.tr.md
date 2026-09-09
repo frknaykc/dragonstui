@@ -129,6 +129,8 @@ Harici geliştiriciler, Rust/Go/Python taşınabilirlik notlarını da içeren [
 
 [Adapter ekosistem gösterimi](docs/adapter-ecosystem-showcase.md), izole registry CLI kurulumundan gerçek TUI gözlem ve aksiyonlarına, provider çökmesine, açık yeniden başlatmaya ve diagnostics ekranına uzanan akışı; yeniden oluşturulmuş PTY kareleri ve tekrarlanabilir kabul komutlarıyla gösterir.
 
+[Adapter yayın hazırlığı](docs/adapter-release-readiness.md); M74 kaynak denetimini, controller/CLI sınır düzeltmelerini, yerel paket doğrulamasını ve kalan yayın/platform sınırlarını kaydeder. Kamuya açık bir sürüm duyurusu değildir.
+
 Ayrıntılar:
 
 - [Adapter host mimarisi](docs/architecture/adapter-host.md)

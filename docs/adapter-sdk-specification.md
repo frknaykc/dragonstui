@@ -51,7 +51,7 @@ The [envelope table](adapter-protocol-v1.md#envelope-types) defines all 15 messa
 - Optional `Option` fields accept omission or null: request `action`, error `id`, event `observation`, session `exit_code`, declaration `description`, and optional observation scalar metadata.
 - Default vectors (`adapter_info.actions`, `adapter_info.sessions`, error observation `stack`) accept omission as empty, but reject null. Required `capabilities` is an array, not null.
 - `confirmation_required` defaults to false on omission; null is invalid.
-- Current serde `Value` payload fields decode an omitted payload as null. Producers should nevertheless emit `payload` explicitly, including explicit null, rather than relying on this decoder behavior.
+- Wire messages carrying a `payload` require that field to be present. Explicit JSON null is a valid payload; omitting the field is not equivalent to sending null.
 - Required strings remain strings; wire typing alone does not mean all strings must be nonempty. In particular, stream/kind, labels and diagnostic text are not typed identifiers.
 
 ### JSON interoperability
@@ -89,6 +89,8 @@ The example error code is provider-defined, not a reserved SDK constant.
 **Events:** emit `stream`, `kind`, opaque `payload` and optionally a typed observation. The five observation types and enums are defined in the [observation reference](adapter-protocol-v1.md#observability-event-semantics). Missing observation means Generic/Unclassified. Stream/kind/payload keys never select UI semantics. Stdout order is local to one adapter; there is no global order or replay guarantee. Host retained event queues may drop oldest events and expose counters. Do not treat the event stream as a lossless audit log.
 
 **Sessions:** declare capability/label metadata; correlate `session_opened.id` with `session_open.id` and allocate a provider-owned session ID. IDs need be distinct for concurrently active sessions in that provider, not globally across adapters. Output/input are text, not an implicit shell, command parser, binary PTY or terminal-emulation API. Route all follow-ups by the provider session ID and all host ownership by the adapter/session pair. Preserve authoritative `session_exit` independently of droppable output. Reject further input/resize once close is pending; do not treat a successful close write as release evidence. Resize has no wire acknowledgement. Late unclaimed opens may receive cleanup requests; do not assume the UI still wants them. On close, release resources and report terminal state; no invented successful RPC response replaces `session_exit`.
+
+The runtime also rejects a session ID that collides with an undrained exit record or an unclaimed open acknowledgement, even when the earlier session is no longer active. Allocate fresh session IDs within a provider process lifetime to avoid premature reuse; IDs still need not be globally unique across providers.
 
 An adapter without these optional surfaces remains valid. Do not require reference fixture action names, an echo session or every observation kind.
 

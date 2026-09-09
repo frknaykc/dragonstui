@@ -1,0 +1,286 @@
+{
+  "schema_version": 1,
+  "milestone": "M74",
+  "scope": "Local source-readiness remediation, not public release approval",
+  "audited_base": "47eee26057e5eb1dd4480e3d34bec2c8396b2cf6",
+  "recorded_at": "2026-09-09T15:59:49.388001+00:00",
+  "platform": "macOS-26.6.2-arm64-arm-64bit",
+  "toolchain": {
+    "rustc": "1.95.0 (59807616e 2026-04-14)",
+    "cargo": "1.95.0 (f2d3ce0bd 2026-03-21)"
+  },
+  "source_sha256": {
+    ".github/workflows/ci.yml": "b2773e738203240d6a14dbe08981fe9fb9d002f03fcf6413ae78c650bee5be8c",
+    "Cargo.lock": "d390a619ddd4ac3cd77db22c3ff6f67fe1de51fdc50966e3b6921c02f5348132",
+    "Cargo.toml": "b5319decb0f63aa21cafcbc1575840896b4d3119eeac9bc4c346b7696939c8f0",
+    "crates/dragonstui-adapter-host/Cargo.toml": "d1133745579418fb99a34a59de496611ee21e6e21f2347d1269d4c22a7373041",
+    "crates/dragonstui-adapter-host/src/bin/dragonstui_adapter.rs": "80cf74f8e9e91b4082380a85ed4a8cb522cd6057a26b793b051948e9289be4ec",
+    "crates/dragonstui-adapter-host/src/bin/dragonstui_adapter_host_mock.rs": "8949525494e7b1fb3e5f723e1d99e3d9c55d71326a45c2fbbd572d7e5b1e4650",
+    "crates/dragonstui-adapter-host/src/capabilities.rs": "e0e16e7e38ed1dbbab1088df68ac2d75ae954c0396506527f64be4750231bedc",
+    "crates/dragonstui-adapter-host/src/controller.rs": "c567df8f85db8bd4804546f85f9068cd0e53bebca1135e3ec41f9615a87a7010",
+    "crates/dragonstui-adapter-host/src/controller_ipc.rs": "88859dbd03343ea6a16edc85a23ac2697028352f0c927687097730d8ffb7a808",
+    "crates/dragonstui-adapter-host/src/discovery.rs": "41bd8481e32ecb6acbca403be479f0ad81c6f73ff3e5f1aeabfd646aa2dc9b66",
+    "crates/dragonstui-adapter-host/src/installer.rs": "4231844702bd379c73d9a8d935f50371c4bd0713188ef1fafce1787a32b3f3a5",
+    "crates/dragonstui-adapter-host/src/lib.rs": "e37a939be91a91d7f40280bded765c03cc359f44fd1dc0b96c7f924c4927bef4",
+    "crates/dragonstui-adapter-host/src/limits.rs": "f334978256d841604177186d1949b96808d91e95d7744ad48cd67a033f26e73a",
+    "crates/dragonstui-adapter-host/src/management.rs": "6ba4fb19bb6769d92f93f75df2abd57a5f90ed186eaaf665ae08ebf72d83a9b9",
+    "crates/dragonstui-adapter-host/src/manager.rs": "a3d30a539128d563952e743dbc070f68102a81189ee4a3044f8e5361ae2e8ab0",
+    "crates/dragonstui-adapter-host/src/manifest.rs": "69108974b0442835f1369ca61cf470bca3ed93cd8c4524e5d7939b29832b7712",
+    "crates/dragonstui-adapter-host/src/operations.rs": "2bdbe47e5a9c051a3b66a4b3fdf6cad624c14110b82169a3c308ac7795201c39",
+    "crates/dragonstui-adapter-host/src/process.rs": "f8ef0b4ff8dd6963e3176ee16df6907a8304cd1aff6dea5dfba9ba88a22ccbc8",
+    "crates/dragonstui-adapter-host/src/protocol.rs": "538a7417518d74a0b33130bd2ed35affca813818bb0787b7f70bda08e0439c92",
+    "crates/dragonstui-adapter-host/src/registry.rs": "50486fe29c661b33ff8c99bd93b329fb038ee10b3fc52b6601fbb875dd871a3d",
+    "crates/dragonstui-adapter-host/src/runtime.rs": "ee4d4dc0b126153d649aa4399fdaece013b4e545f03f929c195fd550fe0a21f8",
+    "crates/dragonstui-adapter-host/tests/bounded.rs": "52e21387050ae36a2d42ae0d74629f09cd8680e318330c3f8f3d79704c787aca",
+    "crates/dragonstui-adapter-host/tests/capabilities.rs": "8d6e6fec003f7552d21ab41076273308e21d1ff04e427127df9e4ca6fa40715e",
+    "crates/dragonstui-adapter-host/tests/cli.rs": "49a09df24c93ff5cf21951cee5eb367e5b48821c7ddf4481eaf25c74210ad797",
+    "crates/dragonstui-adapter-host/tests/conformance_wire_parity.rs": "66ccc43813ae0d2312387c860fa529b6530aee4718506f73eb3c50dfbe504179",
+    "crates/dragonstui-adapter-host/tests/controller.rs": "ef415c67694788a83a2ac11831000340ff662d1f471dd2b2cf1e9f274ae9ad65",
+    "crates/dragonstui-adapter-host/tests/controller_ipc.rs": "55109b1cc2ffdfddd1ae4d8cbe0a71624f92150e210347574ee3f94f2607ac0a",
+    "crates/dragonstui-adapter-host/tests/discovery.rs": "5a2e6b0848e3d82c5b7d08d7e1116a22c11cbdcb4167c90732fe21c26bc122dc",
+    "crates/dragonstui-adapter-host/tests/events.rs": "06c36faa773038167155454611b632eabe456875186bb64f33e2e45e185f16cb",
+    "crates/dragonstui-adapter-host/tests/handshake.rs": "894694f9da64447bb0615fe66555f30f89288221b0eee9875db037f981723a32",
+    "crates/dragonstui-adapter-host/tests/installer.rs": "7e7933798be90d254585d5a39aa54a925887e7947af70d610953298fb0ec43be",
+    "crates/dragonstui-adapter-host/tests/limits.rs": "ba37e05f381e671cbc98c18084d7340aebe68e90c1e47ecdba08851c306ce8b1",
+    "crates/dragonstui-adapter-host/tests/maintenance.rs": "81c29cecaac9ffb5256728f835db03fd2f517752e7d14d23e8fe02b8dd8d38ea",
+    "crates/dragonstui-adapter-host/tests/management.rs": "255f230e40a5ddf76e8c0ce9b7723b04adcccadfa002699511a1084aa86f0d8a",
+    "crates/dragonstui-adapter-host/tests/manager.rs": "b9da6cc87516d6a5d341b2c5b95b6720bf5e58e6f05c7284996a8dcc25093fd2",
+    "crates/dragonstui-adapter-host/tests/manifest.rs": "339354c3ecc0238ef14a627ac87dea66c676d7364f0e2b7b7e02b3d8bb1ccf64",
+    "crates/dragonstui-adapter-host/tests/multi_adapter_stress.rs": "32c1aafbb063eac9f087456acd68ad26bac3bfea13a27b938ee1fc098a2f7f45",
+    "crates/dragonstui-adapter-host/tests/observability_semantics.rs": "66c8a4c5ac4a3f8418a6e868d4a326be2317af451b661a2ea8fd9b2da0f15f09",
+    "crates/dragonstui-adapter-host/tests/performance.rs": "773b5e02197d56b523ef897be1ab740b767396da6ef0de1c3c4494dc83b278a5",
+    "crates/dragonstui-adapter-host/tests/process.rs": "eb6e38892ba38cd94e89631d1dda015e109e1bb178a1234bdcab92b92e36218e",
+    "crates/dragonstui-adapter-host/tests/protocol.rs": "837d802b2e69605bf470edb14f1270bcbef07dad0a7c4f4cb75a0a8156ac2ce6",
+    "crates/dragonstui-adapter-host/tests/reference_controller.rs": "8262f4d165779c263e6362e9d9d8b0d5408cd24732604e78e1066cbc778adc09",
+    "crates/dragonstui-adapter-host/tests/reference_mock.rs": "2b5997b5d3f0b0aabde51bedbef33162d4bfa9db6ffa1665e73e60596014035f",
+    "crates/dragonstui-adapter-host/tests/registry.rs": "733029eda1679acb33ef6fd4e30fdeb5ab7bf62eb9bd1ec6856005a15ecc3bd9",
+    "crates/dragonstui-adapter-host/tests/rpc.rs": "622ecb432e3e7a4c973f9989696563b68c2b788f100f34a6e0a27e44029f92ae",
+    "crates/dragonstui-adapter-host/tests/sessions.rs": "cc57845495fddcb45bc1de104b35cfea5bae8ab34d22195972c06c57eadd5227",
+    "src/agent_process.rs": "3bb7854fe1a7aa75bbb25d6cbb58311b387da49eddb37d7f4980da46ef6b9bd5",
+    "src/animation.rs": "f823b03d49737e0cef29d9d01a5f3bf4e90675b0140d42e8f5f2b9f2118a6a5e",
+    "src/bin/dragonstui_measure.rs": "394bbef8816af3fae7820f0fafb1eae88b20eeaf6af56759c5297a7bb55060b3",
+    "src/bin/dragonstui_showcase.rs": "0c4ec067fc701b30ede835220cb1d772935f6c98ef100bd73e39fb6f6db76a5a",
+    "src/border.rs": "6cb41c3553efb59db423036dfde2ecbed4d8adcfcb8907b589a2dad059ad2871",
+    "src/buffer.rs": "9d8ec27d4ac6d69fbf5b2a7a2a902234e30d3aa6478f0581b29ba943a1d2242c",
+    "src/canvas.rs": "39e54d8b3b590a6cab1912d424510a15e323fdcf53a90c20f4b773e407890558",
+    "src/cell.rs": "641afc930e7fd713faf4d892676f48ee979bf7d99d187e445bccb69cb11f1f41",
+    "src/diff_view.rs": "d646dcf51fa7521e2bed0b465760c11b6bd02f8e177bfd661cfe6515b598dd8e",
+    "src/event.rs": "f4ef83f7d1d4123011b7b6263de344f2dcfd023440af0c7f07035d669d6fde22",
+    "src/focus.rs": "93dc6e8e35dbace37524ce9d6c931867766aa64f37cd1c2b4246fbe6ae4632b4",
+    "src/frame.rs": "ac412bfd69529bd3d9b8fae3a66be272edc1a54f96859e8ad88df00483518678",
+    "src/geometry.rs": "466e49cf7c2dac7c1b7f84b87a96fa06e902b0add540e7ba6aca1a96c677230b",
+    "src/inspector.rs": "fb345d91d21e05721b9778c19d92616809ec80a0f0e6b76893f62947a440de7d",
+    "src/keymap.rs": "98478d07a47d087929d1278bb0622a6de99ca88ec39d5c0794c7bf38878129df",
+    "src/layout.rs": "c866a05349cb280b53ee20c9f897c43f69b2de30f09022c6a3cb77c448a279e5",
+    "src/lib.rs": "fbe0e72660b4257a56eda45174f2641355c243713324d2a74c147b080a2a7c3a",
+    "src/list.rs": "b85bbbf61ddce889b51274f45c4ab096263785d9320c5043854c00f0892fd40d",
+    "src/main.rs": "fb956688093530c22cc74e0af30413b2e3634346e1cc3c6693c788a33d9f78d7",
+    "src/overlay.rs": "ca48a47ef5fa7abfd60e10bf759eee69114df08f0754d3f03bfc0a95673d2642",
+    "src/palette.rs": "bdc9a35a90a016daa68c668ffbd8ffd112c57839ce794d92057e40e39f5a3667",
+    "src/panel.rs": "2c5617071c032097fe9ee9ad2160bc828083b1b979849c96b75930a19c849041",
+    "src/property_view.rs": "dbec0bd54735b635fcd226d4eff57408ff03604ade1abc905a2a7110c92ad6dc",
+    "src/rich_text.rs": "b56c1b9e381ce83be5e8e13770b568f88cb4369d51bb22a9162b1258b5eaaec3",
+    "src/runtime.rs": "f2497c6c823e901b550194bce87f23289cbc6da4b8e9ee85b4586ae7b43c7ef0",
+    "src/scrollbar.rs": "4801fb1ac31562e6f1c530079b965ba38148aa28047c2510dec2d00a88debf7c",
+    "src/session_host.rs": "4ec8ceb59dd4a5b97fb86d8f2bec8a7507195fdc0ee310aa107ea1521c6f4de5",
+    "src/shutdown.rs": "294d690a3c0aa3684e8ae1df9ba05702a1a1b321b0e9ce87ef120b6287ddec72",
+    "src/source_view.rs": "8a1f7b597b2851d50f3bc8b78bd7a66370ee9899d1f76e788999747cb2b335a9",
+    "src/spinner.rs": "d3f8fb33b74db4a257db1ba5ea73572957d6dd88a7e0cc9aac6ed74fe1a54799",
+    "src/structured_data.rs": "1aa525be7fbd851aa5c59eb14301cb29c98fbf4b48caf293a7ec9dc1894edad0",
+    "src/style.rs": "8b23ece9fbd14c0ea883a30a8c12f88d3203026e60c537db0c0f992ab68e8115",
+    "src/table.rs": "af03ad5bbe50cf32abf6037b640f6d3618a8ec540439032c6de1c8c7dfa0f583",
+    "src/terminal.rs": "7a9efa97389e93ba73ae1ad8a0dba895b291e920b6d42f04933e9e574a661cc0",
+    "src/text.rs": "fd7aeb38294711b25c50a3809c79615ed5e66f331deea25eba6b698ca171eb9f",
+    "src/text_area.rs": "d5ddb0e4c4a5d70b516950113d728102b308a466f8c75c5288cc9b3f821c4033",
+    "src/text_input.rs": "3b14416329e382169daef96c3ae53db032db7f34781266ec471c8af9d0189c2c",
+    "src/theme.rs": "1e6ff818e0b614b4dc4063b96808217621b31d44dc8af6710ec14a617c1c10ed",
+    "src/tree.rs": "267dd093e4992fed375ce62acdf6ed95b097091521f45ce2c68a4ccd8704ae26",
+    "src/viewport.rs": "bc78833b22c7f8fcb392b483341c430b8d44a73e35cd74b93a5e8b50891128f9",
+    "src/visualization.rs": "ff6c1b66dcb90b4f3cecad8a0875b60c9cf484727a7259a46fcdd754ea74604f",
+    "tools/pty_smoke.py": "05a3a1b112cab45374d106b2c78f004290e182ed40e49e9730a20c946786d989",
+    "tools/test_pty_smoke.py": "7280c4bccf41a1796e3bf70672ebbedc573d39bb635121a75ff136ee67356c04"
+  },
+  "verification": {
+    "rust_workspace": {
+      "passed": 423,
+      "failed": 0,
+      "ignored": 1,
+      "ignored_reason": "opt-in performance measurement"
+    },
+    "rust_gates": [
+      "cargo fmt --check",
+      "cargo check --workspace",
+      "cargo test --workspace --features adapter-showcase",
+      "cargo clippy --workspace --all-targets -- -D warnings",
+      "cargo check --features adapter-showcase --bin dragonstui-showcase",
+      "cargo clippy --features adapter-showcase --bin dragonstui-showcase"
+    ],
+    "python": {
+      "existing_suite_passed": 95,
+      "new_pty_regressions_passed": 2,
+      "note": "95-test suite then 2 new focused tests; not a single 97-test invocation"
+    },
+    "baseline_pty": [
+      "q: passed",
+      "ctrl-c: passed"
+    ],
+    "reference_conformance": {
+      "adapter_id": "reference",
+      "checks": [
+        {
+          "name": "handshake",
+          "status": "passed"
+        },
+        {
+          "name": "declarations",
+          "status": "passed"
+        },
+        {
+          "name": "request.echo",
+          "status": "passed"
+        },
+        {
+          "name": "request.stream",
+          "status": "passed"
+        },
+        {
+          "name": "request.declared-error",
+          "status": "passed"
+        },
+        {
+          "name": "request.alpha",
+          "status": "passed"
+        },
+        {
+          "name": "request.confirmed",
+          "status": "passed"
+        },
+        {
+          "name": "request.delayed",
+          "status": "passed"
+        },
+        {
+          "name": "requests",
+          "status": "passed"
+        },
+        {
+          "name": "session",
+          "status": "passed"
+        },
+        {
+          "name": "events",
+          "status": "passed"
+        },
+        {
+          "name": "shutdown",
+          "status": "passed"
+        },
+        {
+          "cleanup_error": false,
+          "forced": false,
+          "name": "cleanup",
+          "reaped": true,
+          "status": "passed",
+          "stderr_bytes": 0
+        },
+        {
+          "name": "restart.handshake",
+          "status": "passed"
+        },
+        {
+          "name": "restart.shutdown",
+          "status": "passed"
+        },
+        {
+          "cleanup_error": false,
+          "forced": false,
+          "name": "restart.cleanup",
+          "reaped": true,
+          "status": "passed",
+          "stderr_bytes": 0
+        }
+      ],
+      "declared_capabilities": [
+        "test.echo",
+        "test.stream",
+        "test.fail",
+        "test.slow",
+        "test.crash",
+        "fixture.terminal"
+      ],
+      "observed": {
+        "events": 49,
+        "generic_events": 1,
+        "observation_types": {
+          "error": 9,
+          "event": 9,
+          "log": 6,
+          "metric": 12,
+          "status": 12
+        }
+      },
+      "protocol": 1,
+      "schema_version": 1,
+      "scope": "requested_scenarios_only",
+      "status": "passed"
+    },
+    "ecosystem_pty": {
+      "q": {
+        "status": "passed",
+        "exit": "q",
+        "binary_sha256": {
+          "controller": "559e767c19c626a11faaa11d57fff2e04f352c47b75169cf9fcb37b8df842cd1",
+          "mock": "dfff3679ef651fa67d45382bc6e0599ad1b7cf643f595f3bd64dc124dcab7077",
+          "showcase": "773d067c07799aa3f2984e52a98da821b3d39a7694c37db27608d3497221b41f"
+        },
+        "checks": [
+          "registry CLI installation, matching artifact and provenance, no marker side effects",
+          "all six observability views from reference provider",
+          "success, rejection, cancelled/confirmed action and held Running state",
+          "same-provider input while action held, then release/success and resize/close",
+          "provider crash with authoritative reason, TUI explicit restart and fresh running PID",
+          "session terminal evidence and empty registry, active-session shutdown, full termios/ANSI restoration, usable PTY",
+          "fixture process cleanup"
+        ]
+      },
+      "ctrl-c": {
+        "status": "passed",
+        "exit": "ctrl-c",
+        "binary_sha256": {
+          "controller": "559e767c19c626a11faaa11d57fff2e04f352c47b75169cf9fcb37b8df842cd1",
+          "mock": "dfff3679ef651fa67d45382bc6e0599ad1b7cf643f595f3bd64dc124dcab7077",
+          "showcase": "773d067c07799aa3f2984e52a98da821b3d39a7694c37db27608d3497221b41f"
+        },
+        "checks": [
+          "registry CLI installation, matching artifact and provenance, no marker side effects",
+          "all six observability views from reference provider",
+          "success, rejection, cancelled/confirmed action and held Running state",
+          "same-provider input while action held, then release/success and resize/close",
+          "provider crash with authoritative reason, TUI explicit restart and fresh running PID",
+          "session terminal evidence and empty registry, active-session shutdown, full termios/ANSI restoration, usable PTY",
+          "fixture process cleanup"
+        ]
+      }
+    },
+    "packaging": {
+      "status": "passed",
+      "commands": [
+        "cargo package --workspace --offline --allow-dirty",
+        "cargo package --workspace --features adapter-showcase --offline --allow-dirty"
+      ],
+      "note": "Both crates packaged and compiled locally; optional showcase verified through Cargo temporary registry. No upload. README/LICENSE inventory and local-state exclusion checked."
+    }
+  },
+  "limitations": [
+    "No remote CI or public upload for this dirty source snapshot.",
+    "M72 performance data and M73 committed frames remain historical; no new performance measurements or emulator screenshots.",
+    "IPC deterministic codec/deadline and normal integration coverage is not adversarial socket timing/load validation.",
+    "Five-second transport budget does not preempt synchronous dispatch, polling, or JSON parsing.",
+    "Same-user filesystem isolation, concurrent maintenance/daemon election, guaranteed rollback and non-Unix ACLs are not claimed."
+  ],
+  "repaired_validation_failure": {
+    "path": "tools/pty_smoke.py:33",
+    "cause": "Deadline can expire between two clock reads and send negative timeout to select.",
+    "evidence": "Deterministic mocked clock test failed with -0.0009999999999998899 before clamp, passed after clamp; both normal PTY exit routes then passed. Original helper did not retain a failure frame."
+  }
+}

@@ -30,6 +30,7 @@ jobs:
           python3 -m unittest discover -s tools -p test_ecosystem_fixture.py -v
           python3 -m unittest discover -s tools -p 'test_reference_mock*.py'
           python3 -m unittest discover -s tools -p test_showcase_pty_smoke.py
+          python3 -m unittest discover -s tools -p test_pty_smoke.py
       - name: Workspace clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Showcase check

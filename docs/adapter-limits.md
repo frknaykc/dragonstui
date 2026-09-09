@@ -69,6 +69,32 @@ impose a diagnostic throughput limit or a reader-thread join guarantee. See also
 
 ## Verification
 
+### M74 controller IPC transport
+
+Controller requests and responses have a separate 64 MiB encoded JSON budget
+(excluding the terminating LF), not the 1 MiB child-message limit. Aggregated
+diagnostics can legitimately contain multiple child frames. Reads are bounded
+before decoding; serialization finishes within its byte budget before writing.
+Oversized responses produce an explicit error rather than a truncated success.
+Drain-style responses already consumed from controller state are not replayed
+automatically after an encoding or delivery failure.
+
+Each accepted connection (client: completed connection) has one five-second
+absolute exchange deadline; partial progress does not renew it. Socket waits
+use at most 10 ms slices, polling the controller between server-side waits so
+ordinary runtime servicing continues. Timeout/disconnect closes that exchange,
+not the controller. The single-connection server is not a fair concurrent
+dispatcher. Synchronous command execution and JSON decoding are not preempted;
+their surrounding deadline checks are not a universal command/runtime deadline.
+Transport buffers are bounded, not all controller state or decoded allocations.
+Connect retries remain separately bounded by the existing client policy.
+
+Small in-memory codec/deadline tests cover the transport boundaries; ordinary
+controller integration and CLI lifecycle tests cover successful wire exchanges.
+This is not an adversarial load, OS socket-timing or real-time scheduling claim.
+
+### Earlier child/runtime coverage
+
 Small deterministic unit fixtures cover wire-line/writer boundaries, diagnostic
 truncation, fixed-window admission, timeout clamping and retained-failure admission.
 Integration tests cover a zero stream budget with ordinary mock traffic, direct

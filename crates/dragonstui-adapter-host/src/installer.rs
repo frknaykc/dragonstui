@@ -187,8 +187,8 @@ impl AdapterInstaller {
         })
     }
 
-    /// Atomically commits a previously verified replacement, restoring the
-    /// previous directory if the second rename fails.
+    /// Commits a verified replacement with two renames and best-effort rollback.
+    /// This is not a single atomic exchange or a crash-durable transaction.
     pub fn commit_update(&self, prepared: PreparedUpdate) -> Result<InstallReceipt, InstallError> {
         let backup = self.staging_directory(&prepared.adapter_id)?;
         fs::remove_dir(&backup).map_err(InstallError::AtomicInstall)?;

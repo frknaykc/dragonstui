@@ -1,5 +1,6 @@
 use std::{
     fs,
+    io::Write,
     net::TcpListener,
     path::{Path, PathBuf},
     process::{Command as ProcessCommand, ExitCode, Stdio},
@@ -11,8 +12,8 @@ use std::{
 use clap::{Parser, Subcommand};
 use dragonstui_adapter_host::{
     AdapterClassification, AdapterController, AdapterId, AdapterInstaller, ControllerClient,
-    ControllerIpcServer, ControllerIpcStatus, DiscoveredAdapter, LocalAdapterRoot, Platform,
-    Registry,
+    ControllerIpcServer, ControllerIpcStatus, ControllerManagementClient, DiscoveredAdapter,
+    LocalAdapterRoot, Platform, Registry,
 };
 use serde::{Deserialize, Serialize};
 
@@ -51,7 +52,7 @@ enum Command {
         #[arg(long)]
         version: Option<String>,
     },
-    /// Verify and atomically replace an installed adapter with a newer registry release.
+    /// Verify and replace an installed adapter with a newer registry release.
     Update {
         id: String,
         #[arg(long)]
@@ -184,14 +185,17 @@ fn run(cli: Cli) -> Result<(), String> {
         }
         Command::Update { id, registry } => {
             let id = parse_id(&id)?;
-            unregister_if_controlled(&root, &id)?;
-            let receipt = AdapterInstaller::new(&root)
-                .registry_source(&registry)
-                .update(
+            let installer = AdapterInstaller::new(&root).registry_source(&registry);
+            let prepared = installer
+                .prepare_update(
                     &load_registry(&registry)?,
                     &id,
                     &Platform::current().map_err(|error| error.to_string())?,
                 )
+                .map_err(|error| error.to_string())?;
+            unregister_if_controlled(&root, &id)?;
+            let receipt = installer
+                .commit_update(prepared)
                 .map_err(|error| error.to_string())?;
             println!("Updated {} {}", receipt.adapter_id, receipt.version);
         }
@@ -244,16 +248,15 @@ fn controller_endpoint_path(root: &Path) -> PathBuf {
     root.join(CONTROLLER_DIRECTORY).join(CONTROLLER_ENDPOINT)
 }
 
-fn controller_client(root: &Path) -> Result<ControllerClient, String> {
+fn controller_client(root: &Path) -> Result<ControllerManagementClient, String> {
     if let Some(endpoint) = read_controller_endpoint(root)? {
-        let client = ControllerClient::new(endpoint.address, endpoint.token);
-        if client
-            .status(&AdapterId::new("controller-probe").expect("static valid ID"))
-            .is_ok()
-        {
-            return Ok(client);
-        }
-        let _ = fs::remove_file(controller_endpoint_path(root));
+        let client = ControllerManagementClient::new(endpoint.address, endpoint.token);
+        client
+            .diagnostics(&AdapterId::new("controller-probe").expect("static valid ID"))
+            .map_err(|error| {
+                format!("existing controller is unavailable; endpoint preserved: {error}")
+            })?;
+        return Ok(client);
     }
 
     fs::create_dir_all(root.join(CONTROLLER_DIRECTORY)).map_err(|error| error.to_string())?;
@@ -272,9 +275,9 @@ fn controller_client(root: &Path) -> Result<ControllerClient, String> {
     for _ in 0..100 {
         thread::sleep(Duration::from_millis(10));
         if let Some(endpoint) = read_controller_endpoint(root)? {
-            let client = ControllerClient::new(endpoint.address, endpoint.token);
+            let client = ControllerManagementClient::new(endpoint.address, endpoint.token);
             if client
-                .status(&AdapterId::new("controller-probe").expect("static valid ID"))
+                .diagnostics(&AdapterId::new("controller-probe").expect("static valid ID"))
                 .is_ok()
             {
                 return Ok(client);
@@ -295,14 +298,7 @@ fn run_controller_daemon(root: &Path, token: &str) -> Result<(), String> {
         token: token.to_owned(),
     };
     let endpoint_path = controller_endpoint_path(root);
-    let temporary_path = endpoint_path.with_extension("json.tmp");
-    fs::write(
-        &temporary_path,
-        serde_json::to_vec(&endpoint).map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| error.to_string())?;
-    restrict_controller_endpoint(&temporary_path)?;
-    fs::rename(&temporary_path, &endpoint_path).map_err(|error| error.to_string())?;
+    publish_controller_endpoint(&endpoint_path, &endpoint)?;
     let result = ControllerIpcServer::new(
         listener,
         AdapterController::new(root, Duration::from_secs(2), 128),
@@ -313,26 +309,43 @@ fn run_controller_daemon(root: &Path, token: &str) -> Result<(), String> {
     result.map_err(|error| error.to_string())
 }
 
-#[cfg(unix)]
-fn restrict_controller_endpoint(path: &Path) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|error| error.to_string())
-}
-
-#[cfg(not(unix))]
-fn restrict_controller_endpoint(_path: &Path) -> Result<(), String> {
-    Ok(())
+fn publish_controller_endpoint(path: &Path, endpoint: &ControllerEndpoint) -> Result<(), String> {
+    let temporary = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&temporary)
+        .map_err(|error| error.to_string())?;
+    let result = (|| {
+        serde_json::to_writer(&mut file, endpoint).map_err(|error| error.to_string())?;
+        file.flush().map_err(|error| error.to_string())?;
+        drop(file);
+        fs::rename(&temporary, path).map_err(|error| error.to_string())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
 }
 
 fn read_controller_endpoint(root: &Path) -> Result<Option<ControllerEndpoint>, String> {
     let path = controller_endpoint_path(root);
-    if !path.exists() {
-        return Ok(None);
+    let body = match fs::read(path) {
+        Ok(body) => body,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    let endpoint: ControllerEndpoint = serde_json::from_slice(&body)
+        .map_err(|_| "invalid local controller endpoint".to_owned())?;
+    if !endpoint.address.ip().is_loopback() {
+        return Err("local controller endpoint must use a loopback address".to_owned());
     }
-    let body = fs::read(path).map_err(|error| error.to_string())?;
-    serde_json::from_slice(&body)
-        .map(Some)
-        .map_err(|error| format!("invalid local controller endpoint: {error}"))
+    Ok(Some(endpoint))
 }
 
 fn live_state(root: &Path, id: &AdapterId) -> Option<String> {
@@ -363,8 +376,15 @@ fn unregister_if_controlled(root: &Path, id: &AdapterId) -> Result<(), String> {
         return Ok(());
     };
     let client = ControllerClient::new(endpoint.address, endpoint.token);
-    if matches!(client.status(id), Ok(ControllerIpcStatus::State(_))) {
-        client.unregister(id).map_err(|error| error.to_string())?;
+    match client.status(id).map_err(|error| error.to_string())? {
+        ControllerIpcStatus::State(_) => {
+            match client.unregister(id).map_err(|error| error.to_string())? {
+                ControllerIpcStatus::Completed => {}
+                _ => return Err("unexpected controller unregister response".to_owned()),
+            }
+        }
+        ControllerIpcStatus::Missing => {}
+        _ => return Err("unexpected controller status response".to_owned()),
     }
     Ok(())
 }

@@ -30,7 +30,7 @@ def set_size(fd: int, width: int, height: int) -> None:
 
 
 def read_available(fd: int, output: bytearray, timeout: float) -> None:
-    ready, _, _ = select.select([fd], [], [], timeout)
+    ready, _, _ = select.select([fd], [], [], max(0.0, timeout))
     if not ready:
         return
     try:

@@ -16,7 +16,7 @@ dragonstui-adapter-host
 external adapter executable
 ```
 
-`dragons_tui` never depends on the host. Framework-only consumers therefore retain the current terminal/UI dependency set and do not pull in serialization, discovery, or process-runtime dependencies.
+`dragons_tui` depends on the host only through the optional `adapter-showcase` feature. Framework-only consumers do not pull in host discovery, registry, networking, installation, or adapter-runtime dependencies. The core does use `serde_json` for its read-only structured-data view; serialization is not an exclusively host-owned dependency.
 
 ## Why external processes
 
@@ -32,7 +32,7 @@ Application code asks whether an adapter supports an extensible capability ident
 
 ## Why JSON Lines Protocol v1
 
-Protocol v1 sends one JSON object per newline over piped stdin/stdout. It is language independent, human-debuggable, fixture-friendly, and avoids ABI coupling. Adapter stdout is protocol-only; stderr is captured as bounded diagnostics and is never parsed as protocol input. A focused serialization dependency belongs solely to the host crate.
+Protocol v1 sends one JSON object per newline over piped stdin/stdout. It is language independent, human-debuggable, fixture-friendly, and avoids ABI coupling. Adapter stdout is protocol-only; stderr is captured as bounded diagnostics and is never parsed as protocol input. Adapter protocol serialization and transport belong to the host crate, independently of the core structured-data view's JSON dependency.
 
 ## Scope boundary
 

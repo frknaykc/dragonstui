@@ -1,11 +1,11 @@
 use std::{
     error::Error,
     fmt, fs,
-    io::{self, BufRead, BufReader, Write},
+    io::{self, BufRead, BufReader, Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     path::Path,
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
@@ -332,8 +332,17 @@ impl ControllerIpcServer {
         }
     }
 
-    fn serve_one(&mut self, mut stream: TcpStream) -> Result<bool, ControllerIpcError> {
-        let (response, shutdown) = match read_request(&stream) {
+    fn serve_one(&mut self, stream: TcpStream) -> Result<bool, ControllerIpcError> {
+        let deadline = Instant::now() + IPC_EXCHANGE_TIMEOUT;
+        let request = {
+            let mut transport = DeadlineTransport {
+                stream: &stream,
+                deadline,
+                poll: || self.controller.poll(Duration::ZERO),
+            };
+            read_message::<WireRequest>(&mut transport, deadline)
+        };
+        let (response, shutdown) = match request {
             Ok(request) if request.token != self.token => {
                 (WireResponse::failure("authentication failed"), false)
             }
@@ -343,14 +352,36 @@ impl ControllerIpcServer {
             },
             Err(error) => (WireResponse::failure(error.to_string()), false),
         };
-        if let Err(error) = serde_json::to_writer(&mut stream, &response) {
-            if error.io_error_kind().is_some_and(is_peer_disconnect) {
+        // Buffer before writing: oversized snapshots produce an explicit error,
+        // never a truncated success frame. The IPC budget is not the child-frame cap.
+        let bytes = match encode_message(&response, deadline) {
+            Ok(bytes) => bytes,
+            Err(error) if error.io_error_kind() == Some(io::ErrorKind::TimedOut) => {
                 return Ok(shutdown);
             }
-            return Err(ControllerIpcError::Encode(error));
-        }
-        if let Err(error) = stream.write_all(b"\n") {
-            if is_peer_disconnect(error.kind()) {
+            Err(error) if error.io_error_kind() == Some(io::ErrorKind::InvalidData) => {
+                match encode_message(
+                    &WireResponse::failure(
+                        "controller IPC response exceeds 64 MiB serialization budget",
+                    ),
+                    deadline,
+                ) {
+                    Ok(bytes) => bytes,
+                    Err(error) if error.io_error_kind() == Some(io::ErrorKind::TimedOut) => {
+                        return Ok(shutdown);
+                    }
+                    Err(error) => return Err(ControllerIpcError::Encode(error)),
+                }
+            }
+            Err(error) => return Err(ControllerIpcError::Encode(error)),
+        };
+        let mut transport = DeadlineTransport {
+            stream: &stream,
+            deadline,
+            poll: || self.controller.poll(Duration::ZERO),
+        };
+        if let Err(error) = transport.write_all(&bytes) {
+            if is_peer_disconnect(error.kind()) || error.kind() == io::ErrorKind::TimedOut {
                 return Ok(shutdown);
             }
             return Err(ControllerIpcError::Write(error));
@@ -633,7 +664,7 @@ impl ControllerClient {
         command: ControllerIpcCommand,
     ) -> Result<ControllerIpcStatus, ControllerIpcError> {
         let mut attempts_remaining = CONTROLLER_CONNECT_RETRIES;
-        let mut stream = loop {
+        let stream = loop {
             match TcpStream::connect_timeout(&self.address, Duration::from_millis(100)) {
                 Ok(stream) => break stream,
                 Err(error)
@@ -648,19 +679,21 @@ impl ControllerClient {
                 Err(error) => return Err(ControllerIpcError::Connect(error)),
             }
         };
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .map_err(ControllerIpcError::Read)?;
-        stream
-            .set_write_timeout(Some(Duration::from_secs(2)))
-            .map_err(ControllerIpcError::Write)?;
+        let deadline = Instant::now() + IPC_EXCHANGE_TIMEOUT;
         let request = WireRequest {
             token: self.token.clone(),
             command,
         };
-        serde_json::to_writer(&mut stream, &request).map_err(ControllerIpcError::Encode)?;
-        stream.write_all(b"\n").map_err(ControllerIpcError::Write)?;
-        let response: WireResponse = read_response(&stream)?;
+        let bytes = encode_message(&request, deadline).map_err(ControllerIpcError::Encode)?;
+        let mut transport = DeadlineTransport {
+            stream: &stream,
+            deadline,
+            poll: || {},
+        };
+        transport
+            .write_all(&bytes)
+            .map_err(ControllerIpcError::Write)?;
+        let response: WireResponse = read_message(&mut transport, deadline)?;
         response.status.ok_or_else(|| {
             ControllerIpcError::Remote(
                 response
@@ -1119,24 +1152,286 @@ impl WireResponse {
     }
 }
 
-fn read_request(stream: &TcpStream) -> Result<WireRequest, ControllerIpcError> {
-    let mut line = String::new();
-    BufReader::new(stream)
-        .read_line(&mut line)
-        .map_err(ControllerIpcError::Read)?;
-    serde_json::from_str(&line).map_err(ControllerIpcError::Decode)
+// JSON bytes, excluding the terminating newline, in either direction. Aggregated
+// diagnostics/live data may contain many child frames: use a separate 64 MiB IPC
+// budget, not the 1 MiB child-frame limit. Larger snapshots fail explicitly; no
+// fields are silently truncated. This bounds transport buffers, not controller state.
+const IPC_MESSAGE_MAX_BYTES: usize = 64 * 1024 * 1024;
+// One absolute deadline from accept (client: connect completion) through response.
+// Progress never renews it. Controller dispatch itself is synchronous and is not
+// preempted; its existing lifecycle/RPC bounds still apply.
+const IPC_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(5);
+const IPC_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+fn remaining_time(deadline: Instant, now: Instant) -> io::Result<Duration> {
+    deadline
+        .checked_duration_since(now)
+        .filter(|left| !left.is_zero())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "controller IPC exchange deadline exceeded",
+            )
+        })
 }
-fn read_response(stream: &TcpStream) -> Result<WireResponse, ControllerIpcError> {
-    let mut line = String::new();
-    BufReader::new(stream)
-        .read_line(&mut line)
+
+struct DeadlineTransport<'a, F> {
+    stream: &'a TcpStream,
+    deadline: Instant,
+    poll: F,
+}
+
+impl<F: FnMut()> DeadlineTransport<'_, F> {
+    fn prepare(&mut self) -> io::Result<Duration> {
+        remaining_time(self.deadline, Instant::now())?;
+        (self.poll)();
+        Ok(remaining_time(self.deadline, Instant::now())?.min(IPC_POLL_INTERVAL))
+    }
+}
+
+fn retry_transport(kind: io::ErrorKind) -> bool {
+    matches!(
+        kind,
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
+    )
+}
+
+impl<F: FnMut()> Read for DeadlineTransport<'_, F> {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        loop {
+            let timeout = self.prepare()?;
+            self.stream.set_read_timeout(Some(timeout))?;
+            match self.stream.read(bytes) {
+                Err(error) if retry_transport(error.kind()) => continue,
+                result => {
+                    remaining_time(self.deadline, Instant::now())?;
+                    return result;
+                }
+            }
+        }
+    }
+}
+
+impl<F: FnMut()> Write for DeadlineTransport<'_, F> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        loop {
+            let timeout = self.prepare()?;
+            self.stream.set_write_timeout(Some(timeout))?;
+            match self.stream.write(bytes) {
+                Err(error) if retry_transport(error.kind()) => continue,
+                result => {
+                    remaining_time(self.deadline, Instant::now())?;
+                    return result;
+                }
+            }
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(()) // TcpStream is unbuffered.
+    }
+}
+
+fn read_frame(mut reader: impl BufRead, limit: usize) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    loop {
+        let chunk = reader.fill_buf()?;
+        if chunk.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "incomplete controller IPC frame",
+            ));
+        }
+        let newline = chunk.iter().position(|byte| *byte == b'\n');
+        let length = newline.unwrap_or(chunk.len());
+        if length > limit.saturating_sub(bytes.len()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "controller IPC frame exceeds 64 MiB budget",
+            ));
+        }
+        bytes.extend_from_slice(&chunk[..length]);
+        reader.consume(length + usize::from(newline.is_some()));
+        if newline.is_some() {
+            return Ok(bytes);
+        }
+    }
+}
+
+fn read_message<T: serde::de::DeserializeOwned>(
+    reader: impl Read,
+    deadline: Instant,
+) -> Result<T, ControllerIpcError> {
+    let bytes = read_frame(BufReader::new(reader), IPC_MESSAGE_MAX_BYTES)
         .map_err(ControllerIpcError::Read)?;
-    serde_json::from_str(&line).map_err(ControllerIpcError::Decode)
+    remaining_time(deadline, Instant::now()).map_err(ControllerIpcError::Read)?;
+    let value = serde_json::from_slice(&bytes).map_err(ControllerIpcError::Decode)?;
+    remaining_time(deadline, Instant::now()).map_err(ControllerIpcError::Read)?;
+    Ok(value)
+}
+
+struct BoundedEncoding {
+    bytes: Vec<u8>,
+    limit: usize,
+    deadline: Instant,
+}
+
+impl Write for BoundedEncoding {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        remaining_time(self.deadline, Instant::now())?;
+        if bytes.len() > self.limit.saturating_sub(self.bytes.len()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "controller IPC serialization exceeds 64 MiB budget",
+            ));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn encode_message(value: &impl Serialize, deadline: Instant) -> Result<Vec<u8>, serde_json::Error> {
+    let mut writer = BoundedEncoding {
+        bytes: Vec::new(),
+        limit: IPC_MESSAGE_MAX_BYTES,
+        deadline,
+    };
+    serde_json::to_writer(&mut writer, value)?;
+    writer.bytes.reserve_exact(1);
+    writer.bytes.push(b'\n');
+    Ok(writer.bytes)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frame_budget_accepts_exact_limit_and_stops_at_first_newline() {
+        let mut input = io::Cursor::new(b"1234\nnext\n");
+        assert_eq!(read_frame(&mut input, 4).unwrap(), b"1234");
+        assert_eq!(input.position(), 5);
+        assert_eq!(read_frame(&mut input, 4).unwrap(), b"next");
+        // Buffer boundaries do not change the byte budget or newline handling.
+        let input = BufReader::with_capacity(1, io::Cursor::new(b"1234\n"));
+        assert_eq!(read_frame(input, 4).unwrap(), b"1234");
+    }
+
+    #[test]
+    fn frame_budget_rejects_overflow_and_incomplete_frames() {
+        for input in [b"12345\n".as_slice(), b"12345".as_slice()] {
+            assert_eq!(
+                read_frame(BufReader::with_capacity(2, input), 4)
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidData
+            );
+        }
+        for input in [b"1234".as_slice(), b"".as_slice()] {
+            assert_eq!(
+                read_frame(input, 4).unwrap_err().kind(),
+                io::ErrorKind::UnexpectedEof
+            );
+        }
+    }
+
+    #[test]
+    fn serialization_budget_counts_escaped_bytes_without_partial_overflow() {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut writer = BoundedEncoding {
+            bytes: Vec::new(),
+            limit: 4,
+            deadline,
+        };
+        serde_json::to_writer(&mut writer, &"\n").unwrap();
+        assert_eq!(writer.bytes, b"\"\\n\"");
+        assert_eq!(
+            writer.write(b"x").unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(writer.bytes.len(), 4);
+        let mut writer = BoundedEncoding {
+            bytes: Vec::new(),
+            limit: 3,
+            deadline,
+        };
+        assert_eq!(
+            serde_json::to_writer(&mut writer, &"\n")
+                .unwrap_err()
+                .io_error_kind(),
+            Some(io::ErrorKind::InvalidData)
+        );
+        assert!(writer.bytes.len() <= 3);
+    }
+
+    #[test]
+    fn absolute_deadline_does_not_reset_with_progress() {
+        let start = Instant::now();
+        let deadline = start + IPC_EXCHANGE_TIMEOUT;
+        assert_eq!(
+            remaining_time(deadline, start).unwrap(),
+            IPC_EXCHANGE_TIMEOUT
+        );
+        assert_eq!(
+            remaining_time(deadline, deadline - Duration::from_millis(1)).unwrap(),
+            Duration::from_millis(1)
+        );
+        for now in [deadline, deadline + Duration::from_millis(1)] {
+            assert_eq!(
+                remaining_time(deadline, now).unwrap_err().kind(),
+                io::ErrorKind::TimedOut
+            );
+        }
+        let error = encode_message(
+            &WireResponse::success(ControllerIpcStatus::Completed),
+            start,
+        )
+        .unwrap_err();
+        assert_eq!(error.io_error_kind(), Some(io::ErrorKind::TimedOut));
+        assert!(retry_transport(io::ErrorKind::TimedOut));
+        assert!(retry_transport(io::ErrorKind::WouldBlock));
+        assert!(retry_transport(io::ErrorKind::Interrupted));
+        assert!(!retry_transport(io::ErrorKind::BrokenPipe));
+    }
+
+    #[test]
+    fn bounded_wire_codec_preserves_requests_and_aggregated_responses() {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let request = WireRequest {
+            token: "local-test-token".into(),
+            command: ControllerIpcCommand::Shutdown,
+        };
+        let bytes = encode_message(&request, deadline).unwrap();
+        let decoded: WireRequest = read_message(bytes.as_slice(), deadline).unwrap();
+        assert_eq!(decoded.token, request.token);
+        assert!(matches!(decoded.command, ControllerIpcCommand::Shutdown));
+        // An aggregate larger than one child frame remains legal IPC data.
+        let status = ControllerIpcStatus::Action(ControllerActionResponse {
+            adapter_id: AdapterId::new("mock").unwrap(),
+            action_id: ActionId::new("test.action").unwrap(),
+            outcome: ControllerActionOutcome::Succeeded {
+                payload: serde_json::json!(["x".repeat(1024 * 1024), "y".repeat(1024 * 1024)]),
+            },
+        });
+        let response = WireResponse::success(status.clone());
+        let bytes = encode_message(&response, deadline).unwrap();
+        assert!(bytes.len() > 1024 * 1024);
+        let decoded: WireResponse = read_message(bytes.as_slice(), deadline).unwrap();
+        assert_eq!(decoded.status, Some(status));
+        assert!(decoded.error.is_none());
+        assert!(matches!(
+            read_message::<WireResponse>(b"not-json\n".as_slice(), deadline),
+            Err(ControllerIpcError::Decode(_))
+        ));
+        assert!(matches!(
+            read_message::<WireResponse>(b"\xff\n".as_slice(), deadline),
+            Err(ControllerIpcError::Decode(_))
+        ));
+    }
 
     #[test]
     fn legacy_management_mapping_covers_lifecycle_and_excludes_other_commands() {
