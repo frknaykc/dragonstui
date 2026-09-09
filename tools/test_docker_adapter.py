@@ -497,6 +497,11 @@ class DockerAdapterTests(unittest.TestCase):
             with self.assertRaises((ValueError, UnicodeError)):
                 module.json_load(text)
         self.assertEqual(module.quantity("2.5GiB"), 2.5 * 1024 ** 3)
+        for units, base in ((('B', 'kB', 'MB', 'GB', 'TB', 'PB', 'EB'), 1000),
+                            (('B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB', 'EiB'), 1024)):
+            for power, unit in enumerate(units):
+                with self.subTest(unit=unit):
+                    self.assertEqual(module.quantity(" 2.5" + unit + " "), 2.5 * base ** power)
         with self.assertRaises(module.ProviderError):
             module.quantity("NaNB")
 
