@@ -57,6 +57,9 @@ These screenshots were refreshed on September 9, 2026 from the running `dragonst
 
 ## Quick Start
 
+New here? Follow the [first 10 minutes user guide](docs/user-guide.md) to learn
+which application to open, navigate the showcase, and add a trusted adapter.
+
 For packaged binaries, start with [Installation and first run](docs/installation.md):
 user-local installation, shared adapter paths, empty states, update and uninstall.
 Public release assets are not published yet; current packages are CI artifacts.

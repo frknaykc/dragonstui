@@ -1,5 +1,8 @@
 # Installation and first run
 
+For a short explanation of the applications, a keyboard tour, and the adapter
+workflow, see the [first 10 minutes user guide](user-guide.md).
+
 This guide covers the v0.1.0 native bundles prepared by R1 and the current R2
 first-run behavior. **There is no public release download yet.** Obtain the
 matching archive and checksum from the project's **Release packaging** Actions
@@ -124,8 +127,8 @@ command palette; `m` opens the demonstration modal. Use `q` or `Ctrl+C` to quit
 and restore the terminal (leave a focused text-entry/session mode first if it
 captures ordinary character keys).
 
-Press **8** for **Adapters**. A fresh run shows **No installed adapters**; this
-is an expected empty state, not a failed installation. The showcase has **no
+Press **8** for **Adapters**. Without a root, discovery is disabled; with an empty
+root, there are no installed adapters. Neither is a failed installation. The showcase has **no
 adapter root by default**. It does not implicitly scan `./adapters` or a home
 directory. Its widget/demo data is not live provider telemetry.
 
@@ -140,7 +143,8 @@ dragonstui-adapter --root "$HOME/.local/share/dragonstui/adapters" list
 dragonstui-showcase --adapter-root "$HOME/.local/share/dragonstui/adapters"
 ```
 
-For an empty root, CLI `list` prints its column header with no adapter rows;
+For an empty root, CLI `list` prints its column header with no adapter rows and
+first-run guidance on stderr;
 Section 8 remains empty. Merely discovering metadata does not execute adapters.
 A valid discovered adapter normally appears as Stopped when no live controller
 state is available; incompatible or invalid entries are reported separately.

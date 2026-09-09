@@ -56,6 +56,9 @@ Bu ekran görüntülerini 9 Eylül 2026’da, güncel `dragonstui-showcase` rele
 
 ## Hızlı başlangıç
 
+Yeni kullanıcılar için [ilk 10 dakika kullanıcı rehberi](docs/user-guide.md)
+(İngilizce): doğru uygulamayı açma, showcase içinde gezinme ve güvenilir adapter ekleme.
+
 Paketlenmiş binary’ler için [Kurulum ve ilk açılış](docs/installation.md) rehberiyle
 başlayın: kullanıcı dizinine kurulum, ortak adapter yolları, boş ekranlar,
 güncelleme ve kaldırma. Public release henüz yayımlanmadı; mevcut paketler CI artifact’larıdır.
