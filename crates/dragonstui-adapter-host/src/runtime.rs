@@ -6,6 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::limits;
 use crate::{
     ActionId, AdapterAction, AdapterId, AdapterInfo, AdapterManifest, AdapterProcess,
     AdapterProcessConfig, Capability, Hello, PROTOCOL_VERSION, ProcessError, ProcessStatus,
@@ -31,6 +32,12 @@ pub struct AdapterRuntimeConfig {
 }
 
 impl AdapterRuntimeConfig {
+    /// Per-adapter one-second ingress event/session-output budget (default 100,000).
+    pub fn event_rate_limit(mut self, messages: usize) -> Self {
+        self.process = self.process.event_rate_limit(messages);
+        self
+    }
+
     pub fn new(executable: impl Into<PathBuf>) -> Self {
         Self {
             process: AdapterProcessConfig::new(executable),
@@ -57,7 +64,7 @@ impl AdapterRuntimeConfig {
     }
 
     pub fn handshake_timeout(mut self, value: Duration) -> Self {
-        self.handshake_timeout = value;
+        self.handshake_timeout = limits::timeout(value);
         self
     }
 
@@ -286,7 +293,9 @@ impl AdapterRuntime {
         if self.state != AdapterState::Running {
             return Err(RpcError::Crashed);
         }
-        if self.session_slots_in_use() >= self.session_capacity {
+        if self.session_slots_in_use() >= self.session_capacity
+            || self.request_slots_in_use() >= 128
+        {
             return Err(RpcError::Backpressure);
         }
         let id = RequestId::new(format!("{}:{}", self.info.id, self.next_request))
@@ -300,14 +309,11 @@ impl AdapterRuntime {
                 rows,
                 columns,
             }))
-            .map_err(|error| {
-                self.mark_crashed(error.to_string());
-                RpcError::Crashed
-            })?;
+            .map_err(|error| self.write_error(error))?;
         self.pending.insert(
             id.clone(),
             PendingRequest {
-                deadline: Instant::now() + timeout,
+                deadline: Instant::now() + limits::timeout(timeout),
                 session_open: true,
             },
         );
@@ -320,7 +326,7 @@ impl AdapterRuntime {
         id: &RequestId,
         timeout: Duration,
     ) -> Result<SessionId, RpcError> {
-        let deadline = Instant::now() + timeout;
+        let deadline = Instant::now() + limits::timeout(timeout);
         loop {
             self.expire_pending();
             if let Some(session_id) = self.session_opened.remove(id) {
@@ -364,10 +370,7 @@ impl AdapterRuntime {
                 session_id: session_id.clone(),
                 data,
             }))
-            .map_err(|error| {
-                self.mark_crashed(error.to_string());
-                RpcError::Crashed
-            })
+            .map_err(|error| self.write_error(error))
     }
 
     /// Forwards a geometry change only to a session opened by this runtime.
@@ -387,10 +390,7 @@ impl AdapterRuntime {
                 rows,
                 columns,
             }))
-            .map_err(|error| {
-                self.mark_crashed(error.to_string());
-                RpcError::Crashed
-            })
+            .map_err(|error| self.write_error(error))
     }
 
     /// Requests provider-owned cleanup; the session remains active until its
@@ -404,10 +404,7 @@ impl AdapterRuntime {
                 protocol: PROTOCOL_VERSION,
                 session_id: session_id.clone(),
             }))
-            .map_err(|error| {
-                self.mark_crashed(error.to_string());
-                RpcError::Crashed
-            })
+            .map_err(|error| self.write_error(error))
     }
 
     fn send_request_with_action(
@@ -420,6 +417,9 @@ impl AdapterRuntime {
         if self.state != AdapterState::Running {
             return Err(RpcError::Crashed);
         }
+        if self.request_slots_in_use() >= 128 {
+            return Err(RpcError::Backpressure);
+        }
         let id = RequestId::new(format!("{}:{}", self.info.id, self.next_request))
             .map_err(|error| RpcError::Failed(error.to_string()))?;
         self.next_request += 1;
@@ -431,14 +431,11 @@ impl AdapterRuntime {
                 action,
                 payload,
             }))
-            .map_err(|error| {
-                self.mark_crashed(error.to_string());
-                RpcError::Crashed
-            })?;
+            .map_err(|error| self.write_error(error))?;
         self.pending.insert(
             id.clone(),
             PendingRequest {
-                deadline: Instant::now() + timeout,
+                deadline: Instant::now() + limits::timeout(timeout),
                 session_open: false,
             },
         );
@@ -450,7 +447,7 @@ impl AdapterRuntime {
         id: &RequestId,
         timeout: Duration,
     ) -> Result<RpcOutcome, RpcError> {
-        let deadline = Instant::now() + timeout;
+        let deadline = Instant::now() + limits::timeout(timeout);
         loop {
             self.expire_pending();
             if let Some(outcome) = self.outcomes.remove(id) {
@@ -481,6 +478,9 @@ impl AdapterRuntime {
         if self.state == AdapterState::Crashed {
             return Err(RpcError::Crashed);
         }
+        if let Some(error) = self.process.take_limit_failure() {
+            return Err(self.fail_limit(error));
+        }
         self.expire_pending();
         if self.response_queue_len() >= self.response_queue_capacity {
             return Err(RpcError::Backpressure);
@@ -488,6 +488,9 @@ impl AdapterRuntime {
         let message = match self.process.read_stdout_message(timeout) {
             Ok(message) => message,
             Err(ProcessError::Timeout) => return Ok(false),
+            Err(error @ ProcessError::LimitExceeded(_)) => {
+                return Err(self.fail_limit(error));
+            }
             Err(ProcessError::StdoutClosed) => {
                 self.mark_crashed("adapter stdout closed");
                 return Err(RpcError::Crashed);
@@ -548,6 +551,28 @@ impl AdapterRuntime {
                 session_id,
                 exit_code,
             })
+    }
+
+    fn request_slots_in_use(&self) -> usize {
+        self.pending.len() + self.response_queue_len() + self.session_opened.len()
+    }
+
+    fn write_error(&mut self, error: ProcessError) -> RpcError {
+        // Encoding is completed under a byte budget before touching child stdin.
+        if matches!(error, ProcessError::EncodeStdin(_)) {
+            return RpcError::Failed(error.to_string());
+        }
+        self.mark_crashed(error.to_string());
+        RpcError::Crashed
+    }
+
+    fn fail_limit(&mut self, error: ProcessError) -> RpcError {
+        let mut reason = error.to_string();
+        if let Err(cleanup) = self.process.terminate() {
+            reason.push_str(&format!("; cleanup failed: {cleanup}"));
+        }
+        self.mark_crashed(reason.clone());
+        RpcError::Failed(reason)
     }
 
     fn session_slots_in_use(&self) -> usize {
@@ -911,6 +936,60 @@ mod session_retention_tests {
             80,
             Duration::from_secs(2),
         )
+    }
+
+    #[test]
+    fn serialization_budget_failure_does_not_crash_the_runtime() {
+        let mut runtime = runtime(1);
+        let error = serde_json::to_writer(limits::LimitedWriter::new(0), &Value::Null).unwrap_err();
+        assert!(matches!(
+            runtime.write_error(ProcessError::EncodeStdin(error)),
+            RpcError::Failed(_)
+        ));
+        assert_eq!(runtime.state(), AdapterState::Running);
+        assert!(runtime.last_error().is_none());
+        assert_eq!(runtime.request_slots_in_use(), 0);
+    }
+
+    #[test]
+    fn retained_failures_share_admission_with_pending_requests() {
+        let mut runtime = runtime(3);
+        for index in 0..128 {
+            runtime.request_failures.insert(
+                RequestId::new(format!("retained-{index}")).unwrap(),
+                RpcError::Timeout,
+            );
+        }
+        assert_eq!(open(&mut runtime), Err(RpcError::Backpressure));
+        assert_eq!(
+            runtime.send_request(
+                Capability::new("fixture.terminal").unwrap(),
+                Value::Null,
+                Duration::MAX
+            ),
+            Err(RpcError::Backpressure)
+        );
+        let first = RequestId::new("retained-0").unwrap();
+        assert_eq!(
+            runtime.wait_response(&first, Duration::ZERO),
+            Err(RpcError::Timeout)
+        );
+        let id = runtime
+            .send_request(
+                Capability::new("fixture.terminal").unwrap(),
+                Value::Null,
+                Duration::MAX,
+            )
+            .unwrap();
+        assert_eq!(runtime.request_slots_in_use(), 128);
+        runtime.pending.get_mut(&id).unwrap().deadline = Instant::now();
+        runtime.expire_pending();
+        assert_eq!(runtime.request_slots_in_use(), 128);
+        assert_eq!(
+            runtime.wait_response(&id, Duration::ZERO),
+            Err(RpcError::Timeout)
+        );
+        assert_eq!(runtime.request_slots_in_use(), 127);
     }
 
     fn acknowledge(runtime: &mut AdapterRuntime, request: &RequestId, session: &SessionId) {

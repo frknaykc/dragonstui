@@ -110,6 +110,8 @@ The [multi-adapter stress harness](docs/adapter-stress-testing.md) checks bounde
 
 [Crash and recovery hardening](docs/adapter-crash-recovery.md) covers terminal failure classification, stable diagnostics, backpressure and explicit recovery with healthy-peer isolation. It adds no automatic restart policy or general process-tree containment guarantee.
 
+[Adapter host limits](docs/adapter-limits.md) document bounded wire/manifest reads, stream-rate termination, request admission, timeout and executable-path budgets, including compatibility and enforcement limits.
+
 Read the details:
 
 - [Adapter host architecture](docs/architecture/adapter-host.md)
@@ -135,6 +137,7 @@ DragonsTUI is under active development and remains pre-1.0. The core framework, 
 | SDK specification | Complete (M68; specification only, no published language SDKs) |
 | Multi-adapter stress testing | Complete (M69; release measurement matrix, local gates and remote CI passed) |
 | Crash and recovery hardening | Complete (M70; local recovery regressions and required gates verified) |
+| Protocol and security limits | Complete (M71; local limits regressions, required gates and independent review verified) |
 
 Adapter distribution and management includes registry/install/update/remove integrity boundaries, CLI and TUI management, typed authenticated controller IPC, per-adapter lifecycle conflict protection, real PTY acceptance, and M43 capability discovery. Generic live data transports adapter events away from the UI thread into bounded retained history, derives opaque text and identity filters, and supports pause/follow selection without stopping ingestion. Generic Inspector UX provides reusable layout, viewport, property, and structured-data primitives. The optional showcase projects only producer-declared `Observation` variants into a Log Viewer, time-series graph, heatmap, status matrix, Timeline, and Error/Stack Trace view; it never derives those classes from arbitrary payload JSON, stream, or `kind` text. Each projection is rebuilt from the retained 16-entry live history, so it does not create an unbounded telemetry store. M59–M60 add producer-declared generic action metadata and confirmation policy through the authenticated controller path; confirmation is UI protection against accidental dispatch, not a permission system.
 

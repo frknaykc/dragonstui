@@ -10,6 +10,7 @@ mod controller;
 mod controller_ipc;
 mod discovery;
 mod installer;
+mod limits;
 mod management;
 mod manager;
 mod manifest;

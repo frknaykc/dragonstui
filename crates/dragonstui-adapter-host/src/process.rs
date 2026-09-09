@@ -2,14 +2,16 @@ use std::{
     collections::VecDeque,
     error::Error,
     fmt,
-    io::{self, BufRead, BufReader, Write},
+    io::{self, BufReader, Write},
     path::PathBuf,
     process::{Child, ChildStdin, ExitStatus, Stdio},
+    sync::atomic::{AtomicU8, Ordering},
     sync::{Arc, Mutex, mpsc},
     thread,
     time::{Duration, Instant},
 };
 
+use crate::limits::{self, EventRate, LimitedWriter};
 use crate::{PROTOCOL_VERSION, ProtocolMessage, Shutdown};
 
 const DEFAULT_STDERR_TAIL_LINES: usize = 64;
@@ -44,9 +46,17 @@ pub struct AdapterProcessConfig {
     envs: Vec<(String, String)>,
     stderr_tail_lines: usize,
     stdout_queue_capacity: usize,
+    event_rate_limit: usize,
 }
 
 impl AdapterProcessConfig {
+    /// Maximum event/session_output envelopes per one-second ingress window.
+    /// Zero disallows streaming envelopes. Responses do not consume this budget.
+    pub fn event_rate_limit(mut self, messages: usize) -> Self {
+        self.event_rate_limit = messages;
+        self
+    }
+
     pub fn new(executable: impl Into<PathBuf>) -> Self {
         Self {
             executable: executable.into(),
@@ -55,6 +65,7 @@ impl AdapterProcessConfig {
             envs: Vec::new(),
             stderr_tail_lines: DEFAULT_STDERR_TAIL_LINES,
             stdout_queue_capacity: DEFAULT_STDOUT_QUEUE_CAPACITY,
+            event_rate_limit: 100_000,
         }
     }
 
@@ -91,6 +102,7 @@ pub struct AdapterProcess {
     child: Child,
     stdin: Option<ChildStdin>,
     stdout_rx: mpsc::Receiver<Result<ProtocolMessage, ProcessError>>,
+    limit_failure: Arc<AtomicU8>,
     stderr_tail: Arc<Mutex<BoundedText>>,
     last_status: Option<ExitStatus>,
 }
@@ -124,15 +136,41 @@ impl AdapterProcess {
             .take()
             .ok_or(ProcessError::MissingPipe("stdin"))?;
         let (stdout_tx, stdout_rx) = mpsc::sync_channel(config.stdout_queue_capacity);
+        let limit_failure = Arc::new(AtomicU8::new(0));
+        let reader_limit_failure = Arc::clone(&limit_failure);
         thread::spawn(move || {
-            let reader = BufReader::new(stdout);
-            for line in reader.lines() {
-                let message = match line {
-                    Ok(line) => serde_json::from_str::<ProtocolMessage>(&line)
+            let mut reader = BufReader::new(stdout);
+            let mut rate = EventRate::new(config.event_rate_limit, Instant::now());
+            loop {
+                let message = match limits::read_line(&mut reader, limits::MESSAGE_BYTES) {
+                    Ok(line) if line.is_empty() => break,
+                    Ok(line) => serde_json::from_slice::<ProtocolMessage>(&line)
                         .map_err(ProcessError::DecodeStdout),
+                    Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                        Err(ProcessError::LimitExceeded("stdout message byte limit"))
+                    }
                     Err(error) => Err(ProcessError::ReadStdout(error)),
                 };
-                if stdout_tx.send(message).is_err() {
+                let message = match message {
+                    Ok(message)
+                        if matches!(
+                            message,
+                            ProtocolMessage::Event(_) | ProtocolMessage::SessionOutput(_)
+                        ) && !rate.admit(Instant::now()) =>
+                    {
+                        Err(ProcessError::LimitExceeded("event rate limit"))
+                    }
+                    other => other,
+                };
+                let terminal = message.is_err();
+                if let Err(ProcessError::LimitExceeded(reason)) = &message {
+                    reader_limit_failure.store(
+                        if *reason == "event rate limit" { 2 } else { 1 },
+                        Ordering::Release,
+                    );
+                    break;
+                }
+                if stdout_tx.send(message).is_err() || terminal {
                     break;
                 }
             }
@@ -141,11 +179,8 @@ impl AdapterProcess {
         let stderr_tail = Arc::new(Mutex::new(BoundedText::new(config.stderr_tail_lines)));
         let stderr_tail_thread = Arc::clone(&stderr_tail);
         thread::spawn(move || {
-            let reader = BufReader::new(stderr);
-            for line in reader.lines() {
-                let Ok(line) = line else {
-                    break;
-                };
+            let mut reader = BufReader::new(stderr);
+            while let Ok(Some(line)) = limits::diagnostic_line(&mut reader, limits::STDERR_BYTES) {
                 if let Ok(mut tail) = stderr_tail_thread.lock() {
                     tail.push(line);
                 } else {
@@ -158,6 +193,7 @@ impl AdapterProcess {
             child,
             stdin: Some(stdin),
             stdout_rx,
+            limit_failure,
             stderr_tail,
             last_status: None,
         })
@@ -188,8 +224,12 @@ impl AdapterProcess {
         let Some(stdin) = self.stdin.as_mut() else {
             return Err(ProcessError::StdinClosed);
         };
-        serde_json::to_writer(&mut *stdin, message).map_err(ProcessError::EncodeStdin)?;
-        stdin.write_all(b"\n").map_err(ProcessError::WriteStdin)?;
+        let mut encoded = LimitedWriter::new(limits::MESSAGE_BYTES - 1);
+        serde_json::to_writer(&mut encoded, message).map_err(ProcessError::EncodeStdin)?;
+        encoded.bytes.push(b'\n');
+        stdin
+            .write_all(&encoded.bytes)
+            .map_err(ProcessError::WriteStdin)?;
         stdin.flush().map_err(ProcessError::WriteStdin)
     }
 
@@ -197,10 +237,12 @@ impl AdapterProcess {
         &mut self,
         timeout: Duration,
     ) -> Result<ProtocolMessage, ProcessError> {
-        match self.stdout_rx.recv_timeout(timeout) {
+        match self.stdout_rx.recv_timeout(limits::timeout(timeout)) {
             Ok(message) => message,
             Err(mpsc::RecvTimeoutError::Timeout) => Err(ProcessError::Timeout),
-            Err(mpsc::RecvTimeoutError::Disconnected) => Err(ProcessError::StdoutClosed),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(self
+                .take_limit_failure()
+                .unwrap_or(ProcessError::StdoutClosed)),
         }
     }
 
@@ -208,7 +250,17 @@ impl AdapterProcess {
         match self.stdout_rx.try_recv() {
             Ok(message) => message.map(Some),
             Err(mpsc::TryRecvError::Empty) => Ok(None),
-            Err(mpsc::TryRecvError::Disconnected) => Err(ProcessError::StdoutClosed),
+            Err(mpsc::TryRecvError::Disconnected) => Err(self
+                .take_limit_failure()
+                .unwrap_or(ProcessError::StdoutClosed)),
+        }
+    }
+
+    pub(crate) fn take_limit_failure(&self) -> Option<ProcessError> {
+        match self.limit_failure.swap(0, Ordering::AcqRel) {
+            1 => Some(ProcessError::LimitExceeded("stdout message byte limit")),
+            2 => Some(ProcessError::LimitExceeded("event rate limit")),
+            _ => None,
         }
     }
 
@@ -226,6 +278,16 @@ impl AdapterProcess {
             .unwrap_or_default()
     }
 
+    /// Stops the direct child without attempting a potentially blocked stdin write.
+    pub(crate) fn terminate(&mut self) -> Result<(), ProcessError> {
+        drop(self.stdin.take());
+        if self.child.try_wait().map_err(ProcessError::Wait)?.is_none() {
+            self.child.kill().map_err(ProcessError::Kill)?;
+        }
+        self.last_status = Some(self.child.wait().map_err(ProcessError::Wait)?);
+        Ok(())
+    }
+
     pub fn stop(
         &mut self,
         graceful_timeout: Duration,
@@ -240,7 +302,7 @@ impl AdapterProcess {
         }));
         drop(self.stdin.take());
 
-        let graceful_deadline = Instant::now() + graceful_timeout;
+        let graceful_deadline = Instant::now() + limits::timeout(graceful_timeout);
         while Instant::now() < graceful_deadline {
             if let Some(status) = self.child.try_wait().map_err(ProcessError::Wait)? {
                 self.last_status = Some(status);
@@ -250,7 +312,7 @@ impl AdapterProcess {
         }
 
         self.child.kill().map_err(ProcessError::Kill)?;
-        let kill_deadline = Instant::now() + kill_timeout;
+        let kill_deadline = Instant::now() + limits::timeout(kill_timeout);
         while Instant::now() < kill_deadline {
             if let Some(status) = self.child.try_wait().map_err(ProcessError::Wait)? {
                 self.last_status = Some(status);
@@ -295,6 +357,7 @@ pub enum ProcessError {
     DecodeStdout(serde_json::Error),
     StdoutClosed,
     Timeout,
+    LimitExceeded(&'static str),
     Wait(io::Error),
     Kill(io::Error),
 }
@@ -318,6 +381,7 @@ impl fmt::Display for ProcessError {
             }
             Self::StdoutClosed => write!(formatter, "adapter stdout closed"),
             Self::Timeout => write!(formatter, "timed out waiting for adapter stdout"),
+            Self::LimitExceeded(limit) => write!(formatter, "adapter limit exceeded: {limit}"),
             Self::Wait(error) => write!(formatter, "failed to wait for adapter process: {error}"),
             Self::Kill(error) => write!(formatter, "failed to kill adapter process: {error}"),
         }
@@ -333,7 +397,11 @@ impl Error for ProcessError {
             | Self::Wait(error)
             | Self::Kill(error) => Some(error),
             Self::EncodeStdin(error) | Self::DecodeStdout(error) => Some(error),
-            Self::MissingPipe(_) | Self::StdinClosed | Self::StdoutClosed | Self::Timeout => None,
+            Self::MissingPipe(_)
+            | Self::StdinClosed
+            | Self::StdoutClosed
+            | Self::Timeout
+            | Self::LimitExceeded(_) => None,
         }
     }
 }

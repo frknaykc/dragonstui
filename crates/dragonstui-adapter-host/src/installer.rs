@@ -282,9 +282,12 @@ impl AdapterInstaller {
             "description": entry.description,
             "homepage": entry.homepage,
         });
+        let mut encoded_manifest = crate::limits::LimitedWriter::new(crate::limits::MANIFEST_BYTES);
+        serde_json::to_writer_pretty(&mut encoded_manifest, &manifest)
+            .map_err(InstallError::WriteManifest)?;
         fs::write(
             staging.join(crate::MANIFEST_FILE_NAME),
-            serde_json::to_vec_pretty(&manifest).map_err(InstallError::WriteManifest)?,
+            encoded_manifest.bytes,
         )
         .map_err(InstallError::WriteManifestFile)?;
         let metadata = InstallMetadata {
@@ -469,10 +472,11 @@ impl Error for InstallError {
 
 fn read_installed_release(target: &Path, id: &AdapterId) -> Result<String, InstallError> {
     let manifest_path = target.join(crate::MANIFEST_FILE_NAME);
-    let source = fs::read_to_string(manifest_path).map_err(|error| match error.kind() {
-        io::ErrorKind::NotFound => InstallError::NotInstalled(id.clone()),
-        _ => InstallError::Download(error),
-    })?;
+    let source =
+        crate::manifest::read_manifest(&manifest_path).map_err(|error| match error.kind() {
+            io::ErrorKind::NotFound => InstallError::NotInstalled(id.clone()),
+            _ => InstallError::Download(error),
+        })?;
     crate::AdapterManifest::from_json(&source)
         .map(|manifest| manifest.version)
         .map_err(|error| InstallError::InvalidLayout(error.to_string()))

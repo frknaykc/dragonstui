@@ -1,6 +1,8 @@
 use std::{
     error::Error,
     fmt,
+    fs::File,
+    io::{self, Read},
     path::{Component, Path, PathBuf},
 };
 
@@ -25,6 +27,9 @@ pub struct AdapterManifest {
 
 impl AdapterManifest {
     pub fn from_json(source: &str) -> Result<Self, ManifestError> {
+        if source.len() > crate::limits::MANIFEST_BYTES {
+            return Err(ManifestError::TooLarge);
+        }
         let raw: RawManifest = serde_json::from_str(source).map_err(ManifestError::Parse)?;
         let executable = ExecutablePath::new(raw.executable)?;
         Ok(Self {
@@ -43,10 +48,32 @@ impl AdapterManifest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutablePath(PathBuf);
 
+pub(crate) fn read_manifest(path: &Path) -> io::Result<String> {
+    if !path.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "manifest must be a regular file",
+        ));
+    }
+    let file = File::open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "manifest must be a regular file",
+        ));
+    }
+    let mut source = String::new();
+    file.take(crate::limits::MANIFEST_BYTES as u64 + 1)
+        .read_to_string(&mut source)?;
+    Ok(source)
+}
+
 impl ExecutablePath {
     pub fn new(value: impl Into<PathBuf>) -> Result<Self, ManifestError> {
         let value = value.into();
         let is_safe = !value.as_os_str().is_empty()
+            && value.as_os_str().as_encoded_bytes().len() <= 4096
+            && !value.as_os_str().as_encoded_bytes().contains(&0)
             && !value.is_absolute()
             && value
                 .components()
@@ -64,6 +91,7 @@ impl ExecutablePath {
 
 #[derive(Debug)]
 pub enum ManifestError {
+    TooLarge,
     Parse(serde_json::Error),
     InvalidExecutablePath(PathBuf),
 }
@@ -72,6 +100,7 @@ impl fmt::Display for ManifestError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Parse(error) => write!(formatter, "invalid adapter manifest: {error}"),
+            Self::TooLarge => write!(formatter, "adapter manifest exceeds 65536 bytes"),
             Self::InvalidExecutablePath(path) => write!(
                 formatter,
                 "adapter executable must be a non-empty relative path below its adapter directory: {}",
@@ -85,7 +114,7 @@ impl Error for ManifestError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Parse(error) => Some(error),
-            Self::InvalidExecutablePath(_) => None,
+            Self::InvalidExecutablePath(_) | Self::TooLarge => None,
         }
     }
 }

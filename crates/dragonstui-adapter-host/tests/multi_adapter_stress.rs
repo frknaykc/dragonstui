@@ -73,6 +73,8 @@ fn multi_adapter_stream_pressure_preserves_rpc_and_queue_accounting() {
                     .arg(id.as_str())
                     .arg("--mode")
                     .arg("stress-requests")
+                    // Explicit benchmark budget; production defaults remain unchanged.
+                    .event_rate_limit(10_000_000)
                     .ingress_queue_capacity(8)
                     .event_queue_capacity(8)
                     .response_queue_capacity(4),

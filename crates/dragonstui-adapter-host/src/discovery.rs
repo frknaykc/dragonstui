@@ -46,13 +46,21 @@ impl LocalAdapterRoot {
         let mut ids: BTreeMap<AdapterId, usize> = BTreeMap::new();
         for adapter_dir in candidates {
             let manifest_path = adapter_dir.join(MANIFEST_FILE_NAME);
-            let source = match fs::read_to_string(&manifest_path) {
+            let source = match crate::manifest::read_manifest(&manifest_path) {
                 Ok(source) => source,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
                     parsed.push(ParsedDiscovery::invalid(
                         adapter_dir,
                         manifest_path,
                         format!("missing {MANIFEST_FILE_NAME}"),
+                    ));
+                    continue;
+                }
+                Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                    parsed.push(ParsedDiscovery::invalid(
+                        adapter_dir,
+                        manifest_path,
+                        error.to_string(),
                     ));
                     continue;
                 }
