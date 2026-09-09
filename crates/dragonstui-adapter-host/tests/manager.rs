@@ -85,6 +85,196 @@ fn config(id: &str, mode: &str) -> AdapterRuntimeConfig {
 }
 
 #[test]
+fn response_backpressure_does_not_crash_a_healthy_provider() {
+    let root = TempRoot::new("response-pressure");
+    root.adapter("mock");
+    let id = AdapterId::new("mock").unwrap();
+    let echo = Capability::new("test.echo").unwrap();
+    let mut manager = AdapterManager::new(Duration::from_millis(100), 8);
+    manager.discover(LocalAdapterRoot::new(&root.path)).unwrap();
+    manager
+        .start_with_config(&id, config("mock", "normal").response_queue_capacity(1))
+        .unwrap();
+    let request = manager
+        .request(&id, echo.clone(), json!(42), Duration::from_secs(2))
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while manager.diagnostics(&id).unwrap().response_queue_len == 0 {
+        assert!(std::time::Instant::now() < deadline);
+        manager.poll(Duration::from_millis(10));
+    }
+    for _ in 0..20 {
+        manager.poll(Duration::ZERO);
+    }
+    assert_eq!(manager.state(&id), Some(AdapterState::Running));
+    assert_eq!(manager.providers_for(&echo), vec![id.clone()]);
+    assert!(manager.take_live_data().disconnects.is_empty());
+    assert_eq!(
+        manager
+            .wait_response(&id, &request, Duration::from_secs(2))
+            .unwrap(),
+        RpcOutcome::Response(json!(42))
+    );
+    let request = manager
+        .request(&id, echo, json!(43), Duration::from_secs(2))
+        .unwrap();
+    assert_eq!(
+        manager
+            .wait_response(&id, &request, Duration::from_secs(2))
+            .unwrap(),
+        RpcOutcome::Response(json!(43))
+    );
+    manager.stop(&id).unwrap();
+}
+
+fn assert_echo(manager: &mut AdapterManager, id: &AdapterId, value: u32) {
+    let request = manager
+        .request(
+            id,
+            Capability::new("test.echo").unwrap(),
+            json!(value),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+    assert_eq!(
+        manager
+            .wait_response(id, &request, Duration::from_secs(2))
+            .unwrap(),
+        RpcOutcome::Response(json!(value))
+    );
+}
+
+fn assert_child_reaped(pid: u32) {
+    #[cfg(unix)]
+    {
+        let output = std::process::Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "pid="])
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "fixture PID {pid} still exists or ps failed: {output:?}"
+        );
+        assert!(output.stdout.is_empty());
+    }
+    #[cfg(not(unix))]
+    let _ = pid;
+}
+
+#[test]
+fn explicit_recovery_cycles_isolate_malformed_and_zero_or_nonzero_exits() {
+    let root = TempRoot::new("recovery-cycles");
+    root.adapter("mock-a");
+    root.adapter("mock-b");
+    let a = AdapterId::new("mock-a").unwrap();
+    let b = AdapterId::new("mock-b").unwrap();
+    let echo = Capability::new("test.echo").unwrap();
+    let mut manager = AdapterManager::new(Duration::from_millis(100), 8);
+    manager.discover(LocalAdapterRoot::new(&root.path)).unwrap();
+    manager
+        .start_with_config(&b, config("mock-b", "normal"))
+        .unwrap();
+    for cycle in 0..9 {
+        let mode = [
+            "crash-on-request",
+            "exit-on-request",
+            "malformed-on-request",
+        ][cycle as usize % 3];
+        manager
+            .restart_with_config(&a, config("mock-a", mode))
+            .unwrap();
+        let pid = manager.diagnostics(&a).unwrap().pid.unwrap();
+        let doomed = manager
+            .request(&a, echo.clone(), json!(cycle), Duration::from_secs(2))
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while manager.state(&a) == Some(AdapterState::Running) {
+            assert!(std::time::Instant::now() < deadline, "{mode}");
+            manager.poll(Duration::from_millis(10));
+        }
+        assert_eq!(manager.state(&a), Some(AdapterState::Crashed));
+        assert_eq!(manager.diagnostics(&a).unwrap().pending_request_count, 0);
+        assert!(matches!(
+            manager.wait_response(&a, &doomed, Duration::ZERO),
+            Err(ManagerError::Rpc(
+                dragonstui_adapter_host::RpcError::Crashed
+            ))
+        ));
+        assert_eq!(manager.providers_for(&echo), vec![b.clone()]);
+        let error = manager.diagnostics(&a).unwrap().last_error.unwrap();
+        let disconnects = manager.take_live_data().disconnects;
+        assert_eq!(disconnects.len(), 1);
+        assert_eq!(disconnects[0].adapter_id, a);
+        for _ in 0..20 {
+            manager.poll(Duration::ZERO);
+        }
+        assert_eq!(manager.state(&a), Some(AdapterState::Crashed));
+        assert_eq!(manager.diagnostics(&a).unwrap().pid, Some(pid));
+        assert_eq!(
+            manager.diagnostics(&a).unwrap().last_error.as_deref(),
+            Some(error.as_str())
+        );
+        assert!(manager.take_live_data().disconnects.is_empty());
+        assert_echo(&mut manager, &b, cycle);
+        manager
+            .restart_with_config(&a, config("mock-a", "normal"))
+            .unwrap();
+        assert_child_reaped(pid);
+        assert_eq!(manager.providers_for(&echo), vec![a.clone(), b.clone()]);
+        assert!(manager.diagnostics(&a).unwrap().last_error.is_none());
+        assert_echo(&mut manager, &a, cycle);
+    }
+    manager.stop(&a).unwrap();
+    manager.stop(&b).unwrap();
+}
+
+#[test]
+fn hung_request_times_out_and_explicit_restart_reaps_child_without_harming_peer() {
+    let root = TempRoot::new("hung-recovery");
+    root.adapter("mock-a");
+    root.adapter("mock-b");
+    let a = AdapterId::new("mock-a").unwrap();
+    let b = AdapterId::new("mock-b").unwrap();
+    let mut manager = AdapterManager::new(Duration::from_millis(100), 8);
+    manager.discover(LocalAdapterRoot::new(&root.path)).unwrap();
+    for id in [&a, &b] {
+        manager
+            .start_with_config(id, config(id.as_str(), "normal"))
+            .unwrap();
+    }
+    let pid = manager.diagnostics(&a).unwrap().pid.unwrap();
+    let request = manager
+        .request(
+            &a,
+            Capability::new("test.slow").unwrap(),
+            json!({}),
+            Duration::from_millis(100),
+        )
+        .unwrap();
+    assert!(matches!(
+        manager.wait_response(&a, &request, Duration::from_secs(2)),
+        Err(ManagerError::Rpc(
+            dragonstui_adapter_host::RpcError::Timeout
+        ))
+    ));
+    assert_eq!(manager.diagnostics(&a).unwrap().pending_request_count, 0);
+    // A request timeout is not an implicit provider restart or crash verdict.
+    assert_eq!(manager.state(&a), Some(AdapterState::Running));
+    assert_echo(&mut manager, &b, 1);
+    let started = std::time::Instant::now();
+    manager
+        .restart_with_config(&a, config("mock-a", "normal"))
+        .unwrap();
+    assert!(started.elapsed() < Duration::from_secs(3));
+    assert_child_reaped(pid);
+    assert_echo(&mut manager, &a, 2);
+    assert_echo(&mut manager, &b, 3);
+    manager.stop(&a).unwrap();
+    manager.stop(&b).unwrap();
+}
+
+#[test]
 fn manager_owns_multi_adapter_lifecycle_diagnostics_crash_isolation_and_restart() {
     let root = TempRoot::new("lifecycle");
     root.adapter("mock-a");

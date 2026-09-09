@@ -56,6 +56,8 @@ fn main() {
         "unknown-response" => MockBehavior::UnknownResponse,
         "crash-after-handshake" => MockBehavior::CrashAfterHandshake,
         "crash-on-request" => MockBehavior::CrashOnRequest,
+        "exit-on-request" => MockBehavior::ExitOnRequest,
+        "malformed-on-request" => MockBehavior::MalformedOnRequest,
         _ => usage_error(&format!("unknown mode: {}", options.mode)),
     };
     protocol_mode(
@@ -95,7 +97,7 @@ Modes: normal (default), reference, process, bad-protocol, bad-id, malformed,\n\
 crash, timeout, hold, duplicate-capabilities, empty-capabilities, shared-capabilities,\n\
 events, live-events, semantic-events, observability-events, actions, sessions,\n\
 delayed-sessions, stress-events, stress-requests, out-of-order, unknown-response,\n\
-crash-after-handshake, crash-on-request\n\
+crash-after-handshake, crash-on-request, exit-on-request, malformed-on-request\n\
 Options: --action-marker PATH, --session-marker PATH, --event-release PATH,\n\
 --action-release PATH (reference only), --hold-ready PATH, --hold-release PATH,\n\
 --launch-marker PATH (hold mode)\n\
@@ -288,7 +290,9 @@ fn protocol_mode(
         | MockBehavior::OutOfOrder
         | MockBehavior::UnknownResponse
         | MockBehavior::CrashAfterHandshake
-        | MockBehavior::CrashOnRequest => (
+        | MockBehavior::CrashOnRequest
+        | MockBehavior::ExitOnRequest
+        | MockBehavior::MalformedOnRequest => (
             PROTOCOL_VERSION,
             adapter_id,
             vec!["test.echo", "test.stream", "test.fail", "test.slow"],
@@ -624,6 +628,15 @@ fn protocol_mode(
             ProtocolMessage::Request(request) => {
                 if behavior == MockBehavior::CrashOnRequest {
                     process::exit(25);
+                }
+                if behavior == MockBehavior::ExitOnRequest {
+                    process::exit(0);
+                }
+                if behavior == MockBehavior::MalformedOnRequest {
+                    println!("{{not json}}");
+                    flush_stdout();
+                    // Stay alive: the host must reject this generation rather
+                    // than mistake a later valid response for recovery.
                 }
                 if behavior == MockBehavior::OutOfOrder {
                     delayed.push(request);
@@ -1084,6 +1097,8 @@ enum MockBehavior {
     UnknownResponse,
     CrashAfterHandshake,
     CrashOnRequest,
+    ExitOnRequest,
+    MalformedOnRequest,
 }
 
 impl MockBehavior {

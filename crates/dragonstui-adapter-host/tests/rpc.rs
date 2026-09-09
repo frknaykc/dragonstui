@@ -98,6 +98,63 @@ fn start_delayed_session_runtime(control: &Path) -> AdapterRuntime {
 }
 
 #[test]
+fn repeated_crash_polling_preserves_first_error_and_single_terminal_transition() {
+    let mut runtime = start_runtime("crash-on-request");
+    let request = runtime
+        .send_request(
+            Capability::new("test.echo").unwrap(),
+            json!({}),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+    assert_eq!(
+        runtime.wait_response(&request, Duration::from_secs(2)),
+        Err(RpcError::Crashed)
+    );
+    let history = runtime.state_history().to_vec();
+    let error = runtime.last_error().unwrap().to_owned();
+    for _ in 0..100 {
+        assert_eq!(runtime.pump(Duration::ZERO), Err(RpcError::Crashed));
+    }
+    assert_eq!(runtime.state_history(), history);
+    assert_eq!(runtime.last_error(), Some(error.as_str()));
+}
+
+#[test]
+fn malformed_running_output_terminalizes_standalone_runtime_and_pending_rpc() {
+    let mut runtime = start_runtime("malformed-on-request");
+    let request = runtime
+        .send_request(
+            Capability::new("test.echo").unwrap(),
+            json!({}),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+    assert!(matches!(
+        runtime.pump(Duration::from_secs(2)),
+        Err(RpcError::Failed(_))
+    ));
+    assert_eq!(runtime.state(), AdapterState::Crashed);
+    assert_eq!(runtime.pending_count(), 0);
+    assert_eq!(
+        runtime.wait_response(&request, Duration::ZERO),
+        Err(RpcError::Crashed)
+    );
+    let error = runtime.last_error().unwrap().to_owned();
+    assert_eq!(runtime.pump(Duration::ZERO), Err(RpcError::Crashed));
+    assert_eq!(runtime.last_error(), Some(error.as_str()));
+    assert_eq!(
+        runtime.send_request(
+            Capability::new("test.echo").unwrap(),
+            json!({}),
+            Duration::from_secs(2)
+        ),
+        Err(RpcError::Crashed)
+    );
+    runtime.stop(Duration::from_millis(100)).unwrap();
+}
+
+#[test]
 fn rpc_generates_unique_ids_correlates_responses_errors_and_timeouts() {
     let mut runtime = start_runtime("normal");
     let echo = Capability::new("test.echo").unwrap();

@@ -478,6 +478,9 @@ impl AdapterRuntime {
     }
 
     pub fn pump(&mut self, timeout: Duration) -> Result<bool, RpcError> {
+        if self.state == AdapterState::Crashed {
+            return Err(RpcError::Crashed);
+        }
         self.expire_pending();
         if self.response_queue_len() >= self.response_queue_capacity {
             return Err(RpcError::Backpressure);
@@ -490,11 +493,11 @@ impl AdapterRuntime {
                 return Err(RpcError::Crashed);
             }
             Err(ProcessError::DecodeStdout(error)) => {
-                self.last_error = Some(error.to_string());
+                self.mark_crashed(error.to_string());
                 return Err(RpcError::Failed(error.to_string()));
             }
             Err(error) => {
-                self.last_error = Some(error.to_string());
+                self.mark_crashed(error.to_string());
                 return Err(RpcError::Failed(error.to_string()));
             }
         };
@@ -589,6 +592,10 @@ impl AdapterRuntime {
     }
 
     pub(crate) fn mark_crashed(&mut self, error: impl Into<String>) {
+        // Terminal polling must not grow history or overwrite the first cause.
+        if self.state == AdapterState::Crashed {
+            return;
+        }
         self.state = AdapterState::Crashed;
         self.state_history.push(AdapterState::Crashed);
         self.last_error = Some(error.into());

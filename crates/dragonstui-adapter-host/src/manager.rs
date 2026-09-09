@@ -215,7 +215,7 @@ impl AdapterManager {
                 .collect();
             if let Some(runtime) = self.runtimes.get_mut(&id) {
                 match runtime.pump(per_adapter_timeout) {
-                    Ok(_) => {}
+                    Ok(_) | Err(RpcError::Backpressure) => {}
                     Err(error) => failure = Some(error.to_string()),
                 }
                 if matches!(runtime.process_status(), ProcessStatus::Exited { .. }) {
