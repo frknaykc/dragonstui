@@ -24,6 +24,9 @@ class ReleasePackageTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('[package]\nversion = "0.1.0"\n')
         (self.root / "LICENSE").write_text("Fixture MIT license\n")
+        (self.root / "docs").mkdir()
+        (self.root / "docs/installation.md").write_bytes(
+            (release.ROOT / "docs/installation.md").read_bytes())
         (self.root / "tools").mkdir()
         (self.root / "tools/pty_smoke.py").write_bytes((release.ROOT / "tools/pty_smoke.py").read_bytes())
         self.bins = self.base / "bin"
@@ -36,6 +39,8 @@ if sys.argv[1:] == ['--version']:
     print('{name} 0.1.0')
 elif sys.argv[1:] == ['--help']:
     print('Usage: {name} [--help] [--version]')
+elif sys.argv[1:2] == ['--root'] and sys.argv[-1:] == ['list']:
+    print('ID\\tVERSION\\tSTATE\\tPROTOCOL')
 else:
     old = termios.tcgetattr(0)
     try:
@@ -52,6 +57,17 @@ else:
 
     def build(self, platform="macos-arm64"):
         return release.build("0.1.0", platform, self.bins, self.output, self.root)
+
+    def test_package_includes_offline_installation_and_first_run_guide(self):
+        archive, _ = self.build()
+        with tarfile.open(archive, "r:gz") as bundle:
+            source = bundle.extractfile("README.md")
+            assert source is not None
+            with source:
+                text = source.read().decode("utf-8")
+        for expected in ("$HOME/.local/bin", "--adapter-root", "--root", "uninstall", "update"):
+            self.assertIn(expected, text)
+        self.assertNotRegex(text, r"\]\([-a-z]+\.md(?:#[^)]+)?\)")
 
     def verify(self, archive, checksum):
         # Runtime composition uses executable Python fixtures, not native binaries.
@@ -178,21 +194,26 @@ else:
     def test_environment_and_runtime_composition_cleanup(self):
         archive, checksum = self.build()
         calls = []
+        real_runner = release.run_checked
         def runner(command, cwd, env, timeout=10):
             calls.append((command, cwd, env, timeout))
             self.assertFalse(cwd.is_relative_to(self.root))
             self.assertNotIn("AWS_SECRET_ACCESS_KEY", env)
-            self.assertEqual(env["PATH"], "/usr/bin:/bin")
+            installed = command[0] in release.BINARIES
+            expected_path = f"{env['HOME']}/.local/bin:/usr/bin:/bin" if installed else "/usr/bin:/bin"
+            self.assertEqual(env["PATH"], expected_path)
             self.assertTrue(Path(env["HOME"]).is_dir())
+            if installed or command[0] == "/usr/bin/install":
+                return real_runner(command, cwd, env, timeout)
             if command[1] == "--version":
                 return f"{Path(command[0]).name} 0.1.0\n"
             return "help or PTY success\n"
         with mock.patch.dict(os.environ, {"AWS_SECRET_ACCESS_KEY": "fixture-never-forward"}), \
              mock.patch.object(release, "run_checked", side_effect=runner):
             self.verify(archive, checksum)
-        self.assertEqual(len(calls), 9)
-        self.assertEqual(calls[-1][0][1:3], ["-I", "-c"])
-        self.assertIn("--exit', 'q'", calls[-1][0][3])
+        self.assertEqual(len(calls), 20)
+        self.assertEqual(calls[8][0][1:3], ["-I", "-c"])
+        self.assertIn("--exit', 'q'", calls[8][0][3])
         self.assertFalse(calls[0][1].exists())
 
     def test_version_and_empty_help_rejection(self):

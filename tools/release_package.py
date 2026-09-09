@@ -47,19 +47,14 @@ def archive_name(version: str, platform: str) -> str:
     return f"dragonstui-v{version}-{platform}.tar.gz"
 
 
-def readme(version: str, platform: str) -> bytes:
+def readme(version: str, platform: str, root: Path = ROOT) -> bytes:
+    guide = (root / "docs/installation.md").read_text(encoding="utf-8")
+    # The full guide ships offline without expanding the six-file inventory.
+    guide = re.sub(r"\]\(([-a-z]+\.md)(#[^)]+)?\)",
+                   r"](https://github.com/frknaykc/dragonstui/blob/master/docs/\1\2)", guide)
     return (f"# DragonsTUI {version} ({platform})\n\n"
             "Use this bundle only on its named operating system and architecture.\n"
-            "Verify the accompanying SHA-256 checksum before extracting it.\n"
-            "Extract into an empty directory, then install the four executables:\n\n"
-            "```sh\nmkdir -p \"$HOME/.local/bin\"\n"
-            f"install -m 755 {' '.join(BINARIES)} \"$HOME/.local/bin/\"\n"
-            "export PATH=\"$HOME/.local/bin:$PATH\"\ndragons_tui --version\n"
-            "dragons_tui\n```\n\n"
-            "Press Enter to leave the splash; press q to quit the dashboard.\n"
-            "Each executable supports --help and --version. The showcase is optional;\n"
-            "the adapter host mock is a local testing utility. No service installation\n"
-            "or network setup is required for the dashboard. See LICENSE (MIT).\n").encode()
+            "See LICENSE (MIT).\n\n" + guide).encode("utf-8")
 
 
 def sha256(path: Path) -> str:
@@ -88,7 +83,7 @@ def build(version: str, platform: str, bin_dir: Path, output: Path,
         with staged.open("wb") as raw, gzip.GzipFile(fileobj=raw, mode="wb", filename="", mtime=0) as compressed:
             with tarfile.open(fileobj=compressed, mode="w", format=tarfile.USTAR_FORMAT) as bundle:
                 for name, mode in INVENTORY.items():
-                    data = readme(version, platform) if name == "README.md" else sources[name].read_bytes()
+                    data = readme(version, platform, root) if name == "README.md" else sources[name].read_bytes()
                     info = tarfile.TarInfo(name)
                     info.mode, info.size, info.mtime = mode, len(data), 0
                     bundle.addfile(info, io.BytesIO(data))
@@ -212,7 +207,7 @@ def verify(version: str, platform: str, archive: Path, checksum: Path,
                 with source, (extracted / member.name).open("xb") as destination:
                     shutil.copyfileobj(source, destination)
                 (extracted / member.name).chmod(member.mode)
-        if (extracted / "README.md").read_bytes() != readme(version, platform):
+        if (extracted / "README.md").read_bytes() != readme(version, platform, root):
             raise ValueError("README does not match release version/platform")
         if (extracted / "LICENSE").read_bytes() != (root / "LICENSE").read_bytes():
             raise ValueError("LICENSE does not match repository")
@@ -228,6 +223,37 @@ def verify(version: str, platform: str, archive: Path, checksum: Path,
         run_checked([sys.executable, "-I", "-c", PTY_WRAPPER,
                      str(root / "tools/pty_smoke.py"), str(extracted / "dragons_tui")],
                     extracted, env, timeout=20)
+        verify_user_install(extracted, env, version)
+
+
+def verify_user_install(extracted: Path, env: dict[str, str], version: str) -> None:
+    """Exercise documented install/replacement/uninstall only in verifier-owned HOME."""
+    bin_dir = Path(env["HOME"]) / ".local/bin"
+    bin_dir.mkdir(parents=True)
+    keep_binary = bin_dir / "unrelated-tool"
+    keep_binary.write_text("unrelated fixture\n")
+    keep_data = Path(env["XDG_DATA_HOME"]) / "retain.txt"
+    keep_data.write_text("retained fixture\n")
+    installed_env = {**env, "PATH": f"{bin_dir}:{env['PATH']}"}
+    install = ["/usr/bin/install", "-m", "755",
+               *(str(extracted / name) for name in BINARIES), str(bin_dir)]
+    # Same-version replacement checks filesystem mechanics, not migration between versions.
+    for _ in range(2):
+        run_checked(install, extracted, env)
+        for name in BINARIES:
+            if run_checked([name, "--version"], extracted, installed_env).strip() != f"{name} {version}":
+                raise ValueError(f"installed PATH version mismatch: {name}")
+    missing_root = Path(env["XDG_DATA_HOME"]) / "dragonstui/adapters"
+    listing = run_checked(["dragonstui-adapter", "--root", str(missing_root), "list"],
+                          extracted, installed_env)
+    if listing != "ID\tVERSION\tSTATE\tPROTOCOL\n" or missing_root.exists():
+        raise ValueError("first-run adapter list must be empty and read-only")
+    for name in BINARIES:
+        (bin_dir / name).unlink()
+    if set(bin_dir.iterdir()) != {keep_binary} or keep_binary.read_text() != "unrelated fixture\n":
+        raise ValueError("uninstall changed an unrelated executable")
+    if keep_data.read_text() != "retained fixture\n":
+        raise ValueError("install/update/uninstall changed retained data")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -250,7 +276,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(path)
         else:
             verify(args.version, args.platform, args.archive, args.checksum)
-            print(f"Verified {args.archive.name}: inventory, SHA-256, native architecture/system dependencies, version/help, dashboard PTY q lifecycle")
+            print(f"Verified {args.archive.name}: inventory, SHA-256, native architecture/system dependencies, version/help, dashboard PTY q lifecycle, user install/PATH/empty root/replacement/uninstall")
     except (OSError, ValueError, tarfile.TarError, EOFError) as error:
         parser.exit(1, f"release package: {error}\n")
     return 0

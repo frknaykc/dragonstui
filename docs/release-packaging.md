@@ -54,6 +54,10 @@ toolchains; packaging identical binary/document inputs is byte-reproducible.
 
 ## Download and verify
 
+The [installation and first-run guide](installation.md) covers PATH setup,
+config/data locations, empty adapter states, troubleshooting, update and uninstall.
+Its full text is included in each bundle's `README.md` for offline use.
+
 During R1, download the two `release-*` artifacts from the **Release packaging**
 Actions run. These are CI artifacts, not public Release assets. After R6, the
 same tarballs and checksum files will be attached to the versioned GitHub Release.

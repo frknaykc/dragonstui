@@ -56,6 +56,10 @@ Bu ekran görüntülerini 9 Eylül 2026’da, güncel `dragonstui-showcase` rele
 
 ## Hızlı başlangıç
 
+Paketlenmiş binary’ler için [Kurulum ve ilk açılış](docs/installation.md) rehberiyle
+başlayın: kullanıcı dizinine kurulum, ortak adapter yolları, boş ekranlar,
+güncelleme ve kaldırma. Public release henüz yayımlanmadı; mevcut paketler CI artifact’larıdır.
+
 Proje Rust edition 2024 kullanır; henüz bir minimum desteklenen Rust sürümü (MSRV) belirtmez. Edition 2024 destekleyen bir Rust araç zinciri kullanın.
 
 ```sh

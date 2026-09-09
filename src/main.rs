@@ -1,5 +1,5 @@
 use std::{
-    io::{self, Write, stdout},
+    io::{self, IsTerminal, Write, stdout},
     time::{Duration, Instant},
 };
 
@@ -33,11 +33,17 @@ fn main() -> io::Result<()> {
         }
         Some("--help" | "-h") => {
             println!(
-                "dragons_tui — DragonsTUI dashboard\n\nUsage: dragons_tui [--version | --help]\nRun without arguments in an interactive terminal. Press q or Ctrl+C to exit."
+                "dragons_tui — DragonsTUI dashboard\n\nUsage: dragons_tui [--version | --help]\nRun without arguments in an interactive terminal. Press q or Ctrl+C to exit.\nThis is a UI demo; Hermes is optional and is not bundled.\nFor the adapter interface: dragonstui-showcase --help (then press 8 in the UI).\nNo config file is required; dashboard history stays in memory.\nInstallation, paths, update and uninstall: see the package README.md."
             );
             return Ok(());
         }
         _ => {}
+    }
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "dragons_tui requires an interactive terminal; use --help for first-run guidance",
+        ));
     }
     let shutdown = ShutdownSignal::install()?;
     let mut output = stdout();
@@ -211,9 +217,18 @@ impl App {
 }
 
 fn seeded_output() -> Vec<String> {
-    (1..=50)
-        .map(|line| format!("[{line:03}] DragonsTUI output event"))
-        .collect()
+    let mut lines = vec![
+        "Welcome to DragonsTUI — this dashboard is a UI demo.".to_owned(),
+        "Tab changes focus; q or Ctrl+C exits. Nothing starts automatically.".to_owned(),
+        "Enter in the agent list starts/stops the external hermes --cli command.".to_owned(),
+        "Hermes is optional and is not included in this package.".to_owned(),
+        "For adapters, run dragonstui-showcase and press 8.".to_owned(),
+        "Use --adapter-root PATH there and --root PATH in dragonstui-adapter.".to_owned(),
+        "No config file is required; dashboard history stays in memory.".to_owned(),
+        "The following numbered lines are demo data, not real activity.".to_owned(),
+    ];
+    lines.extend((1..=50).map(|line| format!("[demo {line:03}] DragonsTUI output event")));
+    lines
 }
 
 fn agent_tree() -> Tree {
@@ -381,7 +396,9 @@ impl Dashboard {
             }
             Err(error) => {
                 self.status = "Start failed".to_owned();
-                self.push_output([format!("[start error] {error}")]);
+                self.push_output([format!(
+                    "[start error] Cannot start hermes --cli: {error}. Check that Hermes is installed and on PATH; it is not bundled. The UI demo remains usable."
+                )]);
             }
         }
     }
@@ -1253,6 +1270,25 @@ mod tests {
         AGENTS, AGENTS_FOCUS, App, AppPhase, Dashboard, INPUT_FOCUS, OUTPUT_FOCUS, SPLASH_ARTWORK,
         SPLASH_DURATION, app_frame, demo_frame, demo_view, splash_artwork_rect,
     };
+
+    #[test]
+    fn first_run_dashboard_shows_guidance_without_starting_an_agent() {
+        let mut dashboard = Dashboard::new();
+        let frame = demo_frame(Size::new(160, 55), &mut dashboard);
+        let buffer = frame.buffer();
+        let text = (0..buffer.height())
+            .map(|y| {
+                (0..buffer.width())
+                    .filter_map(|x| buffer.get(x, y).map(|cell| cell.character))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Welcome to DragonsTUI"));
+        assert!(text.contains("Hermes is optional"));
+        assert!(text.contains("For adapters"));
+        assert!(dashboard.agent.is_none());
+    }
 
     #[test]
     fn demo_frame_uses_constraint_layout_borders_and_unicode_text() {

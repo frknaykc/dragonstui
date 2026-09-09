@@ -110,7 +110,14 @@ fn run(cli: Cli) -> Result<(), String> {
         }
         Command::List => {
             println!("ID\tVERSION\tSTATE\tPROTOCOL");
-            for entry in discover(&root)? {
+            let entries = discover(&root)?;
+            if entries.is_empty() {
+                eprintln!(
+                    "No installed adapters in {}.\nUse this same path with showcase --adapter-root.\nNext: dragonstui-adapter --root <path> install <id> --registry <trusted-path-or-https-url>\nInstall does not start an adapter; use start <id> explicitly. No registry is bundled.",
+                    root.display()
+                );
+            }
+            for entry in entries {
                 let (id, version, protocol) = entry
                     .manifest()
                     .map(|manifest| {
@@ -405,9 +412,12 @@ fn discover(root: &Path) -> Result<Vec<DiscoveredAdapter>, String> {
     if !root.exists() {
         return Ok(Vec::new());
     }
-    LocalAdapterRoot::new(root)
-        .discover()
-        .map_err(|error| error.to_string())
+    LocalAdapterRoot::new(root).discover().map_err(|error| {
+        format!(
+            "Cannot read adapter root {}: {error}. Check --root points to a readable directory.",
+            root.display()
+        )
+    })
 }
 
 fn display_state(entry: &DiscoveredAdapter) -> &'static str {

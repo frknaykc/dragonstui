@@ -48,6 +48,50 @@ fn is_executable(path: &std::path::Path) -> bool {
 }
 
 #[test]
+fn first_run_empty_root_is_read_only_and_has_install_guidance() {
+    let root = temp_path("first-run-missing");
+    assert!(!root.exists());
+    let output = Command::new(env!("CARGO_BIN_EXE_dragonstui-adapter"))
+        .arg("--root")
+        .arg(&root)
+        .arg("list")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "ID\tVERSION\tSTATE\tPROTOCOL\n"
+    );
+    let hint = String::from_utf8_lossy(&output.stderr);
+    for expected in [
+        "No installed adapters",
+        "install <id>",
+        "--registry",
+        "does not start",
+    ] {
+        assert!(hint.contains(expected), "missing {expected}");
+    }
+    assert!(!root.exists());
+}
+
+#[test]
+fn first_run_non_directory_root_error_has_recovery_hint() {
+    let root = temp_path("first-run-file");
+    fs::write(&root, "retain this file").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_dragonstui-adapter"))
+        .arg("--root")
+        .arg(&root)
+        .arg("list")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let hint = String::from_utf8_lossy(&output.stderr);
+    assert!(hint.contains("Check --root points to a readable directory"));
+    assert_eq!(fs::read_to_string(&root).unwrap(), "retain this file");
+    fs::remove_file(root).unwrap();
+}
+
+#[test]
 fn cli_help_and_local_registry_search_are_plain_terminal_commands() {
     let registry_path = temp_path("registry.json");
     let (os, architecture) = current_platform();

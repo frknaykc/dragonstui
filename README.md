@@ -57,6 +57,10 @@ These screenshots were refreshed on September 9, 2026 from the running `dragonst
 
 ## Quick Start
 
+For packaged binaries, start with [Installation and first run](docs/installation.md):
+user-local installation, shared adapter paths, empty states, update and uninstall.
+Public release assets are not published yet; current packages are CI artifacts.
+
 DragonsTUI declares Rust edition 2024 and does not currently declare an MSRV. Use a Rust toolchain that supports edition 2024.
 
 ```sh

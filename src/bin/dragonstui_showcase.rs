@@ -5,7 +5,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
-    io::{self, Write, stdout},
+    io::{self, IsTerminal, Write, stdout},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -4283,11 +4283,17 @@ fn main() -> io::Result<()> {
         .any(|argument| argument == "--help" || argument == "-h")
     {
         println!(
-            "Dragonfire showcase for DragonsTUI\n\nRun: cargo run --release --features adapter-showcase --bin dragonstui-showcase [--adapter-root <path>]"
+            "Dragonfire showcase for DragonsTUI\n\nUsage: dragonstui-showcase [--adapter-root <path>] [--adapter-registry <path-or-https-url>] [--adapter-install <id>]\n\nFirst run: explore the demo, or press 8 for Adapters. No adapters start automatically.\nUse the same path for --adapter-root here and --root in dragonstui-adapter.\nWithout --adapter-root, adapter discovery is disabled. No config file is required; UI settings stay in memory.\nInstall an adapter from a trusted registry with dragonstui-adapter --help.\nRun in an interactive terminal; q or Ctrl+C exits. --version prints the package version."
         );
         return Ok(());
     }
     let adapter_root = parse_showcase_args()?;
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "dragonstui-showcase requires an interactive terminal; use --help for first-run guidance",
+        ));
+    }
     let shutdown = ShutdownSignal::install()?;
 
     let mut output = stdout();
@@ -5879,6 +5885,33 @@ fn render_log_viewer(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -> 
     None
 }
 
+fn adapter_first_run_message(showcase: &Showcase) -> String {
+    let language = showcase.language;
+    if let Some(error) = &showcase.adapter_discovery_error {
+        return format!(
+            "{}\n{error}\n{}",
+            localized(language, "Discovery failed.", "Keşif başarısız."),
+            localized(
+                language,
+                "Check --adapter-root and directory permissions.\nRestart with a readable directory; do not delete controller state.",
+                "--adapter-root ve dizin izinlerini kontrol edin.\nOkunabilir dizinle yeniden açın; controller durumunu silmeyin."
+            ),
+        );
+    }
+    match showcase.adapter_root.as_deref() {
+        None => localized(language,
+            "No installed adapters shown.\nDiscovery is disabled: no root was selected.\nRestart: dragonstui-showcase --adapter-root PATH\nUse the same PATH with dragonstui-adapter --root.\nNo config file or adapter is required for the demo.",
+            "Kurulu adaptör gösterilmiyor.\nKeşif kapalı: kök dizin seçilmedi.\nYeniden aç: dragonstui-showcase --adapter-root YOL\nAynı YOL: dragonstui-adapter --root ile kullanın.\nDemo için config dosyası veya adaptör gerekmez."
+        ).to_owned(),
+        Some(root) => format!("{}\n{}\n{}",
+            localized(language, "No installed adapters.", "Kurulu adaptör yok."),
+            root.display(),
+            localized(language,
+                "Next: dragonstui-adapter --root PATH\n  install ID --registry TRUSTED_SOURCE\nUse this root as PATH; then start ID explicitly.\nReopen this screen after CLI installation.\nNo domain adapter or registry is bundled.",
+                "Sonraki: dragonstui-adapter --root YOL\n  install KIMLIK --registry GUVENILIR_KAYNAK\nYOL bu dizindir; ardından start KIMLIK kullanın.\nCLI kurulumundan sonra bu ekranı yeniden açın.\nAlan adaptörü veya registry pakete dahil değil.")),
+    }
+}
+
 fn render_adapter_list(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -> Option<Position> {
     let theme = showcase.theme;
     let layout = InspectorLayout::new(60, 24, 32);
@@ -5907,25 +5940,10 @@ fn render_adapter_list(frame: &mut Frame, area: Rect, showcase: &mut Showcase) -
         BorderSet::double(),
     );
     showcase.hits.table = inner;
-    if let Some(error) = &showcase.adapter_discovery_error {
-        RichText::new([Line::new([
-            Span::styled(
-                localized(showcase.language, "Discovery failed: ", "Keşif başarısız: "),
-                Style::new().fg(theme.error).bold(),
-            ),
-            Span::styled(error, Style::new().fg(theme.text)),
-        ])])
-        .render(frame, inner);
-        return None;
-    }
-    if showcase.adapter_rows.is_empty() {
-        Text::new(localized(
-            showcase.language,
-            "No installed adapters. Pass --adapter-root <path> to inspect a local host root.",
-            "Kurulu adaptör yok. Yerel host kökünü incelemek için --adapter-root <yol> verin.",
-        ))
-        .style(Style::new().fg(theme.muted).bg(theme.background))
-        .render(frame, inner);
+    if showcase.adapter_discovery_error.is_some() || showcase.adapter_rows.is_empty() {
+        Text::new(adapter_first_run_message(showcase))
+            .style(Style::new().fg(theme.muted).bg(theme.background))
+            .render(frame, inner);
         return None;
     }
     let rows = showcase
@@ -6073,25 +6091,10 @@ fn render_capability_browser(
         BorderSet::double(),
     );
     showcase.hits.table = inner;
-    if let Some(error) = &showcase.adapter_discovery_error {
-        RichText::new([Line::new([
-            Span::styled(
-                localized(showcase.language, "Discovery failed: ", "Keşif başarısız: "),
-                Style::new().fg(theme.error).bold(),
-            ),
-            Span::styled(error, Style::new().fg(theme.text)),
-        ])])
-        .render(frame, inner);
-        return None;
-    }
-    if showcase.adapter_rows.is_empty() {
-        Text::new(localized(
-            showcase.language,
-            "No adapters available.",
-            "Kullanılabilir adaptör yok.",
-        ))
-        .style(Style::new().fg(theme.muted).bg(theme.background))
-        .render(frame, inner);
+    if showcase.adapter_discovery_error.is_some() || showcase.adapter_rows.is_empty() {
+        Text::new(adapter_first_run_message(showcase))
+            .style(Style::new().fg(theme.muted).bg(theme.background))
+            .render(frame, inner);
         return None;
     }
     let index = showcase.capability_provider_index();
@@ -8814,6 +8817,26 @@ mod tests {
     }
 
     #[test]
+    fn first_run_adapter_states_have_localized_recovery_steps() {
+        let mut showcase = Showcase::new(Instant::now());
+        assert!(adapter_first_run_message(&showcase).contains("Discovery is disabled"));
+        showcase.adapter_root = Some(PathBuf::from("example-root"));
+        let message = adapter_first_run_message(&showcase);
+        assert!(message.contains("example-root"));
+        assert!(message.contains("install ID --registry"));
+        showcase.adapter_discovery_error = Some("fixture read failure".to_owned());
+        let message = adapter_first_run_message(&showcase);
+        assert!(message.contains("fixture read failure"));
+        assert!(message.contains("directory permissions"));
+        showcase.language = Language::Turkish;
+        assert!(adapter_first_run_message(&showcase).contains("dizin izinlerini"));
+        showcase.adapter_discovery_error = None;
+        assert!(adapter_first_run_message(&showcase).contains("Kurulu adaptör yok"));
+        showcase.adapter_root = None;
+        assert!(adapter_first_run_message(&showcase).contains("Keşif kapalı"));
+    }
+
+    #[test]
     fn adapters_open_by_keyboard_mouse_and_localized_palette_with_tiny_rendering() {
         let mut showcase = Showcase::new(Instant::now());
         showcase.handle_key(key(KeyCode::Enter));
@@ -8821,6 +8844,8 @@ mod tests {
         assert_eq!(showcase.section, Section::Adapters);
         let adapters = showcase_view(Size::new(160, 55), &mut showcase);
         assert!(frame_contains(&adapters.frame, "No installed adapters"));
+        assert!(frame_contains(&adapters.frame, "Discovery is disabled"));
+        assert!(frame_contains(&adapters.frame, "--adapter-root PATH"));
         let header = showcase.hits.sections[Section::Adapters.index()];
         assert!(header.width > 0);
 
@@ -8855,7 +8880,8 @@ mod tests {
         showcase.palette = None;
         let turkish = showcase_view(Size::new(160, 55), &mut showcase);
         assert!(frame_contains(&turkish.frame, "Adaptörler"));
-        assert!(frame_contains(&turkish.frame, "Kurulu adaptör yok"));
+        assert!(frame_contains(&turkish.frame, "Keşif kapalı"));
+        assert!(frame_contains(&turkish.frame, "--adapter-root"));
 
         for size in [Size::new(20, 8), Size::new(5, 3), Size::new(1, 1)] {
             let tiny = showcase_view(size, &mut showcase);
