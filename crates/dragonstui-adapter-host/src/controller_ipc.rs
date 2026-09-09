@@ -4,6 +4,7 @@ use std::{
     io::{self, BufRead, BufReader, Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     path::Path,
+    sync::atomic::{AtomicBool, Ordering},
     thread,
     time::{Duration, Instant},
 };
@@ -309,11 +310,21 @@ impl ControllerIpcServer {
     }
 
     /// Runs until a locally authenticated client requests shutdown.
-    pub fn serve_forever(mut self) -> Result<(), ControllerIpcError> {
+    pub fn serve_forever(self) -> Result<(), ControllerIpcError> {
+        self.serve_until(&AtomicBool::new(false))
+    }
+
+    /// Runs until a locally authenticated client requests shutdown or a daemon
+    /// owner requests a graceful stop. The server owns the controller, so return
+    /// from this method drops and stops every controller-owned adapter process.
+    pub fn serve_until(mut self, stopping: &AtomicBool) -> Result<(), ControllerIpcError> {
         self.listener
             .set_nonblocking(true)
             .map_err(ControllerIpcError::Accept)?;
         loop {
+            if stopping.load(Ordering::Relaxed) {
+                return Ok(());
+            }
             self.controller.poll(Duration::ZERO);
             match self.listener.accept() {
                 Ok((stream, _)) => {

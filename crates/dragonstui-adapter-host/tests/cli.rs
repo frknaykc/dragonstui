@@ -308,6 +308,55 @@ fn cli_lifecycle_command_autostarts_an_authenticated_controller_and_leaves_no_da
     let _ = fs::remove_dir_all(root);
 }
 
+#[cfg(unix)]
+#[test]
+fn controller_daemon_catchable_signal_removes_endpoint_before_exit() {
+    for signal in ["-TERM", "-HUP"] {
+        let root = temp_path(&format!("controller-{}", &signal[1..].to_lowercase()));
+        let endpoint_path = root.join(".controller/endpoint.json");
+        let mut daemon = Command::new(env!("CARGO_BIN_EXE_dragonstui-adapter"))
+            .args(["--root"])
+            .arg(&root)
+            .arg("controller-daemon")
+            .env("DRAGONSTUI_CONTROLLER_TOKEN", "signal-fixture-token")
+            .spawn()
+            .unwrap();
+
+        for _ in 0..100 {
+            if endpoint_path.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            endpoint_path.exists(),
+            "controller did not publish its endpoint for {signal}"
+        );
+
+        let result = Command::new("kill")
+            .args([signal, &daemon.id().to_string()])
+            .status()
+            .unwrap();
+        assert!(result.success());
+
+        for _ in 0..100 {
+            if daemon.try_wait().unwrap().is_some() && !endpoint_path.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            daemon.try_wait().unwrap().is_some(),
+            "controller did not exit for {signal}"
+        );
+        assert!(
+            !endpoint_path.exists(),
+            "controller left its token-bearing endpoint after {signal}"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
 #[test]
 fn cli_start_stop_restart_and_live_state_share_the_persistent_controller() {
     let root = temp_path("lifecycle-store");

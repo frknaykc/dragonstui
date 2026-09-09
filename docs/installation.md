@@ -264,8 +264,9 @@ executables and confirm all match the replacement bundle, then reopen the UI.
 Restart desired adapters explicitly. Your selected adapter root is retained;
 binary replacement is not an adapter update or a data migration.
 
-An OS-terminated daemon can leave an endpoint behind. Follow the controller
-troubleshooting guidance below rather than blindly deleting it.
+The daemon removes its endpoint after a catchable Unix `SIGTERM` or `SIGHUP`.
+An uncatchable termination (such as `SIGKILL`) can still leave one behind; follow
+the controller troubleshooting guidance below rather than blindly deleting it.
 
 ## Uninstall
 
@@ -309,7 +310,8 @@ credential-bearing state. Only after independently confirming that the original
 daemon has stopped and the endpoint is genuinely stale should you explicitly
 remove that one endpoint file for the correct root. Do not print its contents
 or remove the adapter root. Normal authenticated daemon shutdown removes its
-endpoint; forced termination need not do so.
+endpoint; catchable Unix `SIGTERM` and `SIGHUP` also do so. Uncatchable
+termination (for example `SIGKILL`) need not do so.
 
 When reporting a problem, include the affected binary/version, OS/architecture,
 terminal, command with sensitive values redacted, and error text. Do not attach

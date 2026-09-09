@@ -11,6 +11,10 @@ on:
       - 'crates/**'
       - 'tools/*release*'
       - 'tools/pty_smoke.py'
+      - 'docs/installation.md'
+      - 'docs/release-packaging.md'
+      - 'LICENSE'
+      - 'README.md'
   workflow_dispatch:
   pull_request:
     paths:
@@ -20,6 +24,10 @@ on:
       - 'crates/**'
       - 'tools/*release*'
       - 'tools/pty_smoke.py'
+      - 'docs/installation.md'
+      - 'docs/release-packaging.md'
+      - 'LICENSE'
+      - 'README.md'
 
 permissions:
   contents: read

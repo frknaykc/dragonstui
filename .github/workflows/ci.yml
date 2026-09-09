@@ -20,9 +20,9 @@ jobs:
       - name: Format
         run: cargo fmt --check
       - name: Workspace check
-        run: cargo check --workspace
+        run: cargo check --locked --workspace
       - name: Workspace tests
-        run: cargo test --workspace --features adapter-showcase
+        run: cargo test --locked --workspace --features adapter-showcase
       - name: Stress harness tests
         run: python3 -m unittest discover -s tools -p test_adapter_stress.py -v
       - name: Ecosystem harness tests
@@ -34,11 +34,11 @@ jobs:
       - name: Docker adapter unit and harness tests
         run: python3 -m unittest discover -s tools -p 'test_docker_adapter*.py' -v
       - name: Workspace clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Showcase check
-        run: cargo check --features adapter-showcase --bin dragonstui-showcase
+        run: cargo check --locked --features adapter-showcase --bin dragonstui-showcase
       - name: Showcase clippy
-        run: cargo clippy --features adapter-showcase --bin dragonstui-showcase -- -D warnings
+        run: cargo clippy --locked --features adapter-showcase --bin dragonstui-showcase -- -D warnings
 
   docker-adapter:
     name: Real Docker adapter (Linux)

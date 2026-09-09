@@ -4,7 +4,10 @@ use std::{
     net::TcpListener,
     path::{Path, PathBuf},
     process::{Command as ProcessCommand, ExitCode, Stdio},
-    sync::{Arc, atomic::AtomicBool},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
     time::Duration,
 };
@@ -296,6 +299,11 @@ fn controller_client(root: &Path) -> Result<ControllerManagementClient, String> 
 }
 
 fn run_controller_daemon(root: &Path, token: &str) -> Result<(), String> {
+    let stopping = Arc::new(AtomicBool::new(false));
+    for signal in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGHUP] {
+        signal_hook::flag::register(signal, Arc::clone(&stopping))
+            .map_err(|error| format!("could not install controller shutdown handler: {error}"))?;
+    }
     let sigpipe = Arc::new(AtomicBool::new(false));
     signal_hook::flag::register(signal_hook::consts::SIGPIPE, Arc::clone(&sigpipe))
         .map_err(|error| format!("could not install controller SIGPIPE handler: {error}"))?;
@@ -312,8 +320,11 @@ fn run_controller_daemon(root: &Path, token: &str) -> Result<(), String> {
         AdapterController::new(root, Duration::from_secs(2), 128),
         token,
     )
-    .serve_forever();
+    .serve_until(&stopping);
     let _ = fs::remove_file(endpoint_path);
+    if stopping.load(Ordering::Relaxed) {
+        return Ok(());
+    }
     result.map_err(|error| error.to_string())
 }
 
