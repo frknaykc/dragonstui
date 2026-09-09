@@ -106,6 +106,8 @@ The bundled **reference mock adapter** exercises RPC, observability, actions and
 
 External developers can implement the existing contract using the [Adapter SDK Specification](docs/adapter-sdk-specification.md), including Rust/Go/Python portability guidance, and run explicitly selected protocol/lifecycle scenarios with the POSIX [Adapter Conformance Suite](docs/adapter-conformance.md). Unrequested surfaces are reported as skipped; a passing scenario report is not a sandbox, security certificate or complete adapter certification.
 
+The [multi-adapter stress harness](docs/adapter-stress-testing.md) checks bounded event overflow and correlated RPC under local mock load, with opt-in release CPU/RSS measurements.
+
 Read the details:
 
 - [Adapter host architecture](docs/architecture/adapter-host.md)
@@ -129,6 +131,7 @@ DragonsTUI is under active development and remains pre-1.0. The core framework, 
 | Reference mock adapter | Complete (M66; locally verified) |
 | Adapter conformance suite | Complete (M67; locally verified) |
 | SDK specification | Complete (M68; specification only, no published language SDKs) |
+| Multi-adapter stress testing | Locally complete (M69; release measurement matrix and local gates passed, remote delivery pending) |
 
 Adapter distribution and management includes registry/install/update/remove integrity boundaries, CLI and TUI management, typed authenticated controller IPC, per-adapter lifecycle conflict protection, real PTY acceptance, and M43 capability discovery. Generic live data transports adapter events away from the UI thread into bounded retained history, derives opaque text and identity filters, and supports pause/follow selection without stopping ingestion. Generic Inspector UX provides reusable layout, viewport, property, and structured-data primitives. The optional showcase projects only producer-declared `Observation` variants into a Log Viewer, time-series graph, heatmap, status matrix, Timeline, and Error/Stack Trace view; it never derives those classes from arbitrary payload JSON, stream, or `kind` text. Each projection is rebuilt from the retained 16-entry live history, so it does not create an unbounded telemetry store. M59–M60 add producer-declared generic action metadata and confirmation policy through the authenticated controller path; confirmation is UI protection against accidental dispatch, not a permission system.
 

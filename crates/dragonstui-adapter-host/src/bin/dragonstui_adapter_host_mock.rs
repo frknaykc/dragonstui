@@ -51,6 +51,7 @@ fn main() {
         "sessions" => MockBehavior::Sessions,
         "delayed-sessions" => MockBehavior::DelayedSessions,
         "stress-events" => MockBehavior::StressEvents,
+        "stress-requests" => MockBehavior::StressRequests,
         "out-of-order" => MockBehavior::OutOfOrder,
         "unknown-response" => MockBehavior::UnknownResponse,
         "crash-after-handshake" => MockBehavior::CrashAfterHandshake,
@@ -93,7 +94,7 @@ fn parse_options() -> MockOptions {
 Modes: normal (default), reference, process, bad-protocol, bad-id, malformed,\n\
 crash, timeout, hold, duplicate-capabilities, empty-capabilities, shared-capabilities,\n\
 events, live-events, semantic-events, observability-events, actions, sessions,\n\
-delayed-sessions, stress-events, out-of-order, unknown-response,\n\
+delayed-sessions, stress-events, stress-requests, out-of-order, unknown-response,\n\
 crash-after-handshake, crash-on-request\n\
 Options: --action-marker PATH, --session-marker PATH, --event-release PATH,\n\
 --action-release PATH (reference only), --hold-ready PATH, --hold-release PATH,\n\
@@ -283,6 +284,7 @@ fn protocol_mode(
         | MockBehavior::ObservabilityEvents
         | MockBehavior::Actions
         | MockBehavior::StressEvents
+        | MockBehavior::StressRequests
         | MockBehavior::OutOfOrder
         | MockBehavior::UnknownResponse
         | MockBehavior::CrashAfterHandshake
@@ -754,6 +756,19 @@ fn protocol_mode(
                         payload: request.payload,
                     })),
                     "test.stream" => {
+                        // Finite per-request burst with no retained request history.
+                        // The final generic event makes 129 frames before the response.
+                        if behavior == MockBehavior::StressRequests {
+                            for index in 0..128 {
+                                emit(&ProtocolMessage::Event(Event {
+                                    protocol: PROTOCOL_VERSION,
+                                    stream: "stress".to_owned(),
+                                    kind: "burst".to_owned(),
+                                    observation: None,
+                                    payload: json!({"request": request.id.as_str(), "index": index}),
+                                }));
+                            }
+                        }
                         if behavior == MockBehavior::Reference {
                             let (first, second) = observability_fixture_batches();
                             emit_observations(first);
@@ -1064,6 +1079,7 @@ enum MockBehavior {
     Sessions,
     DelayedSessions,
     StressEvents,
+    StressRequests,
     OutOfOrder,
     UnknownResponse,
     CrashAfterHandshake,
