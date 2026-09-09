@@ -131,7 +131,7 @@ DragonsTUI is under active development and remains pre-1.0. The core framework, 
 | Reference mock adapter | Complete (M66; locally verified) |
 | Adapter conformance suite | Complete (M67; locally verified) |
 | SDK specification | Complete (M68; specification only, no published language SDKs) |
-| Multi-adapter stress testing | Locally complete (M69; release measurement matrix and local gates passed, remote delivery pending) |
+| Multi-adapter stress testing | Complete (M69; release measurement matrix, local gates and remote CI passed) |
 
 Adapter distribution and management includes registry/install/update/remove integrity boundaries, CLI and TUI management, typed authenticated controller IPC, per-adapter lifecycle conflict protection, real PTY acceptance, and M43 capability discovery. Generic live data transports adapter events away from the UI thread into bounded retained history, derives opaque text and identity filters, and supports pause/follow selection without stopping ingestion. Generic Inspector UX provides reusable layout, viewport, property, and structured-data primitives. The optional showcase projects only producer-declared `Observation` variants into a Log Viewer, time-series graph, heatmap, status matrix, Timeline, and Error/Stack Trace view; it never derives those classes from arbitrary payload JSON, stream, or `kind` text. Each projection is rebuilt from the retained 16-entry live history, so it does not create an unbounded telemetry store. M59–M60 add producer-declared generic action metadata and confirmation policy through the authenticated controller path; confirmation is UI protection against accidental dispatch, not a permission system.
 
