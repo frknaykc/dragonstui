@@ -312,7 +312,7 @@ fn cli_lifecycle_command_autostarts_an_authenticated_controller_and_leaves_no_da
 #[test]
 fn controller_daemon_catchable_signal_removes_endpoint_before_exit() {
     for signal in ["-TERM", "-HUP"] {
-        let root = temp_path(&format!("controller-{}", &signal[1..].to_lowercase()));
+        let root = temp_path(&format!("controller-{}", signal[1..].to_lowercase()));
         let endpoint_path = root.join(".controller/endpoint.json");
         let mut daemon = Command::new(env!("CARGO_BIN_EXE_dragonstui-adapter"))
             .args(["--root"])
