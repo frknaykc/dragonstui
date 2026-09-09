@@ -59,7 +59,7 @@ const INPUT_FOCUS: FocusId = FocusId::new(5);
 const AREA_FOCUS: FocusId = FocusId::new(6);
 
 const SPLASH_TITLE: [&str; 8] = [
-    "             ██████╗ ██████╗  █████╗  ██████╗  ██████╗ ███╗   ██╗",
+    "                ██████╗ ██████╗  █████╗  ██████╗  ██████╗ ███╗   ██╗",
     "                ██╔══██╗██╔══██╗██╔══██╗██╔════╝ ██╔═══██╗████╗  ██║",
     "                ██║  ██║██████╔╝███████║██║  ███╗██║   ██║██╔██╗ ██║",
     "                ██║  ██║██╔══██╗██╔══██║██║   ██║██║   ██║██║╚██╗██║",
@@ -11338,6 +11338,15 @@ mod tests {
                 })
                 .quit
         );
+    }
+
+    #[test]
+    fn splash_title_glyph_rows_share_the_same_left_edge() {
+        let indents: Vec<_> = SPLASH_TITLE[..6]
+            .iter()
+            .map(|line| display_width(line) - display_width(line.trim_start()))
+            .collect();
+        assert!(indents.iter().all(|indent| *indent == indents[0]));
     }
 
     #[test]

@@ -32,6 +32,7 @@ There is no retained component tree, virtual DOM, automatic event bubbling, or f
 - Authenticated local controller daemon with typed management IPC for runtime start, stop, restart, and diagnostics.
 - An optional adapter-aware showcase that keeps core framework consumers free of adapter-management dependencies.
 - Generic semantic observability projections for producer-declared Logs, Metrics, Status, Events, and Errors.
+- Adapter conformance tooling, multi-adapter stress coverage, explicit crash recovery, and enforced protocol/resource limits.
 
 ## Screenshots
 
@@ -41,7 +42,13 @@ There is no retained component tree, virtual DOM, automatic event bubbling, or f
 
 ### Main showcase
 
-The hero image above shows the default showcase overview after the splash transition. Both images are captured from the running release binary in a local macOS PTY.
+The hero image above shows the showcase Overview after the splash transition.
+
+### Widgets
+
+![DragonsTUI widgets, table, tree and viewport](assets/dragonstui-widgets.png)
+
+These screenshots were refreshed on September 9, 2026 from the running `dragonstui-showcase` release binary in macOS Terminal at 160 × 48 cells, including the corrected opening-title alignment. They show local fixture/demo data, not live provider telemetry. Terminal fonts and colors can differ on other systems.
 
 ## Quick Start
 
@@ -53,6 +60,8 @@ cd dragonstui
 cargo build
 cargo run --release
 ```
+
+`cargo run --release` starts the default dashboard (`dragons_tui`), not the screenshot showcase. To open the interface pictured above, use the feature-gated command below.
 
 The repository also includes focused examples under [`examples/`](examples/): direct rendering, layout, input, tables, animation, and Braille canvas drawing.
 
