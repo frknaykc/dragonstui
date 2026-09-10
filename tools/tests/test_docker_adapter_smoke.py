@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-import docker_adapter_smoke as smoke
+from tools.acceptance import docker_adapter_smoke as smoke
 
 
 class DockerFixtureTests(unittest.TestCase):

@@ -19,7 +19,7 @@ The default Rust regression uses 4 adapters × 32 rounds × 2 scenarios and is i
 
 ```sh
 cargo test -p dragonstui-adapter-host --test multi_adapter_stress -- --nocapture
-python3 -m unittest discover -s tools -p test_adapter_stress.py -v
+python3 -m unittest discover -s tools/tests -t . -p test_adapter_stress.py -v
 ```
 
 ## CPU / RSS measurement
@@ -27,7 +27,7 @@ python3 -m unittest discover -s tools -p test_adapter_stress.py -v
 Run the opt-in release matrix on macOS or Linux with Rust, Python 3 and POSIX `ps`:
 
 ```sh
-python3 tools/adapter_stress.py --output .hermes/progress/m69-resources.json
+python3 -m tools.adapters.adapter_stress --output .hermes/progress/m69-resources.json
 ```
 
 Defaults: 1, 4 and 8 adapters; 5,000 rounds per scenario; 120-second deadline per case. Overrides are bounded: `--adapters` 1–16, `--rounds` 1–20,000, `--timeout` 1–600. Very short runs fail rather than invent measurements when fewer than two complete process samples are available. Build has a separate 300-second timeout. The runner compiles the exact release test through Cargo's JSON artifact output; it does not guess a test-binary filename or silently use debug code.

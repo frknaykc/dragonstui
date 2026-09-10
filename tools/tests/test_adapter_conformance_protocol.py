@@ -3,7 +3,7 @@
 import copy
 import unittest
 
-from adapter_conformance_protocol import ProtocolError, validate_identifier, validate_message
+from tools.adapters.adapter_conformance_protocol import ProtocolError, validate_identifier, validate_message
 
 
 def envelope(message_type, **fields):

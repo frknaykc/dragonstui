@@ -16,7 +16,7 @@ import time
 import unittest
 from unittest.mock import MagicMock, patch
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 ADAPTER = ROOT / "adapters/docker/dragonstui-docker"
 CID = "a" * 64
 OTHER = "b" * 64

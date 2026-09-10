@@ -8,9 +8,11 @@ on:
       - '.github/workflows/release.yml'
       - 'Cargo.*'
       - 'src/**'
+      - 'apps/**'
       - 'crates/**'
-      - 'tools/*release*'
-      - 'tools/pty_smoke.py'
+      - 'tools/packaging/release_package.py'
+      - 'tools/acceptance/pty_smoke.py'
+      - 'tools/acceptance/showcase_pty_smoke.py'
       - 'docs/installation.md'
       - 'docs/release-packaging.md'
       - 'LICENSE'
@@ -21,9 +23,11 @@ on:
       - '.github/workflows/release.yml'
       - 'Cargo.*'
       - 'src/**'
+      - 'apps/**'
       - 'crates/**'
-      - 'tools/*release*'
-      - 'tools/pty_smoke.py'
+      - 'tools/packaging/release_package.py'
+      - 'tools/acceptance/pty_smoke.py'
+      - 'tools/acceptance/showcase_pty_smoke.py'
       - 'docs/installation.md'
       - 'docs/release-packaging.md'
       - 'LICENSE'
@@ -60,7 +64,7 @@ jobs:
               output.write(f'version={version}\n')
           PY
       - name: Packaging regression tests
-        run: python3 -m unittest discover -s tools -p test_release_package.py -v
+        run: python3 -m unittest discover -s tools/tests -t . -p test_release_package.py -v
 
   quality:
     needs: metadata
@@ -78,11 +82,11 @@ jobs:
           cargo clippy --locked --workspace --all-targets -- -D warnings
           cargo check --locked --features adapter-showcase --bin dragonstui-showcase
           cargo clippy --locked --features adapter-showcase --bin dragonstui-showcase -- -D warnings
-          python3 -m unittest discover -s tools -p test_adapter_stress.py -v
-          python3 -m unittest discover -s tools -p test_ecosystem_fixture.py -v
-          python3 -m unittest discover -s tools -p 'test_reference_mock*.py'
-          python3 -m unittest discover -s tools -p test_showcase_pty_smoke.py
-          python3 -m unittest discover -s tools -p test_pty_smoke.py
+          python3 -m unittest discover -s tools/tests -t . -p test_adapter_stress.py -v
+          python3 -m unittest discover -s tools/tests -t . -p test_ecosystem_fixture.py -v
+          python3 -m unittest discover -s tools/tests -t . -p 'test_reference_mock*.py'
+          python3 -m unittest discover -s tools/tests -t . -p test_showcase_pty_smoke.py
+          python3 -m unittest discover -s tools/tests -t . -p test_pty_smoke.py
 
   build:
     needs: metadata
@@ -111,7 +115,7 @@ jobs:
       - name: Build from fresh checkout without a build cache
         run: cargo build --locked --release --workspace --features adapter-showcase --bins --target '${{ matrix.target }}'
       - name: Package and checksum
-        run: python3 tools/release_package.py build --version "$VERSION" --platform '${{ matrix.platform }}' --bin-dir 'target/${{ matrix.target }}/release' --output target/dist
+        run: python3 -m tools.packaging.release_package build --version "$VERSION" --platform '${{ matrix.platform }}' --bin-dir 'target/${{ matrix.target }}/release' --output target/dist
       - uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.platform }}
@@ -142,7 +146,7 @@ jobs:
           path: incoming
       - name: Verify downloaded package on separate runner (no Rust build)
         run: |
-          python3 tools/release_package.py verify --version "$VERSION" --platform '${{ matrix.platform }}' \
+          python3 -m tools.packaging.release_package verify --version "$VERSION" --platform '${{ matrix.platform }}' \
             --archive "incoming/dragonstui-v$VERSION-${{ matrix.platform }}.tar.gz" \
             --checksum "incoming/dragonstui-v$VERSION-${{ matrix.platform }}.tar.gz.sha256"
 

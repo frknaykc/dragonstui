@@ -16,11 +16,11 @@ Read only the area relevant to the task. Reuse current context; inspect the affe
 ## Layout and entry points
 
 - `src/lib.rs`: public framework exports; core modules remain private.
-- `src/main.rs`: default `dragons_tui` dashboard; `src/bin/dragonstui_showcase.rs`: optional adapter-aware showcase (`adapter-showcase`).
+- `apps/dashboard/main.rs`: default `dragons_tui` dashboard; `apps/showcase/main.rs`: optional adapter-aware showcase (`adapter-showcase`).
 - `src/{frame,buffer,terminal,runtime}.rs`: render and terminal boundary; `src/{layout,focus,event,viewport,scrollbar}.rs`: shared composition state.
 - `tests/`: focused integration tests by primitive; `examples/`: root-export consumer examples.
 - `crates/dragonstui-adapter-host/`: protocol, supervised process runtime, controller IPC, discovery/install/management, and host integration tests. Binaries: `dragonstui-adapter`, `dragonstui-adapter-host-mock`.
-- `tools/pty_smoke.py`: dependency-free POSIX PTY lifecycle acceptance; `tools/showcase_pty_smoke.py`: showcase acceptance.
+- `tools/acceptance/pty_smoke.py`: dependency-free POSIX PTY lifecycle acceptance; `tools/acceptance/showcase_pty_smoke.py`: showcase acceptance.
 
 Use nested `AGENTS.md` only if a future large subsystem needs local instructions; keep this root file brief.
 
@@ -50,8 +50,8 @@ cargo clippy --features adapter-showcase --bin dragonstui-showcase -- -D warning
 cargo build
 cargo run --release
 cargo run --release --features adapter-showcase --bin dragonstui-showcase
-python3 tools/pty_smoke.py --exit q -- target/debug/dragons_tui
-python3 tools/pty_smoke.py --exit ctrl-c -- target/debug/dragons_tui
+python3 -m tools.acceptance.pty_smoke --exit q -- target/debug/dragons_tui
+python3 -m tools.acceptance.pty_smoke --exit ctrl-c -- target/debug/dragons_tui
 ```
 
 ## Code and test conventions

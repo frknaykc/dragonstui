@@ -62,7 +62,7 @@ which application to open, navigate the showcase, and add a trusted adapter.
 
 For packaged binaries, start with [Installation and first run](docs/installation.md):
 user-local installation, shared adapter paths, empty states, update and uninstall.
-Public release assets are not published yet; current packages are CI artifacts.
+Download the native bundles and matching SHA-256 files from the public [v0.1.0 GitHub Release](https://github.com/frknaykc/dragonstui/releases/tag/v0.1.0).
 
 DragonsTUI declares Rust edition 2024 and does not currently declare an MSRV. Use a Rust toolchain that supports edition 2024.
 
@@ -139,7 +139,7 @@ The [multi-adapter stress harness](docs/adapter-stress-testing.md) checks bounde
 
 [Adapter release readiness](docs/adapter-release-readiness.md) records the M74 source audit, controller/CLI boundary fixes, local package verification and remaining release/platform limits. It is not a public release announcement.
 
-[Release packaging](docs/release-packaging.md) defines the v0.1.0 macOS ARM64/Linux x86_64 bundles, SHA-256 verification, isolated package smoke tests and tag-gated GitHub Release workflow. R1 prepares and tests the pipeline without publishing; the first public release remains an R6 action.
+[Release packaging](docs/release-packaging.md) defines the v0.1.0 macOS ARM64/Linux x86_64 bundles, SHA-256 verification, isolated package smoke tests and tag-gated GitHub Release workflow. R1 prepared the pipeline; R6 published the public v0.1.0 release.
 
 Read the details:
 

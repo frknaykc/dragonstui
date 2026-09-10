@@ -11,9 +11,17 @@ categories = ["command-line-interface", "command-line-utilities"]
 default-run = "dragons_tui"
 
 [[bin]]
+name = "dragons_tui"
+path = "apps/dashboard/main.rs"
+
+[[bin]]
 name = "dragonstui-showcase"
-path = "src/bin/dragonstui_showcase.rs"
+path = "apps/showcase/main.rs"
 required-features = ["adapter-showcase"]
+
+[[bin]]
+name = "dragonstui_measure"
+path = "tools/measure/dragonstui_measure.rs"
 
 [workspace]
 members = [".", "crates/dragonstui-adapter-host"]

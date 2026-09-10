@@ -8,7 +8,7 @@ import tempfile
 import time
 import unittest
 
-from reference_mock_pty_smoke import assert_ansi_restored, session_terminal_evidence, stop_showcase
+from tools.acceptance.reference_mock_pty_smoke import assert_ansi_restored, session_terminal_evidence, stop_showcase
 
 
 class SessionTerminalEvidenceTests(unittest.TestCase):

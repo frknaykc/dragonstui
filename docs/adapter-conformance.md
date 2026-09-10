@@ -1,6 +1,6 @@
 # Adapter Conformance Suite (M67)
 
-`tools/adapter_conformance.py` is a dependency-free **POSIX developer test peer** for an explicitly supplied adapter executable. It checks the existing [protocol v1](adapter-protocol-v1.md), selected application scenarios, graceful shutdown and a fresh-process restart. It is not a controller-management command, installer, sandbox, security audit, publisher certificate, or M68 SDK specification.
+`tools/adapters/adapter_conformance.py` is a dependency-free **POSIX developer test peer** for an explicitly supplied adapter executable. It checks the existing [protocol v1](adapter-protocol-v1.md), selected application scenarios, graceful shutdown and a fresh-process restart. It is not a controller-management command, installer, sandbox, security audit, publisher certificate, or M68 SDK specification.
 
 ## Run it
 
@@ -10,11 +10,11 @@ Requires Python **3.10+** on macOS or Linux. Building the bundled reference prov
 cargo build -p dragonstui-adapter-host --bin dragonstui-adapter-host-mock
 
 # Basic lifecycle only: no capability, action or session is invoked automatically.
-python3 tools/adapter_conformance.py --expect-id reference --expect-version 1.0.0 \
+python3 -m tools.adapters.adapter_conformance --expect-id reference --expect-version 1.0.0 \
   -- target/debug/dragonstui-adapter-host-mock --mode reference --id reference
 
 # Explicit reference scenarios: RPC, declared errors, actions, events and session.
-python3 tools/adapter_conformance.py --expect-id reference --expect-version 1.0.0 \
+python3 -m tools.adapters.adapter_conformance --expect-id reference --expect-version 1.0.0 \
   --profile tools/fixtures/reference_conformance.json \
   -- target/debug/dragonstui-adapter-host-mock --mode reference --id reference
 ```
@@ -68,7 +68,7 @@ Stdout contains one JSON result with `schema_version`, `status`, `scope: request
 ## Maintaining the suite
 
 ```sh
-python3 -m unittest discover -s tools -p 'test_adapter_conformance*.py'
+python3 -m unittest discover -s tools/tests -t . -p 'test_adapter_conformance*.py'
 cargo test -p dragonstui-adapter-host --test conformance_wire_parity -- --nocapture
 ```
 

@@ -8,7 +8,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from adapter_conformance_transport import Peer, TransportError
+from tools.adapters.adapter_conformance_transport import Peer, TransportError
 
 
 @unittest.skipUnless(os.name == "posix", "POSIX process isolation")
@@ -180,7 +180,7 @@ class TransportTests(unittest.TestCase):
         self.error('invalid_deadline', lambda: p.receive(float('nan')))
 
     def test_unsupported_platform_checked_before_spawn(self):
-        with patch('adapter_conformance_transport.os.name', 'nt'), patch('adapter_conformance_transport.subprocess.Popen') as spawn:
+        with patch('tools.adapters.adapter_conformance_transport.os.name', 'nt'), patch('tools.adapters.adapter_conformance_transport.subprocess.Popen') as spawn:
             self.error('unsupported_platform', lambda: Peer(['unused'], self.tmp.name))
             spawn.assert_not_called()
 

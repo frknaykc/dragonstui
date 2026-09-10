@@ -35,7 +35,7 @@ these commands from the repository root:
 
 ```sh
 mkdir -p target
-python3 tools/docker_adapter_package.py --output target/docker-adapter-0.1.0
+python3 -m tools.packaging.docker_adapter_package --output target/docker-adapter-0.1.0
 ADAPTER_ROOT="$HOME/.local/share/dragonstui/adapters"
 dragonstui-adapter --root "$ADAPTER_ROOT" install docker \
   --registry "$PWD/target/docker-adapter-0.1.0/registry.json"
@@ -229,8 +229,8 @@ It removes only its own randomly named, ownership-labelled container.
 
 ```sh
 cargo build --locked --workspace --features adapter-showcase --bins
-python3 -m unittest discover -s tools -p 'test_docker_adapter*.py' -v
-python3 tools/docker_adapter_smoke.py --image redis:7-alpine --output target/r4-docker-evidence
+python3 -m unittest discover -s tools/tests -t . -p 'test_docker_adapter*.py' -v
+python3 -m tools.acceptance.docker_adapter_smoke --image redis:7-alpine --output target/r4-docker-evidence
 ```
 
 The evidence directory must be new. It holds a machine-readable report and

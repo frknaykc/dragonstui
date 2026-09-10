@@ -17,16 +17,21 @@ import selectors
 import secrets
 import signal
 import subprocess
+import sys
 import termios
 import tempfile
 import time
 import uuid
 
-from docker_adapter_package import build
-from adapter_conformance_protocol import validate_message
-from ecosystem_fixture import query
-import showcase_pty_smoke as h
-from reference_mock_pty_smoke import assert_ansi_restored
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from tools.adapters.adapter_conformance_protocol import validate_message
+from tools.acceptance import showcase_pty_smoke as h
+from tools.acceptance.reference_mock_pty_smoke import assert_ansi_restored
+from tools.fixtures.ecosystem_fixture import query
+from tools.packaging.docker_adapter_package import build
 
 LABEL = "org.dragonstui.r4.fixture"
 FULL_ID = re.compile(r"[0-9a-f]{64}")
@@ -562,7 +567,7 @@ def main():
         report["provider_sha256"] = hashlib.sha256(executable.read_bytes()).hexdigest()
         inputs = {"controller": args.controller.resolve(strict=True),
                   "showcase": args.showcase.resolve(strict=True),
-                  "showcase_source": Path("src/bin/dragonstui_showcase.rs").resolve(strict=True),
+                  "showcase_source": Path("apps/showcase/main.rs").resolve(strict=True),
                   "harness": Path(__file__).resolve(strict=True)}
         report["input_sha256"] = {name: hashlib.sha256(path.read_bytes()).hexdigest()
                                   for name, path in inputs.items()}

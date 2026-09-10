@@ -61,7 +61,7 @@ Yeni kullanıcılar için [ilk 10 dakika kullanıcı rehberi](docs/user-guide.md
 
 Paketlenmiş binary’ler için [Kurulum ve ilk açılış](docs/installation.md) rehberiyle
 başlayın: kullanıcı dizinine kurulum, ortak adapter yolları, boş ekranlar,
-güncelleme ve kaldırma. Public release henüz yayımlanmadı; mevcut paketler CI artifact’larıdır.
+güncelleme ve kaldırma. Native paketleri ve eşleşen SHA-256 dosyalarını public [v0.1.0 GitHub Release](https://github.com/frknaykc/dragonstui/releases/tag/v0.1.0) sayfasından indirin.
 
 Proje Rust edition 2024 kullanır; henüz bir minimum desteklenen Rust sürümü (MSRV) belirtmez. Edition 2024 destekleyen bir Rust araç zinciri kullanın.
 
@@ -138,7 +138,7 @@ Harici geliştiriciler, Rust/Go/Python taşınabilirlik notlarını da içeren [
 
 [Adapter yayın hazırlığı](docs/adapter-release-readiness.md); M74 kaynak denetimini, controller/CLI sınır düzeltmelerini, yerel paket doğrulamasını ve kalan yayın/platform sınırlarını kaydeder. Kamuya açık bir sürüm duyurusu değildir.
 
-[Release paketleme](docs/release-packaging.md); v0.1.0 macOS ARM64/Linux x86_64 paketlerini, SHA-256 doğrulamasını, izole paket smoke testlerini ve tag koşullu GitHub Release akışını tanımlar. R1 sistemi yayın yapmadan hazırlayıp test eder; ilk kamuya açık sürüm R6'ya bırakılmıştır.
+[Release paketleme](docs/release-packaging.md); v0.1.0 macOS ARM64/Linux x86_64 paketlerini, SHA-256 doğrulamasını, izole paket smoke testlerini ve tag koşullu GitHub Release akışını tanımlar. R1 sistemi yayın yapmadan hazırladı ve test etti; R6 public v0.1.0 sürümünü yayımladı.
 
 Ayrıntılar:
 

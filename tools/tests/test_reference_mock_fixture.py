@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from reference_mock_fixture import create_fixture
+from tools.fixtures.reference_mock_fixture import create_fixture
 
 
 @unittest.skipUnless(os.name == "posix", "POSIX launcher")
@@ -47,7 +47,7 @@ class ReferenceFixtureTests(unittest.TestCase):
             root = Path(tmp) / "new"
             keep = Path(tmp) / "keep"
             keep.write_text("preserved")
-            with patch("reference_mock_fixture.shutil.copy2", side_effect=OSError("copy failed")):
+            with patch("tools.fixtures.reference_mock_fixture.shutil.copy2", side_effect=OSError("copy failed")):
                 with self.assertRaisesRegex(OSError, "copy failed"):
                     create_fixture(root, Path("/bin/sh"))
             self.assertFalse(root.exists())

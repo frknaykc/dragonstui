@@ -16,9 +16,13 @@ import tempfile
 import termios
 import time
 
-import showcase_pty_smoke as h
-from reference_mock_fixture import create_fixture
-from ecosystem_fixture import install_fixture, query
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from tools.acceptance import showcase_pty_smoke as h
+from tools.fixtures.reference_mock_fixture import create_fixture
+from tools.fixtures.ecosystem_fixture import install_fixture, query
 
 
 def assert_ansi_restored(output: bytearray) -> None:

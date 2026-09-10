@@ -137,8 +137,8 @@ Within v1, tolerate additive unknown fields in recognized messages but do not as
 Reference commands (repository root):
 
 ```sh
-python3 tools/adapter_conformance.py --help
-python3 -m unittest discover -s tools -p 'test_adapter_conformance*.py'
+python3 -m tools.adapters.adapter_conformance --help
+python3 -m unittest discover -s tools/tests -t . -p 'test_adapter_conformance*.py'
 cargo test -p dragonstui-adapter-host --test conformance_wire_parity -- --nocapture
 ```
 

@@ -12,8 +12,8 @@ import sys
 
 sys.path.insert(0, str(Path(sys.argv[1]).resolve()))
 
-from adapter_conformance_protocol import ProtocolError, validate_message
-from adapter_conformance_transport import _constant, _float, _int, _pairs
+from adapters.adapter_conformance_protocol import ProtocolError, validate_message
+from adapters.adapter_conformance_transport import _constant, _float, _int, _pairs
 
 
 def accepts(raw):

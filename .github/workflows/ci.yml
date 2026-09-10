@@ -24,15 +24,15 @@ jobs:
       - name: Workspace tests
         run: cargo test --locked --workspace --features adapter-showcase
       - name: Stress harness tests
-        run: python3 -m unittest discover -s tools -p test_adapter_stress.py -v
+        run: python3 -m unittest discover -s tools/tests -t . -p test_adapter_stress.py -v
       - name: Ecosystem harness tests
         run: |
-          python3 -m unittest discover -s tools -p test_ecosystem_fixture.py -v
-          python3 -m unittest discover -s tools -p 'test_reference_mock*.py'
-          python3 -m unittest discover -s tools -p test_showcase_pty_smoke.py
-          python3 -m unittest discover -s tools -p test_pty_smoke.py
+          python3 -m unittest discover -s tools/tests -t . -p test_ecosystem_fixture.py -v
+          python3 -m unittest discover -s tools/tests -t . -p 'test_reference_mock*.py'
+          python3 -m unittest discover -s tools/tests -t . -p test_showcase_pty_smoke.py
+          python3 -m unittest discover -s tools/tests -t . -p test_pty_smoke.py
       - name: Docker adapter unit and harness tests
-        run: python3 -m unittest discover -s tools -p 'test_docker_adapter*.py' -v
+        run: python3 -m unittest discover -s tools/tests -t . -p 'test_docker_adapter*.py' -v
       - name: Workspace clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Showcase check
@@ -52,7 +52,7 @@ jobs:
       - name: Fetch isolated fixture image
         run: docker pull alpine:3.21
       - name: Real protocol, controller and showcase acceptance
-        run: python3 tools/docker_adapter_smoke.py --image alpine:3.21 --output target/r4-docker-evidence
+        run: python3 -m tools.acceptance.docker_adapter_smoke --image alpine:3.21 --output target/r4-docker-evidence
       - name: Retain bounded acceptance evidence
         if: always()
         uses: actions/upload-artifact@v4

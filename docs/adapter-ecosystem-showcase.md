@@ -9,11 +9,11 @@ From the repository root on macOS or Linux with stable Rust and Python 3.10+:
 ```sh
 cargo build --release -p dragonstui-adapter-host --bins
 cargo build --release --features adapter-showcase --bin dragonstui-showcase
-python3 -m unittest discover -s tools -p 'test_ecosystem_fixture.py'
-python3 -m unittest discover -s tools -p 'test_reference_mock*.py'
-python3 -m unittest discover -s tools -p 'test_showcase_pty_smoke.py'
-python3 tools/reference_mock_pty_smoke.py --controller target/release/dragonstui-adapter --mock target/release/dragonstui-adapter-host-mock --showcase target/release/dragonstui-showcase --ecosystem --exit q
-python3 tools/reference_mock_pty_smoke.py --controller target/release/dragonstui-adapter --mock target/release/dragonstui-adapter-host-mock --showcase target/release/dragonstui-showcase --ecosystem --exit ctrl-c
+python3 -m unittest discover -s tools/tests -t . -p test_ecosystem_fixture.py
+python3 -m unittest discover -s tools/tests -t . -p 'test_reference_mock*.py'
+python3 -m unittest discover -s tools/tests -t . -p 'test_showcase_pty_smoke.py'
+python3 -m tools.acceptance.reference_mock_pty_smoke --controller target/release/dragonstui-adapter --mock target/release/dragonstui-adapter-host-mock --showcase target/release/dragonstui-showcase --ecosystem --exit q
+python3 -m tools.acceptance.reference_mock_pty_smoke --controller target/release/dragonstui-adapter --mock target/release/dragonstui-adapter-host-mock --showcase target/release/dragonstui-showcase --ecosystem --exit ctrl-c
 ```
 
 Each run owns a new temporary root, copied mock binary, local registry, controller daemon and PTY. It never accesses an existing adapter store or a remote registry. The JSON output contains binary hashes, passed checks and reconstructed current frames; it contains no endpoint token. Failure output retains the current frame and fixture action/session markers before cleanup.

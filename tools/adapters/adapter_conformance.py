@@ -11,8 +11,12 @@ import sys
 import tempfile
 import time
 
-from adapter_conformance_protocol import ProtocolError, validate_identifier, validate_message
-from adapter_conformance_transport import Peer, TransportError
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from tools.adapters.adapter_conformance_protocol import ProtocolError, validate_identifier, validate_message
+from tools.adapters.adapter_conformance_transport import Peer, TransportError
 
 
 class ScenarioError(Exception):

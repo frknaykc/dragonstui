@@ -5,8 +5,13 @@ import platform
 import socket
 import subprocess
 from pathlib import Path
+import sys
 
-from reference_mock_fixture import create_fixture
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from tools.fixtures.reference_mock_fixture import create_fixture
 
 
 def install_fixture(root: Path, mock: Path, controller: Path) -> Path:

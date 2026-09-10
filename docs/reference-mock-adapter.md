@@ -11,7 +11,7 @@ Run from the repository root on macOS or Linux with Rust (edition 2024 support) 
 ```sh
 cargo build --release -p dragonstui-adapter-host --bins
 cargo build --release --features adapter-showcase --bin dragonstui-showcase
-python3 tools/reference_mock_fixture.py --root /tmp/dragonstui-reference-demo --mock target/release/dragonstui-adapter-host-mock --gated
+python3 -m tools.fixtures.reference_mock_fixture --root /tmp/dragonstui-reference-demo --mock target/release/dragonstui-adapter-host-mock --gated
 target/release/dragonstui-adapter --root /tmp/dragonstui-reference-demo list
 target/release/dragonstui-adapter --root /tmp/dragonstui-reference-demo info reference
 ```
@@ -88,10 +88,10 @@ Existing modes remain specialized negative/pressure fixtures rather than separat
 
 ```sh
 cargo test -p dragonstui-adapter-host --test reference_mock --test reference_controller
-python3 -m unittest discover -s tools -p 'test_reference_mock*.py'
-python3 -m unittest discover -s tools -p 'test_showcase_pty_smoke.py'
-python3 tools/reference_mock_pty_smoke.py --controller target/release/dragonstui-adapter --mock target/release/dragonstui-adapter-host-mock --showcase target/release/dragonstui-showcase --exit q
-python3 tools/reference_mock_pty_smoke.py --controller target/release/dragonstui-adapter --mock target/release/dragonstui-adapter-host-mock --showcase target/release/dragonstui-showcase --exit ctrl-c
+python3 -m unittest discover -s tools/tests -t . -p 'test_reference_mock*.py'
+python3 -m unittest discover -s tools/tests -t . -p 'test_showcase_pty_smoke.py'
+python3 -m tools.acceptance.reference_mock_pty_smoke --controller target/release/dragonstui-adapter --mock target/release/dragonstui-adapter-host-mock --showcase target/release/dragonstui-showcase --exit q
+python3 -m tools.acceptance.reference_mock_pty_smoke --controller target/release/dragonstui-adapter --mock target/release/dragonstui-adapter-host-mock --showcase target/release/dragonstui-showcase --exit ctrl-c
 ```
 
 The PTY runner also accepts `sigterm` and `sighup`. It creates its own private root and authenticated controller daemon, drives one reference provider through the real showcase, checks marker state before teardown, and asserts no fixture processes remain. Marker waits continue draining terminal output. Failures print the reconstructed current screen and only fixture action/session state—never endpoint tokens. Successful JSON reports contain actual checks and unchanged binary hashes.

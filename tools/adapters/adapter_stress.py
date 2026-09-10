@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 import time
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 TEST = "multi_adapter_stream_pressure_preserves_rpc_and_queue_accounting"
 
 
@@ -191,7 +191,7 @@ def main():
         "source_sha256": {
             name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest()
             for name in [
-                "tools/adapter_stress.py",
+                "tools/adapters/adapter_stress.py",
                 "crates/dragonstui-adapter-host/tests/multi_adapter_stress.rs",
                 "crates/dragonstui-adapter-host/src/bin/dragonstui_adapter_host_mock.rs",
                 "crates/dragonstui-adapter-host/src/manager.rs",

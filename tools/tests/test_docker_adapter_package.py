@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from docker_adapter_package import build
+from tools.packaging.docker_adapter_package import build
 
 
 class DockerPackageTests(unittest.TestCase):

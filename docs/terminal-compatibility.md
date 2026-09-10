@@ -68,8 +68,8 @@ The repository includes a dependency-free POSIX PTY acceptance helper:
 
 ```sh
 cargo build
-python3 tools/pty_smoke.py --exit q -- target/debug/dragons_tui
-python3 tools/pty_smoke.py --exit ctrl-c -- target/debug/dragons_tui
+python3 -m tools.acceptance.pty_smoke --exit q -- target/debug/dragons_tui
+python3 -m tools.acceptance.pty_smoke --exit ctrl-c -- target/debug/dragons_tui
 ```
 
 It validates application exit, alternate-screen and cursor lifecycle sequences, mouse enable/disable sequences, canonical/echo restoration, resize delivery, keyboard input, SGR mouse input, and command-palette entry. It deliberately does not claim visual validation in any named terminal emulator.

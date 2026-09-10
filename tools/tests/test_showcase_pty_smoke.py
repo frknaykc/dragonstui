@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 from pathlib import Path
 
 
-HARNESS_PATH = Path(__file__).with_name("showcase_pty_smoke.py")
+HARNESS_PATH = Path(__file__).resolve().parents[1] / "acceptance/showcase_pty_smoke.py"
 SPEC = importlib.util.spec_from_file_location(
     "showcase_pty_smoke",
     HARNESS_PATH,

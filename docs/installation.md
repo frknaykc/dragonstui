@@ -3,12 +3,10 @@
 For a short explanation of the applications, a keyboard tour, and the adapter
 workflow, see the [first 10 minutes user guide](user-guide.md).
 
-This guide covers the v0.1.0 native bundles prepared by R1 and the current R2
-first-run behavior. **There is no public release download yet.** Obtain the
-matching archive and checksum from the project's **Release packaging** Actions
-run (the `release-*` CI artifacts), or build a local bundle using
-[release packaging](release-packaging.md). Public release assets remain an
-explicit R6 publication step.
+This guide covers the v0.1.0 native bundles and the current first-run behavior.
+Download the matching archive and checksum from the public
+[v0.1.0 GitHub Release](https://github.com/frknaykc/dragonstui/releases/tag/v0.1.0),
+or build a local bundle using [release packaging](release-packaging.md).
 
 ## Choose a package
 
@@ -30,8 +28,7 @@ README screenshots use 160 × 48 cells. See
 ## Verify, extract, and install
 
 Use a directory containing the archive and its matching `<archive>.sha256`
-file. If downloaded as an Actions artifact ZIP, unpack that outer ZIP first.
-Choose **one** platform block below. Commands use a POSIX-compatible shell
+file. Choose **one** platform block below. Commands use a POSIX-compatible shell
 (such as zsh or bash); each block stops on a failed check and extracts into a
 new directory. Do not run an unverified executable.
 

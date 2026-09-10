@@ -22,7 +22,7 @@ import tarfile
 import tempfile
 import tomllib
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 BINARIES = ("dragons_tui", "dragonstui-showcase", "dragonstui-adapter",
             "dragonstui-adapter-host-mock")
 PLATFORMS = ("macos-arm64", "linux-x86_64")
@@ -221,7 +221,7 @@ def verify(version: str, platform: str, archive: Path, checksum: Path,
             if not help_output.strip() or "\x1b" in help_output:
                 raise ValueError(f"empty or terminal-control --help output: {name}")
         run_checked([sys.executable, "-I", "-c", PTY_WRAPPER,
-                     str(root / "tools/pty_smoke.py"), str(extracted / "dragons_tui")],
+                     str(root / "tools/acceptance/pty_smoke.py"), str(extracted / "dragons_tui")],
                     extracted, env, timeout=20)
         verify_user_install(extracted, env, version)
 

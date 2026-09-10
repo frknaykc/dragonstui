@@ -9,10 +9,10 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
-from adapter_conformance import Suite
+from tools.adapters.adapter_conformance import Suite
 
-ROOT = Path(__file__).resolve().parents[1]
-CLI = ROOT / "tools/adapter_conformance.py"
+ROOT = Path(__file__).resolve().parents[2]
+CLI = ROOT / "tools/adapters/adapter_conformance.py"
 FIXTURE = ROOT / "tools/fixtures/conformance_adapter.py"
 
 
@@ -159,7 +159,7 @@ class ConformanceCliTests(unittest.TestCase):
         # Fault injection at the cleanup/report seam; no executable is launched.
         peer = Mock(stderr_bytes=0)
         peer.close.return_value = {"reaped": True, "forced": False, "cleanup_error": True}
-        with patch("adapter_conformance.Peer", return_value=peer), patch.object(Suite, "handshake"), \
+        with patch("tools.adapters.adapter_conformance.Peer", return_value=peer), patch.object(Suite, "handshake"), \
              patch.object(Suite, "declarations"), patch.object(Suite, "shutdown"):
             report = Suite(["unused"], {"schema_version": 1}, "sample", None, 1).run()
         self.assertEqual(report["status"], "failed")

@@ -40,8 +40,8 @@ platform toolchain. Run at the repository root. For macOS ARM64:
 
 ```sh
 MACOSX_DEPLOYMENT_TARGET=14.0 cargo build --locked --release --workspace --features adapter-showcase --bins --target aarch64-apple-darwin
-python3 tools/release_package.py build --version 0.1.0 --platform macos-arm64 --bin-dir target/aarch64-apple-darwin/release --output target/dist
-python3 tools/release_package.py verify --version 0.1.0 --platform macos-arm64 --archive target/dist/dragonstui-v0.1.0-macos-arm64.tar.gz --checksum target/dist/dragonstui-v0.1.0-macos-arm64.tar.gz.sha256
+python3 -m tools.packaging.release_package build --version 0.1.0 --platform macos-arm64 --bin-dir target/aarch64-apple-darwin/release --output target/dist
+python3 -m tools.packaging.release_package verify --version 0.1.0 --platform macos-arm64 --archive target/dist/dragonstui-v0.1.0-macos-arm64.tar.gz --checksum target/dist/dragonstui-v0.1.0-macos-arm64.tar.gz.sha256
 ```
 
 For Linux, build natively on Ubuntu 22.04 with target

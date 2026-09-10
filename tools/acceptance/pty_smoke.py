@@ -5,7 +5,7 @@ This is a dependency-free acceptance helper. It validates lifecycle escape seque
 resize delivery, clean application exit, and canonical/echo restoration for a supplied
 binary. Example:
 
-    python3 tools/pty_smoke.py --exit q -- target/debug/dragons_tui
+    python3 -m tools.acceptance.pty_smoke --exit q -- target/debug/dragons_tui
 """
 
 from __future__ import annotations

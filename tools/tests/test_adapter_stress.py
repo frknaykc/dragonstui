@@ -4,7 +4,7 @@ import tempfile
 import time
 import unittest
 
-from adapter_stress import cpu_seconds, parse_ps, run_case, summarize_samples
+from tools.adapters.adapter_stress import cpu_seconds, parse_ps, run_case, summarize_samples
 
 
 class ResourceParsingTests(unittest.TestCase):

@@ -3,7 +3,7 @@
 import unittest
 from unittest import mock
 
-import pty_smoke
+from tools.acceptance import pty_smoke
 
 
 class ReadDeadlineTests(unittest.TestCase):

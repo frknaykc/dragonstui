@@ -2,7 +2,7 @@
 
 ## Context
 
-DragonsTUI is an immediate-mode terminal UI library. Each application redraw creates a `Frame`, derives `Rect`s with `Layout`, paints primitives directly into that frame, and hands the resulting buffer to `Runtime` for diff-based terminal output. The demo dashboard follows that model in `src/main.rs`.
+DragonsTUI is an immediate-mode terminal UI library. Each application redraw creates a `Frame`, derives `Rect`s with `Layout`, paints primitives directly into that frame, and hands the resulting buffer to `Runtime` for diff-based terminal output. The demo dashboard follows that model in `apps/dashboard/main.rs`.
 
 M19 assesses whether the current repository has a concrete need for a common component or widget abstraction. This record is deliberately based on the checked-in primitives, tests, and dashboard rather than on a speculative React-like architecture.
 

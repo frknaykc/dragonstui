@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-import release_package as release
+from tools.packaging import release_package as release
 
 
 class ReleasePackageTests(unittest.TestCase):
@@ -27,8 +27,10 @@ class ReleasePackageTests(unittest.TestCase):
         (self.root / "docs").mkdir()
         (self.root / "docs/installation.md").write_bytes(
             (release.ROOT / "docs/installation.md").read_bytes())
-        (self.root / "tools").mkdir()
-        (self.root / "tools/pty_smoke.py").write_bytes((release.ROOT / "tools/pty_smoke.py").read_bytes())
+        (self.root / "tools/acceptance").mkdir(parents=True)
+        (self.root / "tools/acceptance/pty_smoke.py").write_bytes(
+            (release.ROOT / "tools/acceptance/pty_smoke.py").read_bytes()
+        )
         self.bins = self.base / "bin"
         self.bins.mkdir()
         for name in release.BINARIES:

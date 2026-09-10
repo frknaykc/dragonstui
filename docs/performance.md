@@ -23,7 +23,7 @@ The M19 decision remains unchanged: no widget tree, retained component model, dy
 | Timing | `std::time::Instant`, seven samples per case, median reported |
 | Terminal writer | in-memory `Vec<u8>`; no terminal emulator, I/O, or network latency |
 
-The reproducible harness is `src/bin/dragonstui_measure.rs`. Run `cargo run --release --bin dragonstui_measure` for measurements or append `-- --list` to inspect its scenario groups. It uses `std::hint::black_box`, bounded scenario-specific iteration counts, and reports nanoseconds per operation.
+The reproducible harness is `tools/measure/dragonstui_measure.rs`. Run `cargo run --release --bin dragonstui_measure` for measurements or append `-- --list` to inspect its scenario groups. It uses `std::hint::black_box`, bounded scenario-specific iteration counts, and reports nanoseconds per operation.
 
 ## Scenarios
 
