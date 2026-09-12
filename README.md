@@ -4,176 +4,260 @@
 
 **English** | [Türkçe](README.tr.md)
 
-An explicit immediate-mode Rust terminal UI framework with a process-isolated, capability-driven adapter host for interactive developer tooling.
-
 [![CI](https://github.com/frknaykc/dragonstui/actions/workflows/ci.yml/badge.svg)](https://github.com/frknaykc/dragonstui/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/frknaykc/dragonstui)](LICENSE)
 [![Rust 2024](https://img.shields.io/badge/Rust-2024-dea584?logo=rust)](Cargo.toml)
 [![GitHub stars](https://img.shields.io/github/stars/frknaykc/dragonstui?style=flat)](https://github.com/frknaykc/dragonstui/stargazers)
 
+DragonsTUI is an open-source **immediate-mode Rust terminal UI framework** for building interactive terminal applications where rendering, layout, focus, and input routing stay explicit in the application.
+The core crate is `dragons_tui` (`package name: dragons_tui`, `version 0.1.0`, MIT).
+The optional `dragonstui-adapter-host` crate adds **process-isolated adapter hosting**, local registry/installer flows, and an authenticated controller surface for external providers.
 
-DragonsTUI is for terminal applications that need direct control over rendering, state, input routing, and terminal output. The core framework stays dependency-light and explicit; the optional adapter host adds supervised external processes, generic capabilities, diagnostics, and local management tooling without embedding domain-specific integrations into the UI engine.
+## Category and core problem
 
-## Why DragonsTUI?
+DragonsTUI is for terminal application developers who need:
 
-Most terminal applications eventually need application-specific layout, focus, event routing, and redraw policy. DragonsTUI keeps those decisions visible:
+- deterministic redraw behavior,
+- explicit ownership of UI state,
+- bounded terminal interaction policy,
+- and optional external capability access without embedding those providers into the core UI engine.
 
-```text
-application state → layout → explicit primitive rendering → Frame → Buffer → diff → terminal
-```
+It is not a backend service and does not require a network to run the core dashboard.
 
-There is no retained component tree, virtual DOM, automatic event bubbling, or framework-owned application state. Applications compose primitives and own the state that drives them.
+## What is included
 
-## Features
+DragonsTUI has two related parts:
 
-- Explicit immediate-mode rendering with frame-buffer diffing and ANSI terminal output.
-- Unicode-width-aware text plus grapheme-aware text input and multiline editing.
-- Layout, panels, rich text, lists, tables, trees, viewports, focus state, mouse input, modals, and a command palette.
-- Canvas, animation, spinners, progress bars, gauges, sparklines, and a Dragonfire showcase theme.
-- A process-isolated adapter host with JSON Lines protocol v1, handshakes, generic RPC, events, bounded queues, and diagnostics.
-- Provider-neutral adapter registry metadata and SHA-256-verified, atomically staged installation.
-- Authenticated local controller daemon with typed management IPC for runtime start, stop, restart, and diagnostics.
-- An optional adapter-aware showcase that keeps core framework consumers free of adapter-management dependencies.
-- Generic semantic observability projections for producer-declared Logs, Metrics, Status, Events, and Errors.
-- Adapter conformance tooling, multi-adapter stress coverage, explicit crash recovery, and enforced protocol/resource limits.
+1. **Core framework (`dragons_tui`)**
+   - Rendering pipeline: `application state → layout → explicit render → Frame → Buffer → diff → terminal`.
+   - No retained component tree, no `Widget` trait, no automatic event bubbling, and no framework-owned application state.
+   - Primitives for text, panel layout, lists/tables/trees, editors, overlays, focus, and simple visual widgets.
 
-## Screenshots
+2. **Optional adapter host workspace (`dragonstui-adapter-host`)**
+   - Newline-delimited JSON protocol v1 over process stdin/stdout.
+   - Local installer and CLI (`dragonstui-adapter`) for discover/install/update/remove/start/stop/restart.
+   - Authenticated local controller daemon for lifecycle and diagnostics.
+   - Reference mock (`dragonstui-adapter-host-mock`) used only as a fixture provider.
+
+## In short (project identity)
+
+If you need the key identity in one read:
+
+- Project name: **DragonsTUI**.
+- Category: **Immediate-mode terminal UI framework + optional adapter host runtime**.
+- Primary users: **Rust developers building terminal UIs with explicit control**.
+- Solves: **UI composition/own-state complexity and optional capability integration without hard-wiring providers into the core engine**.
+- Core install path: source checkout with `cargo`, or native release archives.
+- Self-hosting: yes (local binaries and local source build).
+- API model: library API, CLI, and binaries.
+- Not included by default: no MCP server and no implicit provider sandbox.
+
+## Screenshots (non-authoritative; images are illustrative)
 
 ### Opening splash
 
-![DragonsTUI loading splash](assets/dragonstui-loading.png)
+![DragonsTUI loading splash screen shown at startup in a terminal UI](assets/dragonstui-loading.png)
 
-### Main showcase
+### Showcase overview
 
-![DragonsTUI showcase Overview](assets/dragonstui-showcase.png)
+![DragonsTUI showcase overview panel with tabs and command controls in a terminal UI](assets/dragonstui-showcase.png)
 
-The Overview screen appears after the splash transition.
+### Widgets and panels
 
-### Widgets
+![DragonsTUI widget demo showing text, list, table, tree, and viewport controls](assets/dragonstui-widgets.png)
 
-![DragonsTUI widgets, table, tree and viewport](assets/dragonstui-widgets.png)
-
-These screenshots were refreshed on September 9, 2026 from the running `dragonstui-showcase` release binary in macOS Terminal at 160 × 48 cells, including the corrected opening-title alignment. They show local fixture/demo data, not live provider telemetry. Terminal fonts and colors can differ on other systems.
+These screenshots show demo data and local fixtures. They are not live provider telemetry.
 
 ## Quick Start
 
-New here? Follow the [first 10 minutes user guide](docs/user-guide.md) to learn
-which application to open, navigate the showcase, and add a trusted adapter.
-
-For packaged binaries, start with [Installation and first run](docs/installation.md):
-user-local installation, shared adapter paths, empty states, update and uninstall.
-Download the native bundles and matching SHA-256 files from the public [v0.1.0 GitHub Release](https://github.com/frknaykc/dragonstui/releases/tag/v0.1.0).
-
-DragonsTUI declares Rust edition 2024 and does not currently declare an MSRV. Use a Rust toolchain that supports edition 2024.
+### 1) Build and run from source
 
 ```sh
 git clone https://github.com/frknaykc/dragonstui.git
 cd dragonstui
 cargo build
+
+# default dashboard
 cargo run --release
 ```
 
-`cargo run --release` starts the default dashboard (`dragons_tui`), not the screenshot showcase. To open the interface pictured above, use the feature-gated command below.
-
-The repository also includes focused examples under [`examples/`](examples/): direct rendering, layout, input, tables, animation, and Braille canvas drawing.
-
-## Showcase
-
-The `dragonstui-showcase` binary demonstrates the framework primitives and the optional adapter-aware interface:
+`cargo run --release` runs the `dragons_tui` dashboard.
 
 ```sh
+# adapter-aware demo
 cargo run --release --features adapter-showcase --bin dragonstui-showcase
 ```
 
-To inspect a local adapter root without executing discovered adapters:
+### 2) Use optional adapter root with source build
 
 ```sh
-cargo run --release --features adapter-showcase --bin dragonstui-showcase -- --adapter-root <path>
+mkdir -p "$HOME/.local/share/dragonstui/adapters"
+cargo run --release --features adapter-showcase --bin dragonstui-showcase -- --adapter-root "$HOME/.local/share/dragonstui/adapters"
 ```
 
-Controls verified in the running showcase:
+If the root is empty, `dragonstui-showcase` shows an empty Adapters section by design.
 
-- `Enter` or `Space` continues from the opening splash.
-- `1`–`8` select sections; visible header tabs also support mouse selection.
-- `Tab` moves focus; arrow keys navigate or edit the focused primitive.
-- `Ctrl+P` opens the command palette; `m` opens the modal.
-- `q` or `Ctrl+C` exits and restores the terminal.
+### 3) Minimal adapter CLI check (evidence-style example)
 
-## Architecture
+```sh
+dragonstui-adapter --root "$HOME/.local/share/dragonstui/adapters" list
+```
 
-The core framework is independent of the adapter ecosystem. Its optional application integration follows this runtime path:
+Expected result pattern: command output shows adapter list columns and no rows on an empty root; stderr provides first-run guidance for creating/using a root and installing providers.
+
+### 4) Release binaries (v0.1.0)
+
+Current documented packages:
+
+| Platform | Archive |
+| --- | --- |
+| Apple Silicon macOS | `dragonstui-v0.1.0-macos-arm64.tar.gz` |
+| Linux x86_64 (GNU libc) | `dragonstui-v0.1.0-linux-x86_64.tar.gz` |
+
+SHA-256 verification is checksum-based integrity only, not publisher signing.
+
+```sh
+# macOS example
+mkdir -p dragonstui-0.1.0-macos-arm64
+shasum -a 256 -c dragonstui-v0.1.0-macos-arm64.tar.gz.sha256
+tar -xzf dragonstui-v0.1.0-macos-arm64.tar.gz -C dragonstui-0.1.0-macos-arm64
+cd dragonstui-0.1.0-macos-arm64
+```
+
+See [Installation and first run](docs/installation.md) for full checksum commands, PATH setup, update, uninstall, and troubleshooting.
+
+## Interfaces and usage paths
+
+### Library API (`dragons_tui`)
+
+The framework is consumed as a Rust library from `dragons_tui::*`.
+See [docs/public-api.md](docs/public-api.md) for the current public surface.
+Examples in `examples/` are runnable and cover explicit rendering, layout, input, table, and canvas flows.
+
+### CLI (`dragonstui-adapter`)
+
+Management commands are text and plain terminal oriented:
 
 ```text
-showcase / application
-        ↓
-ControllerManagementClient
-        ↓ authenticated local IPC
-controller daemon
-        ↓
-AdapterManager
-        ↓
-adapter process
+dragonstui-adapter search [query] --registry <source>
+dragonstui-adapter list
+dragonstui-adapter info <id>
+dragonstui-adapter install <id> --registry <source> [--version <semver>]
+dragonstui-adapter update <id> --registry <source>
+dragonstui-adapter remove <id> --yes
+dragonstui-adapter start <id>
+dragonstui-adapter stop <id>
+dragonstui-adapter restart <id>
 ```
 
-The controller daemon is the runtime lifecycle authority. The showcase uses the typed client for start, stop, restart, and diagnostics rather than creating an in-process runtime manager. Installer, update, and remove operations retain their host-side filesystem and transaction boundaries.
+See [docs/adapter-management.md](docs/adapter-management.md) for the exact command behavior and lifecycle details.
 
-## Adapter Ecosystem
+### Binaries
 
-`dragonstui-adapter-host` runs adapters as supervised external processes rather than in-process plugins. The child boundary isolates crashes, dependencies, and language runtimes from the framework and controller.
+- `dragons_tui` (default dashboard)
+- `dragonstui-showcase` (UI demo + optional adapter section)
+- `dragonstui-adapter` (plain-terminal CLI)
+- `dragonstui-adapter-host-mock` (protocol fixture provider)
 
-Adapters describe generic capabilities through protocol v1. Names such as `containers.logs` are capability examples, not built-in integrations. The optional [Docker adapter](docs/docker-adapter.md) provides real container data, confirmed lifecycle actions and a target-bound text shell as a separate Python executable. Install it explicitly from a reviewed checkout; the four native binary bundles do not install domain providers. There is no bundled Git, PostgreSQL, Kubernetes, process, port or database adapter. The Section 8 Capability Browser groups live controller diagnostics by opaque capability contract and lists the adapters currently reporting each contract; it does not invoke capabilities or consume their data.
+### MCP and other external protocol support
 
-The bundled **reference mock adapter** exercises RPC, observability, actions and interactive echo sessions without Docker, Git or external services. It is a fixture provider, not a real shell or domain adapter. See the [reference mock guide](docs/reference-mock-adapter.md) for isolated setup and end-to-end acceptance.
+The repository documentation does not define an MCP (Model Context Protocol) server or MCP toolset. Protocol integration is through the DragonsTUI adapter protocol v1 in `dragonstui-adapter-host`.
 
-External developers can implement the existing contract using the [Adapter SDK Specification](docs/adapter-sdk-specification.md), including Rust/Go/Python portability guidance, and run explicitly selected protocol/lifecycle scenarios with the POSIX [Adapter Conformance Suite](docs/adapter-conformance.md). Unrequested surfaces are reported as skipped; a passing scenario report is not a sandbox, security certificate or complete adapter certification.
+## How it works
 
-The [multi-adapter stress harness](docs/adapter-stress-testing.md) checks bounded event overflow and correlated RPC under local mock load, with opt-in release CPU/RSS measurements.
+### Core framework rendering path
 
-[Crash and recovery hardening](docs/adapter-crash-recovery.md) covers terminal failure classification, stable diagnostics, backpressure and explicit recovery with healthy-peer isolation. It adds no automatic restart policy or general process-tree containment guarantee.
+```
+application state
+  └─ layout calculation
+      └─ primitive.render(...)
+          └─ Frame
+              └─ Buffer
+                  └─ diff(previous, current)
+                      └─ runtime/terminal output
+```
 
-[Adapter host limits](docs/adapter-limits.md) document bounded wire/manifest reads, stream-rate termination, request admission, timeout and executable-path budgets, including compatibility and enforcement limits.
+The application owns layout, focus order, event routing, overlay priority, redraw policy, and terminal cursor behavior.
 
-[Adapter host performance](docs/adapter-performance.md) provides an opt-in release measurement matrix for serialization, RPC, streaming and scheduling, with local raw results and explicit measurement limits.
+### Optional adapter flow
 
-[Adapter ecosystem showcase](docs/adapter-ecosystem-showcase.md) follows an isolated registry CLI install through real TUI observations, actions, provider crash, explicit restart and diagnostics, with reconstructed PTY frames and reproducible acceptance commands.
+```text
+showcase/CLI
+   -> ControllerManagementClient (authenticated loopback IPC)
+      -> local controller daemon
+         -> adapter process (protocol v1 over stdin/stdout)
+```
 
-[Adapter release readiness](docs/adapter-release-readiness.md) records the M74 source audit, controller/CLI boundary fixes, local package verification and remaining release/platform limits. It is not a public release announcement.
+Install actions do not start adapters. Start/restart/stop/diagnostics are explicit.
 
-[Release packaging](docs/release-packaging.md) defines the v0.1.0 macOS ARM64/Linux x86_64 bundles, SHA-256 verification, isolated package smoke tests and tag-gated GitHub Release workflow. R1 prepared the pipeline; R6 published the public v0.1.0 release.
+## Use cases
 
-Read the details:
+- Build terminal dashboards or inspectors with precise screen control.
+- Render structured terminal UI elements (lists, tables, trees, viewported panels).
+- Add optional provider-based capabilities via adapter registry and runtime lifecycle controls.
+- Run protocol conformance and lifecycle experiments using the reference mock provider.
+- Inspect provider logs, metrics, status, timeline/error streams through the showcase inspector views.
 
-- [Adapter host architecture](docs/architecture/adapter-host.md)
-- [Adapter protocol v1](docs/adapter-protocol-v1.md)
-- [Adapter distribution and management](docs/adapter-management.md)
+## Requirements and compatibility
 
-## Project Status
+### Required for all users
 
-DragonsTUI is under active development and remains pre-1.0. The core framework, adapter-host foundations, distribution, observability, actions and developer-tooling views are implemented. The reference mock, conformance suite and SDK specification are complete through M68; M69–M71 add stress coverage, crash recovery and protocol/resource limits. The SDK specification does not include published language SDKs.
+- Rust toolchain supporting **edition 2024** (no MSRV is declared).
+- Interactive terminal with ANSI support, cursor and alternate-screen behavior, and Unicode-capable input/output for full feature operation.
+- 24-bit SGR color output is used for Dragonfire theme values; there is no palette fallback.
 
-| Area | Status |
-| --- | --- |
-| Framework foundation | Complete |
-| Adapter host foundation | Complete |
-| Distribution and management | Complete (M35–M43) |
-| Generic live data | Complete (M44–M47) |
-| Generic inspector UX | Complete (M48–M52) |
-| Observability | Complete (M53–M58) |
-| Adapter actions | Complete (M59–M62) |
-| Developer tooling views | Complete (M63–M65) |
-| Reference mock adapter | Complete (M66; locally verified) |
-| Adapter conformance suite | Complete (M67; locally verified) |
-| SDK specification | Complete (M68; specification only, no published language SDKs) |
-| Multi-adapter stress testing | Complete (M69; release measurement matrix, local gates and remote CI passed) |
-| Crash and recovery hardening | Complete (M70; local recovery regressions and required gates verified) |
-| Protocol and security limits | Complete (M71; local limits regressions, required gates and independent review verified) |
-| Adapter host performance | Complete (M72; release baseline, local gates and independent review verified; no production optimization claimed) |
+### Supported installation targets
 
-Adapter distribution and management includes registry/install/update/remove integrity boundaries, CLI and TUI management, typed authenticated controller IPC, per-adapter lifecycle conflict protection, real PTY acceptance, and M43 capability discovery. Generic live data transports adapter events away from the UI thread into bounded retained history, derives opaque text and identity filters, and supports pause/follow selection without stopping ingestion. Generic Inspector UX provides reusable layout, viewport, property, and structured-data primitives. The optional showcase projects only producer-declared `Observation` variants into a Log Viewer, time-series graph, heatmap, status matrix, Timeline, and Error/Stack Trace view; it never derives those classes from arbitrary payload JSON, stream, or `kind` text. Each projection is rebuilt from the retained 16-entry live history, so it does not create an unbounded telemetry store. M59–M60 add producer-declared generic action metadata and confirmation policy through the authenticated controller path; confirmation is UI protection against accidental dispatch, not a permission system.
+- macOS release archives: Apple Silicon (`aarch64`) only.
+- Linux release archives: `x86_64` GNU libc 2.35 compatible environment.
+- Core framework is built from source and does not hard-code a required OS in library logic, but release bundles are not listed for Windows / Intel macOS / Linux ARM64.
+- Terminal details and fallback behavior are documented in [docs/terminal-compatibility.md](docs/terminal-compatibility.md).
 
-## Development
+### Optional adapter requirements
 
-Run the workspace checks before opening a change:
+- **Docker adapter** (separate domain adapter): Python 3.10+ and Docker CLI/Engine.
+- **Non-interactive agent adapters** and optional provider docs have separate runtime requirements in their own guides.
+
+## Configuration, data, and credentials
+
+- Core dashboard and showcase do **not** use a persisted UI config file.
+- `dragonstui-showcase` does not read adapter root unless `--adapter-root` is provided.
+- `dragonstui-adapter` defaults CLI root to `./adapters` in current working directory.
+- The controller writes local endpoint state (including tokens) under `<root>/.controller/endpoint.json`; tokens are private local credentials.
+- Do not print, share, or pass endpoint tokens via issue reports.
+
+## Limitations (verified from docs and code)
+
+- No trusted sandbox model for adapters; provider processes run with user permissions.
+- No automatic restart policy in core flow.
+- No automatic provider start on showcase install.
+- No GUI/web runtime and no terminal database/emoji/font negotiation layer.
+- OSC 8 hyperlinks are deferred; no `TerminalCapabilities` API yet.
+- No automatic update/daemon shutdown command for the controller.
+- No MCP server documented in repository.
+- Release bundles include only four binaries and the repository does not include domain adapters by default (no bundled Git/PostgreSQL/Kubernetes/port/db adapters).
+
+## When DragonsTUI is a good fit
+
+Choose DragonsTUI when you need:
+
+- explicit terminal UI control over rendering and state,
+- a lightweight Rust library instead of a retained component framework,
+- and optional local provider lifecycle control for external capabilities.
+
+## When to consider another approach
+
+Prefer other projects if you need:
+
+- automatic VDOM/component-tree behavior,
+- a hosted SaaS model instead of local self-hosted binaries,
+- a built-in MCP server or pre-integrated proprietary adapter marketplace,
+- guaranteed Windows-specific terminal guarantees as a first-class supported target.
+
+## Project status and maturity
+
+Versioned at `0.1.0` with active pre-1.0 status (as declared in docs).
+Release packaging and adapter-host behavior are documented in docs, with explicit checks and update/uninstall procedures.
 
 ```sh
 cargo fmt --check
@@ -186,11 +270,23 @@ cargo test --features adapter-showcase --bin dragonstui-showcase
 cargo clippy --features adapter-showcase --bin dragonstui-showcase -- -D warnings
 ```
 
-Additional technical notes cover the [immediate-mode decision](docs/architecture/component-model.md), [public API](docs/public-api.md), [performance measurements](docs/performance.md), and [terminal compatibility](docs/terminal-compatibility.md).
+## Documentation map
 
-## Contributing
+- [User guide](docs/user-guide.md): 10-minute onboarding flow.
+- [Installation and first run](docs/installation.md): releases, checksums, roots, update/uninstall.
+- [Public API](docs/public-api.md): library surface and explicit ownership model.
+- [Adapter management](docs/adapter-management.md): registry/install/update/remove and CLI behavior.
+- [Protocol v1](docs/adapter-protocol-v1.md): message envelope and message contract.
+- [Protocol SDK specification](docs/adapter-sdk-specification.md): cross-language guidance.
+- [Adapter architecture](docs/architecture/adapter-host.md) and [component model](docs/architecture/component-model.md).
+- [Terminal compatibility](docs/terminal-compatibility.md): real tested matrix and protocol boundaries.
+- [Reference mock](docs/reference-mock-adapter.md): isolated fixture provider for experimentation.
+- [Docker adapter](docs/docker-adapter.md): optional real provider and operational requirements.
+- [Non-interactive agent adapters](docs/agent-adapters.md): optional local provider examples.
 
-Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) for issue expectations, focused PR guidance, local checks, and adapter protocol compatibility requirements.
+## Contributing and operations docs
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) before opening PRs.
 
 ## License
 
